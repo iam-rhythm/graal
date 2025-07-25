@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2018, Oracle and/or its affiliates.
+ * Copyright (c) 2016, 2022, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -29,9 +29,14 @@
  */
 package com.oracle.truffle.llvm.runtime.datalayout;
 
-import java.util.ArrayList;
+import static java.nio.ByteOrder.BIG_ENDIAN;
+import static java.nio.ByteOrder.LITTLE_ENDIAN;
+
+import java.nio.ByteOrder;
 import java.util.Arrays;
 import java.util.List;
+
+import com.oracle.truffle.llvm.runtime.except.LLVMParserException;
 
 final class DataLayoutParser {
 
@@ -40,8 +45,12 @@ final class DataLayoutParser {
         private final DataLayoutType type;
         private final int[] values;
 
-        private DataTypeSpecification(DataLayoutType type, int size, int abiAlignment, int preferredAlignment) {
+        private DataTypeSpecification(DataLayoutType type, int size, int abiAlignment, int preferredAlignment) throws UnsupportedDataTypeSpecificationException {
             assert type == DataLayoutType.INTEGER || type == DataLayoutType.POINTER || type == DataLayoutType.FLOAT;
+            if (type == DataLayoutType.POINTER && !(size == 64 && abiAlignment == 64 && preferredAlignment == 64)) {
+                throw new UnsupportedDataTypeSpecificationException(String.format(
+                                "Only 64-bit size/alignment/preferred supported for pointers: %d, %d, %d", size, abiAlignment, preferredAlignment));
+            }
             this.type = type;
             this.values = new int[]{size, abiAlignment, preferredAlignment};
         }
@@ -110,15 +119,42 @@ final class DataLayoutParser {
         specs.add(newSpec);
     }
 
-    static List<DataTypeSpecification> parseDataLayout(String layout) {
+    private static void replace(List<DataTypeSpecification> specs, DataTypeSpecification newSpec) {
+        for (DataTypeSpecification spec : specs) {
+            if (spec.type == newSpec.type && spec.getSize() == newSpec.getSize()) {
+                specs.remove(spec);
+                specs.add(newSpec);
+                return;
+            }
+        }
+        specs.add(newSpec);
+    }
+
+    /**
+     * Parses the LLVM data layout string.
+     *
+     * @see <a href="https://llvm.org/docs/LangRef.html#data-layout">Data Layout</a>
+     * @param layout The data layout string
+     * @param specs list to collect data type specifications
+     * @return the byte order specified by the data layout
+     */
+    static ByteOrder parseDataLayout(String layout, List<DataTypeSpecification> specs) {
+        ByteOrder byteOrder = LITTLE_ENDIAN;
         String[] layoutSpecs = layout.split("-");
-        List<DataTypeSpecification> specs = new ArrayList<>();
         for (String spec : layoutSpecs) {
+            if (spec.equals("E")) {
+                byteOrder = BIG_ENDIAN;
+                continue;
+            }
+            if (spec.equals("e")) {
+                byteOrder = LITTLE_ENDIAN;
+                continue;
+            }
             // at the moment, we are only interested in a small subset of all identifiers
             DataLayoutType type = getDataType(spec);
             DataTypeSpecification dataTypeSpec = createDataTypeSpec(type, spec);
             if (dataTypeSpec != null) {
-                specs.add(dataTypeSpec);
+                replace(specs, dataTypeSpec);
             }
         }
 
@@ -132,36 +168,7 @@ final class DataLayoutParser {
             }
         }
 
-        // Add specs for 32 bit float and 64 bit double which are supported on all targets
-        // http://releases.llvm.org/3.9.0/docs/LangRef.html#data-layout
-        addIfMissing(specs, new DataTypeSpecification(DataLayoutType.FLOAT, Float.SIZE, Float.SIZE, Float.SIZE));
-        addIfMissing(specs, new DataTypeSpecification(DataLayoutType.FLOAT, Double.SIZE, Double.SIZE, Double.SIZE));
-
-        // FIXME:work around to handle pointer type in LLVM 3.9.0 bitcode format
-        checkPointerType(specs);
-        return specs;
-    }
-
-    private static void checkPointerType(List<DataTypeSpecification> specs) {
-        boolean isPointerTypeFound = false;
-        for (DataTypeSpecification spec : specs) {
-            if (spec.type == DataLayoutType.POINTER) {
-                isPointerTypeFound = true;
-                break;
-            }
-        }
-        if (!isPointerTypeFound) {
-            // Add a pointer datatype with size = largest integer size
-            int largestIntegerTypeSize = -1;
-            for (DataTypeSpecification spec : specs) {
-                if (spec.type == DataLayoutType.INTEGER && spec.getSize() > largestIntegerTypeSize) {
-                    largestIntegerTypeSize = spec.getSize();
-                }
-            }
-            if (largestIntegerTypeSize > 0) {
-                specs.add(new DataTypeSpecification(DataLayoutType.POINTER, largestIntegerTypeSize, largestIntegerTypeSize, largestIntegerTypeSize));
-            }
-        }
+        return byteOrder;
     }
 
     private static DataTypeSpecification createDataTypeSpec(DataLayoutType type, String spec) {
@@ -177,6 +184,11 @@ final class DataLayoutParser {
             return new DataTypeSpecification(type, size, abiAlignment, preferredAlignment);
         } else if (type == DataLayoutType.POINTER) {
             assert components.length >= 2;
+            int addrSpace = components[0].isEmpty() ? 0 : convertToInt(components, 0);
+            if (addrSpace != 0) {
+                // Ignore a pointer type spec with the address space other than 0
+                return null;
+            }
             int size = convertToInt(components, 1);
             int abiAlignment = convertToInt(components, 2, size);
             int preferredAlignment = convertToInt(components, 3, abiAlignment);
@@ -220,5 +232,15 @@ final class DataLayoutParser {
         } else {
             return null;
         }
+    }
+
+    public static final class UnsupportedDataTypeSpecificationException extends LLVMParserException {
+
+        private static final long serialVersionUID = 1L;
+
+        UnsupportedDataTypeSpecificationException(String message) {
+            super(message);
+        }
+
     }
 }

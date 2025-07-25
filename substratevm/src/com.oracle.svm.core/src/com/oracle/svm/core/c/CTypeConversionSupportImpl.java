@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2023, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -26,32 +26,49 @@ package com.oracle.svm.core.c;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.EnumSet;
 
-import org.graalvm.nativeimage.Feature;
 import org.graalvm.nativeimage.ImageSingletons;
-import org.graalvm.nativeimage.PinnedObject;
 import org.graalvm.nativeimage.c.type.CCharPointer;
+import org.graalvm.nativeimage.c.type.CCharPointerPointer;
 import org.graalvm.nativeimage.c.type.CTypeConversion.CCharPointerHolder;
+import org.graalvm.nativeimage.c.type.CTypeConversion.CCharPointerPointerHolder;
 import org.graalvm.nativeimage.impl.CTypeConversionSupport;
 import org.graalvm.word.Pointer;
 import org.graalvm.word.PointerBase;
 import org.graalvm.word.UnsignedWord;
-import org.graalvm.word.WordFactory;
 
 import com.oracle.svm.core.SubstrateUtil;
-import com.oracle.svm.core.annotate.Alias;
-import com.oracle.svm.core.annotate.AutomaticFeature;
-import com.oracle.svm.core.annotate.TargetClass;
 import com.oracle.svm.core.config.ConfigurationValues;
-import com.oracle.svm.core.snippets.KnownIntrinsics;
+import com.oracle.svm.core.feature.AutomaticallyRegisteredImageSingleton;
+import com.oracle.svm.core.handles.PrimitiveArrayView;
+import com.oracle.svm.core.jdk.DirectByteBufferUtil;
+import com.oracle.svm.core.layeredimagesingleton.InitialLayerOnlyImageSingleton;
+import com.oracle.svm.core.layeredimagesingleton.LayeredImageSingletonBuilderFlags;
 
-class CTypeConversionSupportImpl implements CTypeConversionSupport {
+import jdk.graal.compiler.word.Word;
+
+@AutomaticallyRegisteredImageSingleton(CTypeConversionSupport.class)
+class CTypeConversionSupportImpl implements CTypeConversionSupport, InitialLayerOnlyImageSingleton {
 
     static final CCharPointerHolder NULL_HOLDER = new CCharPointerHolder() {
         @Override
         public CCharPointer get() {
-            return WordFactory.nullPointer();
+            return Word.nullPointer();
+        }
+
+        @Override
+        public void close() {
+            /* Nothing to do. */
+        }
+    };
+
+    static final CCharPointerPointerHolder NULL_POINTER_POINTER_HOLDER = new CCharPointerPointerHolder() {
+        @Override
+        public CCharPointerPointer get() {
+            return Word.nullPointer();
         }
 
         @Override
@@ -87,6 +104,16 @@ class CTypeConversionSupportImpl implements CTypeConversionSupport {
         }
     }
 
+    @Override
+    public String utf8ToJavaString(CCharPointer utf8String) {
+        if (utf8String.isNull()) {
+            return null;
+        } else {
+            // UTF-8 does not break zero-terminated strings.
+            return toJavaStringWithCharset(utf8String, SubstrateUtil.strlen(utf8String), StandardCharsets.UTF_8);
+        }
+    }
+
     private static String toJavaStringWithCharset(CCharPointer cString, UnsignedWord length, Charset charset) {
         byte[] bytes = new byte[(int) length.rawValue()];
         for (int i = 0; i < bytes.length; i++) {
@@ -110,23 +137,31 @@ class CTypeConversionSupportImpl implements CTypeConversionSupport {
 
     @Override
     public UnsignedWord toCString(CharSequence javaString, Charset charset, CCharPointer buffer, UnsignedWord bufferSize) {
-        if (javaString == null || bufferSize.equal(0)) {
-            return WordFactory.zero();
+        if (javaString == null) {
+            throw new IllegalArgumentException("Provided Java string is null");
         }
 
         byte[] baseString = javaString.toString().getBytes(charset);
+        long capacity = bufferSize.rawValue();
 
-        /*
-         * The array length is always an int, so the truncation of the buffer size to int can never
-         * overflow.
-         */
-        int len = (int) Math.min(baseString.length, bufferSize.rawValue());
+        if (buffer.isNull()) {
+            if (capacity != 0) {
+                throw new IllegalArgumentException("Non zero buffer size passed along with nullptr");
+            }
+            return Word.unsigned(baseString.length);
 
-        for (int i = 0; i < len; i++) {
+        } else if (capacity < baseString.length + 1) {
+            throw new IllegalArgumentException("Provided buffer is too small to hold 0 terminated java string.");
+        }
+
+        for (int i = 0; i < baseString.length; i++) {
             buffer.write(i, baseString[i]);
         }
 
-        return WordFactory.unsigned(len);
+        // write null terminator at end
+        buffer.write(baseString.length, (byte) 0);
+
+        return Word.unsigned(baseString.length);
     }
 
     @Override
@@ -137,30 +172,52 @@ class CTypeConversionSupportImpl implements CTypeConversionSupport {
         return new CCharPointerHolderImpl(javaString);
     }
 
-    @TargetClass(className = "java.nio.DirectByteBuffer")
-    @SuppressWarnings("unused")
-    static final class Target_java_nio_DirectByteBuffer {
-        @Alias
-        Target_java_nio_DirectByteBuffer(long addr, int cap) {
+    @Override
+    public CCharPointerPointerHolder toCStrings(CharSequence[] javaStrings) {
+        if (javaStrings == null) {
+            return NULL_POINTER_POINTER_HOLDER;
         }
+        return new CCharPointerPointerHolderImpl(javaStrings);
+    }
+
+    @Override
+    public CCharPointerHolder toCBytes(byte[] bytes) {
+        if (bytes == null) {
+            return NULL_HOLDER;
+        }
+        return new CCharPointerHolderImpl(bytes);
     }
 
     @Override
     public ByteBuffer asByteBuffer(PointerBase address, int size) {
-        ByteBuffer byteBuffer = KnownIntrinsics.unsafeCast(new Target_java_nio_DirectByteBuffer(address.rawValue(), size), ByteBuffer.class);
+        ByteBuffer byteBuffer = DirectByteBufferUtil.allocate(address.rawValue(), size);
         return byteBuffer.order(ConfigurationValues.getTarget().arch.getByteOrder());
+    }
+
+    @Override
+    public EnumSet<LayeredImageSingletonBuilderFlags> getImageBuilderFlags() {
+        return LayeredImageSingletonBuilderFlags.RUNTIME_ACCESS_ONLY;
+    }
+
+    @Override
+    public boolean accessibleInFutureLayers() {
+        return true;
     }
 }
 
 final class CCharPointerHolderImpl implements CCharPointerHolder {
 
-    private final PinnedObject cstring;
+    private final PrimitiveArrayView cstring;
 
     CCharPointerHolderImpl(CharSequence javaString) {
         byte[] bytes = javaString.toString().getBytes();
         /* Append the terminating 0. */
         bytes = Arrays.copyOf(bytes, bytes.length + 1);
-        cstring = PinnedObject.create(bytes);
+        cstring = PrimitiveArrayView.createForReading(bytes);
+    }
+
+    CCharPointerHolderImpl(byte[] bytes) {
+        cstring = PrimitiveArrayView.createForReading(bytes);
     }
 
     @Override
@@ -174,10 +231,41 @@ final class CCharPointerHolderImpl implements CCharPointerHolder {
     }
 }
 
-@AutomaticFeature
-class CTypeConversionFeature implements Feature {
+final class CCharPointerPointerHolderImpl extends CCharPointerPointerHolder {
+
+    private final CCharPointerHolder[] ccpHolderArray;
+    private final PrimitiveArrayView refCCPArray;
+
+    CCharPointerPointerHolderImpl(CharSequence[] csArray) {
+        CTypeConversionSupport cTypeConversion = ImageSingletons.lookup(CTypeConversionSupport.class);
+        /* An array to hold the pinned null-terminated C strings. */
+        ccpHolderArray = new CCharPointerHolder[csArray.length + 1];
+        /* An array to hold the &char[0] behind the corresponding C string. */
+        final CCharPointer[] ccpArray = new CCharPointer[csArray.length + 1];
+        for (int i = 0; i < csArray.length; i += 1) {
+            /* Null-terminate and pin each of the CharSequences. */
+            ccpHolderArray[i] = cTypeConversion.toCString(csArray[i]);
+            /* Save the CCharPointer of each of the CharSequences. */
+            ccpArray[i] = ccpHolderArray[i].get();
+        }
+        /* Null-terminate the CCharPointer[]. */
+        ccpArray[csArray.length] = Word.nullPointer();
+        /* Pin the CCharPointer[] so I can get the &ccpArray[0]. */
+        refCCPArray = PrimitiveArrayView.createForReading(ccpArray);
+    }
+
     @Override
-    public void afterRegistration(AfterRegistrationAccess access) {
-        ImageSingletons.add(CTypeConversionSupport.class, new CTypeConversionSupportImpl());
+    public CCharPointerPointer get() {
+        return refCCPArray.addressOfArrayElement(0);
+    }
+
+    @Override
+    public void close() {
+        /* Close the pins on each of the pinned C strings. */
+        for (int i = 0; i < ccpHolderArray.length - 1; i += 1) {
+            ccpHolderArray[i].close();
+        }
+        /* Close the pin on the pinned CCharPointer[]. */
+        refCCPArray.close();
     }
 }

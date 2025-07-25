@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,12 +40,14 @@
  */
 package com.oracle.truffle.nfi.test;
 
+import static com.oracle.truffle.nfi.test.NFITest.NFITestRootNode.getInterop;
 import static org.hamcrest.CoreMatchers.instanceOf;
 import static org.hamcrest.CoreMatchers.is;
 
 import java.util.HashMap;
 import java.util.Map;
 
+import org.hamcrest.MatcherAssert;
 import org.junit.Assert;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -53,24 +55,33 @@ import org.junit.runner.RunWith;
 import com.oracle.truffle.api.CallTarget;
 import com.oracle.truffle.api.CompilerDirectives;
 import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
+import com.oracle.truffle.api.dsl.Cached;
+import com.oracle.truffle.api.dsl.GenerateUncached;
+import com.oracle.truffle.api.dsl.Specialization;
 import com.oracle.truffle.api.frame.VirtualFrame;
-import com.oracle.truffle.api.interop.CanResolve;
-import com.oracle.truffle.api.interop.ForeignAccess;
 import com.oracle.truffle.api.interop.InteropException;
-import com.oracle.truffle.api.interop.Message;
-import com.oracle.truffle.api.interop.MessageResolution;
-import com.oracle.truffle.api.interop.Resolve;
+import com.oracle.truffle.api.interop.InteropLibrary;
 import com.oracle.truffle.api.interop.TruffleObject;
+import com.oracle.truffle.api.library.CachedLibrary;
+import com.oracle.truffle.api.library.ExportLibrary;
+import com.oracle.truffle.api.library.ExportMessage;
+import com.oracle.truffle.api.nodes.IndirectCallNode;
 import com.oracle.truffle.api.nodes.Node;
+import com.oracle.truffle.api.source.Source;
+import com.oracle.truffle.nfi.api.SignatureLibrary;
 import com.oracle.truffle.tck.TruffleRunner;
 import com.oracle.truffle.tck.TruffleRunner.Inject;
 
 @RunWith(TruffleRunner.class)
+@SuppressWarnings({"truffle-inlining", "truffle-neverdefault", "truffle-sharing"})
 public class RegisterPackageNFITest extends NFITest {
 
+    private static final FunctionRegistry REGISTRY = new FunctionRegistry();
+
+    @ExportLibrary(InteropLibrary.class)
     static class FunctionRegistry implements TruffleObject {
 
-        private final Map<String, TruffleObject> functions;
+        private final Map<String, Object> functions;
 
         @TruffleBoundary
         FunctionRegistry() {
@@ -78,110 +89,100 @@ public class RegisterPackageNFITest extends NFITest {
         }
 
         @TruffleBoundary
-        void add(String name, TruffleObject function) {
+        void clear() {
+            functions.clear();
+        }
+
+        @TruffleBoundary
+        void add(String name, Object function) {
             functions.put(name, function);
         }
 
         @TruffleBoundary
-        TruffleObject get(String name) {
+        Object get(String name) {
             return functions.get(name);
         }
 
-        @Override
-        public ForeignAccess getForeignAccess() {
-            return FunctionRegistryMessageResolutionForeign.ACCESS;
-        }
-    }
-
-    @MessageResolution(receiverType = FunctionRegistry.class)
-    static class FunctionRegistryMessageResolution {
-
-        @Resolve(message = "EXECUTE")
-        abstract static class ExecuteFunctionRegistry extends Node {
-
-            @Child Node bind = Message.INVOKE.createNode();
-
-            private void register(FunctionRegistry receiver, String name, String signature, TruffleObject symbol) {
-                try {
-                    TruffleObject boundSymbol = (TruffleObject) ForeignAccess.sendInvoke(bind, symbol, "bind", signature);
-                    receiver.add(name, boundSymbol);
-                } catch (InteropException ex) {
-                    CompilerDirectives.transferToInterpreter();
-                    throw new AssertionError(ex);
-                }
-            }
-
-            Object access(FunctionRegistry receiver, Object[] args) {
-                register(receiver, (String) args[0], (String) args[1], (TruffleObject) args[2]);
-                return "";
-            }
+        @ExportMessage
+        boolean isExecutable() {
+            return true;
         }
 
-        @Resolve(message = "IS_EXECUTABLE")
-        abstract static class IsExecutable extends Node {
-
-            @SuppressWarnings("unused")
-            boolean access(FunctionRegistry receiver) {
-                return true;
-            }
+        @ExportMessage
+        Object execute(Object[] args,
+                        @Cached RegisterFunctionNode register) {
+            register.execute(this, (String) args[0], (String) args[1], args[2]);
+            return "";
         }
 
-        @CanResolve
-        abstract static class CanResolveFunctionRegistry extends Node {
+        @GenerateUncached
+        abstract static class RegisterFunctionNode extends Node {
 
-            boolean test(TruffleObject obj) {
-                return obj instanceof FunctionRegistry;
+            protected abstract void execute(FunctionRegistry receiver, String name, String signature, Object symbol);
+
+            @TruffleBoundary
+            CallTarget parseSignature(String signature) {
+                Source source = Source.newBuilder("nfi", signature, "signature").build();
+                return runWithPolyglot.getTruffleTestEnv().parseInternal(source);
+            }
+
+            @Specialization
+            void register(FunctionRegistry receiver, String name, String sigString, Object symbol,
+                            @Cached IndirectCallNode callSignature,
+                            @CachedLibrary(limit = "5") SignatureLibrary signatures) {
+                CallTarget sigTarget = parseSignature(sigString);
+                Object signature = callSignature.call(sigTarget);
+                Object boundSymbol = signatures.bind(signature, symbol);
+                receiver.add(name, boundSymbol);
             }
         }
     }
 
     static class LoadPackageNode extends Node {
 
-        private final TruffleObject initializePackage = lookupAndBind("initialize_package", "((string,string,pointer):void):void");
-        @Child Node execute = Message.EXECUTE.createNode();
+        private final Object initializePackage = lookupAndBind("initialize_package", "((string,string,pointer):void):void");
+        @Child InteropLibrary interop = getInterop(initializePackage);
 
         FunctionRegistry loadPackage() {
-            FunctionRegistry registry = new FunctionRegistry();
+            REGISTRY.clear();
             try {
-                ForeignAccess.sendExecute(execute, initializePackage, registry);
+                interop.execute(initializePackage, REGISTRY);
             } catch (InteropException ex) {
                 CompilerDirectives.transferToInterpreter();
                 throw new AssertionError(ex);
             }
-            return registry;
+            return REGISTRY;
         }
     }
 
     public static class RegisterPackageTestNode extends NFITestRootNode {
 
         @Child LoadPackageNode loadPackage = new LoadPackageNode();
-
-        @Child Node unary = Message.EXECUTE.createNode();
-        @Child Node binary = Message.EXECUTE.createNode();
+        @Child InteropLibrary interop = getInterop();
 
         @Override
         public Object executeTest(VirtualFrame frame) throws InteropException {
             FunctionRegistry registry = loadPackage.loadPackage();
 
-            TruffleObject add = registry.get("add");
-            TruffleObject square = registry.get("square");
-            TruffleObject sqrt = registry.get("sqrt");
+            Object add = registry.get("add");
+            Object square = registry.get("square");
+            Object sqrt = registry.get("sqrt");
 
             double a = (Double) frame.getArguments()[0];
             double b = (Double) frame.getArguments()[1];
 
-            double aSq = (Double) ForeignAccess.sendExecute(unary, square, a);
-            double bSq = (Double) ForeignAccess.sendExecute(unary, square, b);
+            double aSq = (Double) interop.execute(square, a);
+            double bSq = (Double) interop.execute(square, b);
 
-            double cSq = (Double) ForeignAccess.sendExecute(binary, add, aSq, bSq);
-            return ForeignAccess.sendExecute(unary, sqrt, cSq);
+            double cSq = (Double) interop.execute(add, aSq, bSq);
+            return interop.execute(sqrt, cSq);
         }
     }
 
     @Test
     public void testPythagoras(@Inject(RegisterPackageTestNode.class) CallTarget callTarget) {
         Object ret = callTarget.call(3.0, 4.0);
-        Assert.assertThat("return value", ret, is(instanceOf(Double.class)));
+        MatcherAssert.assertThat("return value", ret, is(instanceOf(Double.class)));
         Assert.assertEquals("return value", 5.0, ret);
     }
 }

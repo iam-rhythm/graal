@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates.
+ * Copyright (c) 2017, 2021, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -30,16 +30,17 @@
 package com.oracle.truffle.llvm.runtime;
 
 import com.oracle.truffle.api.RootCallTarget;
-import com.oracle.truffle.llvm.runtime.LLVMContext.ExternalLibrary;
+import com.oracle.truffle.llvm.runtime.config.LLVMCapability;
 import com.oracle.truffle.llvm.runtime.nodes.api.LLVMExpressionNode;
+import com.oracle.truffle.llvm.runtime.types.Type;
 
-public interface LLVMIntrinsicProvider {
+import java.util.List;
+
+public interface LLVMIntrinsicProvider extends LLVMCapability {
 
     boolean isIntrinsified(String name);
 
-    RootCallTarget generateIntrinsicTarget(String name, int argCount);
+    RootCallTarget generateIntrinsicTarget(String name, List<Type> argTypes, NodeFactory nodeFactory);
 
-    LLVMExpressionNode generateIntrinsicNode(String name, LLVMExpressionNode[] arguments);
-
-    ExternalLibrary getLibrary();
+    LLVMExpressionNode generateIntrinsicNode(String name, LLVMExpressionNode[] arguments, Type[] argTypes, NodeFactory nodeFactory);
 }

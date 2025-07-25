@@ -29,10 +29,15 @@ import java.lang.annotation.Repeatable;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
+import java.util.function.Function;
+
+import jdk.graal.compiler.options.Option;
+
+import com.oracle.svm.core.util.VMError;
 
 /**
- * If an {@link org.graalvm.compiler.options.Option} is additionally annotated with
- * {@link APIOption} it will be exposed as native-image option with the given name.
+ * If an {@link Option} is additionally annotated with {@link APIOption} it will be exposed as
+ * native-image option with the given name.
  */
 @Repeatable(APIOption.List.class)
 @Retention(RetentionPolicy.RUNTIME)
@@ -46,9 +51,26 @@ public @interface APIOption {
     }
 
     /**
-     * The name of the option when exposed as native-image option.
+     * The name of the option when exposed as native-image option. If more than one name is passed
+     * the other names are set up as aliases for the option.
      */
-    String name();
+    String[] name();
+
+    /**
+     * This option should only be shown with --help-extra.
+     */
+    boolean extra() default false;
+
+    /**
+     * This option should be stored in a native image bundle and passed to the jvm when executed
+     * with {@code com.oracle.svm.driver.launcher.BundleLauncher}.
+     */
+    boolean launcherOption() default false;
+
+    /**
+     * Make a boolean option part of a group of boolean options.
+     **/
+    Class<? extends APIOptionGroup> group() default NullGroup.class;
 
     /**
      * Provide a custom help message for the option.
@@ -56,6 +78,18 @@ public @interface APIOption {
     String customHelp() default "";
 
     APIOptionKind kind() default APIOptionKind.Default;
+
+    char WHITESPACE_SEPARATOR = ' ';
+    char NO_SEPARATOR = 0;
+
+    /**
+     * Provide a custom separator that should be used to separate the option name from its option
+     * values. The default separator is {@code '='}. If {@code WHITESPACE_SEPARATOR} is used the
+     * option value has to be passed as the next argument (i.e., separated by whitespace on the
+     * command line). It is also allowed to provide more than one separator. See e.g. the options
+     * defined in {@code com.oracle.svm.hosted.NativeImageClassLoaderOptions}
+     */
+    char[] valueSeparator() default {'='};
 
     /**
      * The value that will be passed to a non-boolean option when no {@code =} is specified.
@@ -71,38 +105,65 @@ public @interface APIOption {
     String[] fixedValue() default {};
 
     /**
+     * Allow transforming option values before assigning them to the underlying {@link Option}.
+     **/
+    Class<? extends Function<Object, Object>>[] valueTransformer() default DefaultTransformer.class;
+
+    String deprecated() default "";
+
+    /**
      * APIOptionKind can be used to customize how an {@link APIOption} gets rewritten to its
-     * {@link org.graalvm.compiler.options.Option} counterpart.
+     * {@link Option} counterpart.
      */
     enum APIOptionKind {
         /**
-         * A boolean {@link org.graalvm.compiler.options.Option} gets passed as
+         * A boolean {@link Option} gets passed as
          * <code>-{H,R}:+&lt;OptionDescriptor#name&gt;</code>. For other options if there is a
          * substring after {@code =}, it gets appended to
          * <code>-{H,R}:&lt;OptionDescriptor#name&gt;=</code>.
          */
         Default,
         /**
-         * A boolean {@link org.graalvm.compiler.options.Option} gets passed as
+         * A boolean {@link Option} gets passed as
          * <code>-{H,R}:-&lt;OptionDescriptor#name&gt;</code>. For other options using
          * {@code Negated} is not allowed.
          */
-        Negated,
-        /**
-         * Denotes that the annotated {@code String} option represents a file system path. If the
-         * option value is not an absolute path, it will be resolved against the current working
-         * directory in which the native image tool is executed.
-         */
-        Paths
+        Negated
     }
 
     class Utils {
-        public static String name(APIOption annotation) {
-            if (annotation.name().startsWith("-")) {
-                return annotation.name();
+        public static String optionName(String name) {
+            if (name.startsWith("-")) {
+                return name;
             } else {
-                return "--" + annotation.name();
+                return "--" + name;
             }
+        }
+
+        public static String valueSeparatorToString(char valueSeparator) {
+            return valueSeparator != APIOption.NO_SEPARATOR ? Character.toString(valueSeparator) : "";
+        }
+
+        public static String groupName(APIOptionGroup group) {
+            if (group.name() == null || group.name().isEmpty()) {
+                VMError.shouldNotReachHere("Invalid APIOptionGroup.name() for " + group.getClass().getName());
+            }
+
+            return optionName(group.name()) + group.valueSeparator();
+        }
+    }
+
+    class DefaultTransformer implements Function<Object, Object> {
+        @Override
+        public Object apply(Object o) {
+            return o;
+        }
+    }
+
+    final class NullGroup implements APIOptionGroup {
+        @Override
+        public String name() {
+            return null;
         }
     }
 }

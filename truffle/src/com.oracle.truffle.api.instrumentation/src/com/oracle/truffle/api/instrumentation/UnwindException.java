@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -49,6 +49,7 @@ import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
  * acts in connection with <code>onUnwind</code> execution handlers. An instance of this exception
  * is created by {@link EventBinding#createUnwind(java.lang.Object)}.
  */
+@SuppressWarnings("serial")
 final class UnwindException extends ThreadDeath {
 
     private static final long serialVersionUID = -8034021436021506591L;
@@ -58,6 +59,7 @@ final class UnwindException extends ThreadDeath {
     private EventBinding<?> binding;
     private UnwindException next;
     private final AtomicReference<Thread> thrownThread;
+    private boolean thrownFromBindingCalled;
 
     boolean notifiedOnReturnValue; // True if onReturnValue() was called when this was thrown.
 
@@ -71,6 +73,8 @@ final class UnwindException extends ThreadDeath {
     }
 
     void thrownFromBinding(EventBinding<?> unwindBinding) {
+        thrownFromBindingCalled = true;
+        assert unwindBinding != null;
         // Either we have a preferred binding set, or the binding that thrown it must be the same:
         assert this.hasPreferredBindingSet || (this.binding == null || this.binding == unwindBinding);
         if (this.binding == null) {
@@ -88,6 +92,14 @@ final class UnwindException extends ThreadDeath {
             throw new IllegalStateException("A single instance of UnwindException thrown in two threads: '" + oldThread + "' and '" + currentThread + "'");
         }
         return true;
+    }
+
+    boolean hasPreferredBinding() {
+        return hasPreferredBindingSet;
+    }
+
+    boolean isThrownFromBinding() {
+        return thrownFromBindingCalled;
     }
 
     EventBinding<?> getBinding() {

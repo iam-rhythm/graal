@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, Oracle and/or its affiliates.
+ * Copyright (c) 2018, 2022, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -29,56 +29,24 @@
  */
 package com.oracle.truffle.llvm.runtime;
 
-import org.graalvm.collections.EconomicSet;
-import org.graalvm.collections.Equivalence;
-
-import com.oracle.truffle.api.CompilerDirectives.CompilationFinal;
-import com.oracle.truffle.llvm.runtime.LLVMContext.ExternalLibrary;
-import com.oracle.truffle.llvm.runtime.except.LLVMLinkerException;
+import com.oracle.truffle.api.CompilerAsserts;
 import com.oracle.truffle.llvm.runtime.global.LLVMGlobal;
 
-public class LLVMAlias implements LLVMSymbol {
-    private final ExternalLibrary library;
+public class LLVMAlias extends LLVMSymbol {
 
-    @CompilationFinal private LLVMSymbol target;
-    @CompilationFinal private String name;
+    private final LLVMSymbol target;
 
-    public LLVMAlias(ExternalLibrary library, String name, LLVMSymbol target) {
-        this.library = library;
-        this.name = name;
-        setTarget(target);
-    }
-
-    @Override
-    public String getName() {
-        return name;
-    }
-
-    @Override
-    public void setName(String value) {
-        this.name = value;
-    }
-
-    @Override
-    public ExternalLibrary getLibrary() {
-        return library;
+    public LLVMAlias(String name, LLVMSymbol target, boolean exported) {
+        super(name, IDGenerater.INVALID_ID, LLVMSymbol.INVALID_INDEX, exported, false);
+        if (target instanceof LLVMAlias) {
+            this.target = ((LLVMAlias) target).getTarget();
+        } else {
+            this.target = target;
+        }
     }
 
     public LLVMSymbol getTarget() {
         return target;
-    }
-
-    public void setTarget(LLVMSymbol value) {
-        this.target = value;
-        if (target instanceof LLVMAlias) {
-            EconomicSet<LLVMAlias> visited = EconomicSet.create(Equivalence.IDENTITY);
-            checkForCycle(this, visited);
-        }
-    }
-
-    @Override
-    public boolean isDefined() {
-        return true;
     }
 
     @Override
@@ -92,7 +60,12 @@ public class LLVMAlias implements LLVMSymbol {
     }
 
     @Override
-    public LLVMFunctionDescriptor asFunction() {
+    public boolean isAlias() {
+        return true;
+    }
+
+    @Override
+    public LLVMFunction asFunction() {
         return target.asFunction();
     }
 
@@ -103,16 +76,34 @@ public class LLVMAlias implements LLVMSymbol {
 
     @Override
     public String toString() {
-        return name + " -> " + target.getName();
+        return super.getName() + " -> " + target.toString();
     }
 
-    private void checkForCycle(LLVMAlias alias, EconomicSet<LLVMAlias> visited) {
-        if (visited.contains(alias)) {
-            throw new LLVMLinkerException("Found a cycle between the following aliases: " + visited.toString());
+    public static LLVMSymbol resolveAlias(LLVMSymbol symbol) {
+        CompilerAsserts.partialEvaluationConstant(symbol);
+        if (symbol.isAlias()) {
+            return ((LLVMAlias) symbol).getTarget();
         }
-        visited.add(alias);
-        if (alias.getTarget() instanceof LLVMAlias) {
-            checkForCycle((LLVMAlias) alias.getTarget(), visited);
-        }
+        return symbol;
+    }
+
+    @Override
+    public boolean isElemPtrExpression() {
+        return target.isElemPtrExpression();
+    }
+
+    @Override
+    public LLVMElemPtrSymbol asElemPtrExpression() {
+        return target.asElemPtrExpression();
+    }
+
+    @Override
+    public LLVMThreadLocalSymbol asThreadLocalSymbol() {
+        return target.asThreadLocalSymbol();
+    }
+
+    @Override
+    public boolean isThreadLocalSymbol() {
+        return target.isThreadLocalSymbol();
     }
 }

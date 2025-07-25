@@ -1,46 +1,63 @@
 /*
- * Copyright (c) 2016, 2016, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
- * This code is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 only, as
- * published by the Free Software Foundation.  Oracle designates this
- * particular file as subject to the "Classpath" exception as provided
- * by Oracle in the LICENSE file that accompanied this code.
+ * The Universal Permissive License (UPL), Version 1.0
  *
- * This code is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
- * version 2 for more details (a copy is included in the LICENSE file that
- * accompanied this code).
+ * Subject to the condition set forth below, permission is hereby granted to any
+ * person obtaining a copy of this software, associated documentation and/or
+ * data (collectively the "Software"), free of charge and under any and all
+ * copyright rights in the Software, and any and all patent rights owned or
+ * freely licensable by each licensor hereunder covering either (i) the
+ * unmodified Software as contributed to or provided by such licensor, or (ii)
+ * the Larger Works (as defined below), to deal in both
  *
- * You should have received a copy of the GNU General Public License version
- * 2 along with this work; if not, write to the Free Software Foundation,
- * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+ * (a) the Software, and
  *
- * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
- * or visit www.oracle.com if you need additional information or have any
- * questions.
+ * (b) any piece of software and/or hardware listed in the lrgrwrks.txt file if
+ * one is included with the Software each a "Larger Work" to which the Software
+ * is contributed by such licensors),
+ *
+ * without restriction, including without limitation the rights to copy, create
+ * derivative works of, display, perform, and distribute the Software and make,
+ * use, sell, offer for sale, import, export, have made, and have sold the
+ * Software and the Larger Work(s), and to sublicense the foregoing rights on
+ * either these or other terms.
+ *
+ * This license is subject to the following condition:
+ *
+ * The above copyright notice and either this complete permission notice or at a
+ * minimum a reference to the UPL must be included in all copies or substantial
+ * portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 package com.oracle.truffle.regex.tregex.parser.ast.visitors;
-
-import com.oracle.truffle.api.CompilerDirectives;
-import com.oracle.truffle.regex.tregex.parser.ast.BackReference;
-import com.oracle.truffle.regex.tregex.parser.ast.CharacterClass;
-import com.oracle.truffle.regex.tregex.parser.ast.Group;
-import com.oracle.truffle.regex.tregex.parser.ast.LookAheadAssertion;
-import com.oracle.truffle.regex.tregex.parser.ast.LookBehindAssertion;
-import com.oracle.truffle.regex.tregex.parser.ast.MatchFound;
-import com.oracle.truffle.regex.tregex.parser.ast.PositionAssertion;
-import com.oracle.truffle.regex.tregex.parser.ast.RegexASTNode;
-import com.oracle.truffle.regex.tregex.parser.ast.RegexASTSubtreeRootNode;
-import com.oracle.truffle.regex.tregex.parser.ast.Sequence;
-import com.oracle.truffle.regex.tregex.parser.ast.Term;
 
 import java.io.BufferedWriter;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Paths;
+
+import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
+import com.oracle.truffle.regex.tregex.parser.ast.AtomicGroup;
+import com.oracle.truffle.regex.tregex.parser.ast.BackReference;
+import com.oracle.truffle.regex.tregex.parser.ast.CharacterClass;
+import com.oracle.truffle.regex.tregex.parser.ast.Group;
+import com.oracle.truffle.regex.tregex.parser.ast.LookAheadAssertion;
+import com.oracle.truffle.regex.tregex.parser.ast.LookBehindAssertion;
+import com.oracle.truffle.regex.tregex.parser.ast.PositionAssertion;
+import com.oracle.truffle.regex.tregex.parser.ast.RegexASTNode;
+import com.oracle.truffle.regex.tregex.parser.ast.RegexASTSubtreeRootNode;
+import com.oracle.truffle.regex.tregex.parser.ast.Sequence;
+import com.oracle.truffle.regex.tregex.parser.ast.SubexpressionCall;
+import com.oracle.truffle.regex.tregex.parser.ast.Term;
 
 public final class ASTDotExportVisitor extends DepthFirstTraversalRegexASTVisitor {
 
@@ -52,7 +69,7 @@ public final class ASTDotExportVisitor extends DepthFirstTraversalRegexASTVisito
         this.showParentPointers = showParentPointers;
     }
 
-    @CompilerDirectives.TruffleBoundary
+    @TruffleBoundary
     public static void exportDot(RegexASTNode root, String path, boolean showParentPointers) {
         try (BufferedWriter writer = Files.newBufferedWriter(Paths.get(path))) {
             ASTDotExportVisitor visitor = new ASTDotExportVisitor(writer, showParentPointers);
@@ -70,6 +87,7 @@ public final class ASTDotExportVisitor extends DepthFirstTraversalRegexASTVisito
         return node.isDead() ? ", style=filled, color=grey" : "";
     }
 
+    @TruffleBoundary
     private void writeln(String s) {
         try {
             writer.write(s);
@@ -123,18 +141,23 @@ public final class ASTDotExportVisitor extends DepthFirstTraversalRegexASTVisito
 
     @Override
     protected void visit(LookBehindAssertion assertion) {
-        visitLookAround(assertion);
+        visitSubtreeRootNode(assertion, "lb", "ass");
     }
 
     @Override
     protected void visit(LookAheadAssertion assertion) {
-        visitLookAround(assertion);
+        visitSubtreeRootNode(assertion, "la", "ass");
     }
 
-    private void visitLookAround(RegexASTSubtreeRootNode assertion) {
-        writeln(String.format("%s [label=la, shape=box%s];", nodeName(assertion), deadStyle(assertion)));
-        printParentNextPrev(assertion);
-        writeln(String.format("%s -> %s [label=ass];", nodeName(assertion), nodeName(assertion.getGroup())));
+    @Override
+    protected void visit(AtomicGroup atomicGroup) {
+        visitSubtreeRootNode(atomicGroup, "atom", "grp");
+    }
+
+    private void visitSubtreeRootNode(RegexASTSubtreeRootNode subtreeRootNode, String nodeLabel, String edgeLabel) {
+        writeln(String.format("%s [label=%s, shape=box%s];", nodeName(subtreeRootNode), nodeLabel, deadStyle(subtreeRootNode)));
+        printParentNextPrev(subtreeRootNode);
+        writeln(String.format("%s -> %s [label=%s];", nodeName(subtreeRootNode), nodeName(subtreeRootNode.getGroup()), edgeLabel));
     }
 
     @Override
@@ -144,8 +167,8 @@ public final class ASTDotExportVisitor extends DepthFirstTraversalRegexASTVisito
     }
 
     @Override
-    protected void visit(MatchFound matchFound) {
-        writeln(String.format("%s [label=\"%s\", shape=box%s];", nodeName(matchFound), matchFound, deadStyle(matchFound)));
-        printParentNextPrev(matchFound);
+    protected void visit(SubexpressionCall subexpressionCall) {
+        writeln(String.format("%s [label=\"%s\", shape=box%s];", nodeName(subexpressionCall), subexpressionCall.toString().replace("\\", "\\\\"), deadStyle(subexpressionCall)));
+        printParentNextPrev(subexpressionCall);
     }
 }

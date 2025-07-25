@@ -27,57 +27,123 @@ package com.oracle.svm.core.code;
 import java.util.ArrayList;
 import java.util.List;
 
-import org.graalvm.compiler.code.CompilationResult;
-import org.graalvm.compiler.debug.DebugContext;
 import org.graalvm.nativeimage.Platform;
 import org.graalvm.nativeimage.Platforms;
 import org.graalvm.word.Pointer;
 
+import com.oracle.svm.core.Uninterruptible;
+import com.oracle.svm.core.c.NonmovableArray;
+import com.oracle.svm.core.c.NonmovableArrays;
 import com.oracle.svm.core.code.InstalledCodeObserver.InstalledCodeObserverHandle;
-import com.oracle.svm.core.heap.PinnedAllocator;
+import com.oracle.svm.core.feature.AutomaticallyRegisteredImageSingleton;
 import com.oracle.svm.core.meta.SharedMethod;
+import com.oracle.svm.core.nmt.NmtCategory;
 
+import jdk.graal.compiler.code.CompilationResult;
+import jdk.graal.compiler.debug.DebugContext;
+import jdk.graal.compiler.word.Word;
+
+@AutomaticallyRegisteredImageSingleton
 public final class InstalledCodeObserverSupport {
+    private static final InstalledCodeObserverHandleAction ACTION_ATTACH = h -> getAccessor(h).attachToCurrentIsolate(h);
+    private static final InstalledCodeObserverHandleAction ACTION_DETACH = h -> getAccessor(h).detachFromCurrentIsolate(h);
+    private static final InstalledCodeObserverHandleAction ACTION_RELEASE = h -> getAccessor(h).release(h);
+    private static final InstalledCodeObserverHandleAction ACTION_ACTIVATE = h -> getAccessor(h).activate(h);
+
     private final List<InstalledCodeObserver.Factory> observerFactories = new ArrayList<>();
 
     @Platforms(Platform.HOSTED_ONLY.class)
-    public InstalledCodeObserverSupport() {
+    InstalledCodeObserverSupport() {
     }
 
+    @Platforms(Platform.HOSTED_ONLY.class)
     public void addObserverFactory(InstalledCodeObserver.Factory observerFactory) {
         observerFactories.add(observerFactory);
     }
 
-    public InstalledCodeObserver[] createObservers(DebugContext debug, SharedMethod method, CompilationResult compilation, Pointer code) {
-        InstalledCodeObserver[] observers = new InstalledCodeObserver[observerFactories.size()];
-        int index = 0;
+    public InstalledCodeObserver[] createObservers(DebugContext debug, SharedMethod method, CompilationResult compilation, Pointer code, int codeSize) {
+        List<InstalledCodeObserver> observers = new ArrayList<>();
         for (InstalledCodeObserver.Factory factory : observerFactories) {
-            observers[index++] = factory.create(debug, method, compilation, code);
+            InstalledCodeObserver observer = factory.create(debug, method, compilation, code, codeSize);
+            if (observer != null) {
+                observers.add(observer);
+            }
         }
-        return observers;
+        return observers.toArray(new InstalledCodeObserver[0]);
     }
 
-    public static InstalledCodeObserver.InstalledCodeObserverHandle[] installObservers(InstalledCodeObserver[] observers, PinnedAllocator metaInfoAllocator) {
-        InstalledCodeObserver.InstalledCodeObserverHandle[] observerHandles = new InstalledCodeObserver.InstalledCodeObserverHandle[observers.length];
-        int index = 0;
-        for (InstalledCodeObserver observer : observers) {
-            observerHandles[index++] = observer.install(metaInfoAllocator);
+    public static NonmovableArray<InstalledCodeObserverHandle> installObservers(InstalledCodeObserver[] observers) {
+        if (observers.length == 0) {
+            return NonmovableArrays.nullArray();
+        }
+        NonmovableArray<InstalledCodeObserverHandle> observerHandles = NonmovableArrays.createWordArray(observers.length, NmtCategory.Code);
+        for (int i = 0; i < observers.length; i++) {
+            InstalledCodeObserverHandle handle = observers[i].install();
+            NonmovableArrays.setWord(observerHandles, i, handle);
         }
         return observerHandles;
     }
 
-    public static void activateObservers(InstalledCodeObserver.InstalledCodeObserverHandle[] observerHandles) {
-        for (InstalledCodeObserverHandle handle : observerHandles) {
-            if (handle != null) {
-                handle.activate();
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    private static InstalledCodeObserver.InstalledCodeObserverHandleAccessor getAccessor(InstalledCodeObserverHandle handle) {
+        return handle.getAccessor();
+    }
+
+    public static void activateObservers(NonmovableArray<InstalledCodeObserverHandle> observerHandles) {
+        forEach(observerHandles, ACTION_ACTIVATE);
+    }
+
+    public static void detachFromCurrentIsolate(NonmovableArray<InstalledCodeObserverHandle> observerHandles) {
+        forEach(observerHandles, ACTION_DETACH);
+    }
+
+    public static void attachToCurrentIsolate(NonmovableArray<InstalledCodeObserverHandle> observerHandles) {
+        forEach(observerHandles, ACTION_ATTACH);
+    }
+
+    public static void removeObservers(NonmovableArray<InstalledCodeObserverHandle> observerHandles) {
+        forEach(observerHandles, ACTION_RELEASE);
+        clearObserverHandles(observerHandles);
+    }
+
+    private interface InstalledCodeObserverHandleAction {
+        void invoke(InstalledCodeObserverHandle handle);
+    }
+
+    private static void forEach(NonmovableArray<InstalledCodeObserverHandle> array, InstalledCodeObserverHandleAction action) {
+        if (array.isNonNull()) {
+            int length = NonmovableArrays.lengthOf(array);
+            for (int i = 0; i < length; i++) {
+                InstalledCodeObserverHandle handle = NonmovableArrays.getWord(array, i);
+                if (handle.isNonNull()) {
+                    action.invoke(handle);
+                }
             }
         }
     }
 
-    public static void removeObservers(InstalledCodeObserver.InstalledCodeObserverHandle[] observerHandles) {
-        for (InstalledCodeObserverHandle handle : observerHandles) {
-            if (handle != null) {
-                handle.release();
+    private static void clearObserverHandles(NonmovableArray<InstalledCodeObserverHandle> array) {
+        if (array.isNonNull()) {
+            int length = NonmovableArrays.lengthOf(array);
+            for (int i = 0; i < length; i++) {
+                InstalledCodeObserverHandle handle = NonmovableArrays.getWord(array, i);
+                if (handle.isNonNull()) {
+                    NonmovableArrays.setWord(array, i, Word.nullPointer());
+                }
+            }
+        }
+    }
+
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public static void removeObserversOnTearDown(NonmovableArray<InstalledCodeObserverHandle> observerHandles) {
+        if (observerHandles.isNonNull()) {
+            int length = NonmovableArrays.lengthOf(observerHandles);
+            for (int i = 0; i < length; i++) {
+                InstalledCodeObserverHandle handle = NonmovableArrays.getWord(observerHandles, i);
+                if (handle.isNonNull()) {
+                    getAccessor(handle).releaseOnTearDown(handle);
+                    NonmovableArrays.setWord(observerHandles, i, Word.nullPointer());
+                }
             }
         }
     }

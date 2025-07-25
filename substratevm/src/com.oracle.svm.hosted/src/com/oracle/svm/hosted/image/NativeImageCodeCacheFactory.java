@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2023, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,11 +24,16 @@
  */
 package com.oracle.svm.hosted.image;
 
-import com.oracle.svm.hosted.code.CompileQueue;
+import java.nio.file.Path;
+
 import org.graalvm.nativeimage.ImageSingletons;
+import org.graalvm.nativeimage.Platform;
+
+import com.oracle.svm.hosted.code.CompileQueue;
 
 public abstract class NativeImageCodeCacheFactory {
-    public abstract NativeImageCodeCache newCodeCache(CompileQueue compileQueue, NativeImageHeap heap);
+
+    public abstract NativeImageCodeCache newCodeCache(CompileQueue compileQueue, NativeImageHeap heap, Platform target, Path tempDir);
 
     public static NativeImageCodeCacheFactory get() {
         return ImageSingletons.lookup(NativeImageCodeCacheFactory.class);

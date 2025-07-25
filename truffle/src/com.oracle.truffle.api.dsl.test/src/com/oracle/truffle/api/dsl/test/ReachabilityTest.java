@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -42,13 +42,18 @@ package com.oracle.truffle.api.dsl.test;
 
 import java.math.BigInteger;
 
+import com.oracle.truffle.api.dsl.Cached;
+import com.oracle.truffle.api.dsl.GenerateUncached;
+import com.oracle.truffle.api.dsl.Idempotent;
 import com.oracle.truffle.api.dsl.NodeChild;
 import com.oracle.truffle.api.dsl.NodeChildren;
 import com.oracle.truffle.api.dsl.Specialization;
 import com.oracle.truffle.api.dsl.test.TypeSystemTest.Abstract;
 import com.oracle.truffle.api.dsl.test.TypeSystemTest.BExtendsAbstract;
 import com.oracle.truffle.api.dsl.test.TypeSystemTest.ValueNode;
+import com.oracle.truffle.api.nodes.Node;
 
+@SuppressWarnings({"truffle-inlining", "truffle-neverdefault", "truffle-sharing"})
 public class ReachabilityTest {
 
     static class Reachability1 extends ValueNode {
@@ -200,6 +205,7 @@ public class ReachabilityTest {
 
     static class ReachabilityGuard1 extends ValueNode {
 
+        @Idempotent
         boolean foo() {
             return false;
         }
@@ -237,6 +243,7 @@ public class ReachabilityTest {
 
     static class ReachabilityGuard3 extends ValueNode {
 
+        @Idempotent
         boolean foo() {
             return false;
         }
@@ -301,4 +308,62 @@ public class ReachabilityTest {
 
     }
 
+    abstract static class ReachabilityUncached extends Node {
+        abstract int execute();
+
+        int foo() {
+            return 0;
+        }
+    }
+
+    @GenerateUncached
+    abstract static class ReachabilityUncached1 extends ReachabilityUncached {
+        @Specialization(excludeForUncached = true)
+        int doCached(@Cached("foo()") int cached) {
+            return cached;
+        }
+
+        @Specialization(replaces = "doCached")
+        int doUncached() {
+            return 1;
+        }
+    }
+
+    @GenerateUncached
+    abstract static class ReachabilityUncached2 extends ReachabilityUncached {
+        @Specialization
+        int doCached(@Cached("foo()") int cached) {
+            return cached;
+        }
+
+        @Specialization(replaces = "doCached")
+        int doUncached1() {
+            return 1;
+        }
+
+        @ExpectError("Specialization is not reachable. It is shadowed by doUncached1().")
+        @Specialization
+        int doUncached2() {
+            return 2;
+        }
+    }
+
+    @GenerateUncached
+    abstract static class ReachabilityUncached3 extends ReachabilityUncached {
+        @Specialization
+        int doCached1(@Cached("foo()") int cached) {
+            return cached;
+        }
+
+        @ExpectError("Specialization is not reachable. It is shadowed by doCached1(int).")
+        @Specialization(replaces = "doCached1")
+        int doCached2(@Cached("foo()") int cached) {
+            return cached + 1;
+        }
+
+        @Specialization(replaces = "doCached2")
+        int doUncached() {
+            return 1;
+        }
+    }
 }

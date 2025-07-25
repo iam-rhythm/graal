@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -246,9 +246,9 @@ public class DebuggerContextsTest extends AbstractDebugTest {
                 assertEquals(InstrumentationTestLanguage.ID, events.get(1).language.getId());
                 assertTrue(events.get(2).languageInitialized);
                 String type = dc.runInContext(() -> {
-                    assertEquals("10", result.as(String.class));
+                    assertEquals("10", result.toDisplayString());
                     DebugValue metaObj = result.getMetaObject();
-                    return metaObj.as(String.class);
+                    return metaObj.getMetaQualifiedName();
                 });
                 assertEquals("Integer", type);
                 assertEquals(3, events.size());
@@ -256,7 +256,7 @@ public class DebuggerContextsTest extends AbstractDebugTest {
         }
     }
 
-    private static class TestContextsListener implements DebugContextsListener {
+    private static final class TestContextsListener implements DebugContextsListener {
 
         final List<ContextEvent> events = Collections.synchronizedList(new ArrayList<>());
 

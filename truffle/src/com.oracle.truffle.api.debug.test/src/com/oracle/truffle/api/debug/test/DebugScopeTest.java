@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -46,20 +46,16 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
-import java.util.Iterator;
-
-import org.graalvm.polyglot.Context;
 import org.graalvm.polyglot.Source;
-import org.graalvm.polyglot.Value;
 import org.junit.Test;
 
 import com.oracle.truffle.api.debug.DebugScope;
 import com.oracle.truffle.api.debug.DebugStackFrame;
 import com.oracle.truffle.api.debug.DebugValue;
-import com.oracle.truffle.api.debug.Debugger;
 import com.oracle.truffle.api.debug.DebuggerSession;
 import com.oracle.truffle.api.debug.SuspendedEvent;
-import com.oracle.truffle.api.instrumentation.test.InstrumentationTestLanguage;
+import com.oracle.truffle.api.test.polyglot.ProxyLanguage;
+import java.util.Iterator;
 
 public class DebugScopeTest extends AbstractDebugTest {
 
@@ -84,52 +80,17 @@ public class DebugScopeTest extends AbstractDebugTest {
                 assertNotNull(topScope);
                 DebugValue function1 = topScope.getDeclaredValue("function1");
                 assertNotNull(function1);
-                assertTrue(function1.as(String.class).contains("Function"));
+                assertTrue(function1.toDisplayString().contains("Function"));
                 DebugValue functionType = function1.getMetaObject();
-                assertEquals("Function", functionType.as(String.class));
+                assertEquals("Function", functionType.toDisplayString());
                 assertEquals(function1.getOriginalLanguage(), functionType.getOriginalLanguage());
                 DebugValue g = topScope.getDeclaredValue("g");
                 assertNotNull(g);
-                assertTrue(g.as(String.class).contains("Function"));
+                assertTrue(g.toDisplayString().contains("Function"));
             });
 
             expectDone();
         }
-    }
-
-    @Test
-    public void testArguments() {
-        final Source source = testSource("DEFINE(function, ROOT(\n" +
-                        "  STATEMENT()\n" +
-                        "))\n");
-        Context context = Context.create();
-        context.eval(source);
-        Value functionValue = context.getBindings(InstrumentationTestLanguage.ID).getMember("function");
-        assertNotNull(functionValue);
-        Debugger debugger = context.getEngine().getInstruments().get("debugger").lookup(Debugger.class);
-
-        boolean[] suspended = new boolean[]{false};
-        DebuggerSession session = debugger.startSession((SuspendedEvent event) -> {
-            assertFalse(suspended[0]);
-            Iterable<DebugValue> arguments = event.getTopStackFrame().getScope().getArguments();
-            assertNotNull(arguments);
-            Iterator<DebugValue> iterator = arguments.iterator();
-            assertTrue(iterator.hasNext());
-            DebugValue arg = iterator.next();
-            assertEquals("0", arg.getName());
-            assertEquals("true", arg.as(String.class));
-            assertTrue(iterator.hasNext());
-            arg = iterator.next();
-            assertEquals("1", arg.getName());
-            assertEquals("10", arg.as(String.class));
-            assertFalse(iterator.hasNext());
-            event.prepareContinue();
-            suspended[0] = true;
-        });
-        session.suspendNextExecution();
-        functionValue.execute(true, 10);
-        session.close();
-        assertTrue(suspended[0]);
     }
 
     @Test
@@ -164,10 +125,146 @@ public class DebugScopeTest extends AbstractDebugTest {
                 DebugStackFrame frame = event.getTopStackFrame();
                 DebugValue receiver = frame.getScope().getReceiver();
                 assertEquals("THIS", receiver.getName());
-                assertEquals(42, receiver.as(Number.class).intValue());
+                assertEquals(42, receiver.asInt());
+                assertNull("Receiver is not a declared value", frame.getScope().getDeclaredValue("THIS"));
+                checkStack(frame);
             });
             expectDone();
         }
     }
 
+    @Test
+    public void testMultipleReceivers1() {
+        ProxyLanguage.setDelegate(new TestReceiverLanguage());
+        Source source = Source.create(ProxyLanguage.ID, "thisReceiver\n" +
+                        "a 1 b 2\n" +
+                        "c 3 thisReceiver 4\n" +
+                        "d 5 e 6");
+        try (DebuggerSession session = startSession()) {
+            session.suspendNextExecution();
+            startEval(source);
+
+            expectSuspended((SuspendedEvent event) -> {
+                DebugStackFrame frame = event.getTopStackFrame();
+                DebugScope scope = frame.getScope();
+                DebugValue receiver = scope.getReceiver();
+                assertNull(receiver);
+
+                scope = scope.getParent();
+                receiver = scope.getReceiver();
+                assertEquals("thisReceiver", receiver.getName());
+                assertEquals("4", receiver.toDisplayString());
+
+                scope = scope.getParent();
+                receiver = scope.getReceiver();
+                assertNull(receiver);
+            });
+            expectDone();
+        }
+    }
+
+    @Test
+    public void testMultipleReceivers2() {
+        ProxyLanguage.setDelegate(new TestReceiverLanguage());
+        Source source = Source.create(ProxyLanguage.ID, "thisReceiver\n" +
+                        "thisReceiver 1\n" +
+                        "a 2 b 3\n" +
+                        "c 4 thisReceiver 5");
+        try (DebuggerSession session = startSession()) {
+            session.suspendNextExecution();
+            startEval(source);
+
+            expectSuspended((SuspendedEvent event) -> {
+                DebugStackFrame frame = event.getTopStackFrame();
+                DebugScope scope = frame.getScope();
+                DebugValue receiver = scope.getReceiver();
+                assertEquals("thisReceiver", receiver.getName());
+                assertEquals("1", receiver.toDisplayString());
+
+                scope = scope.getParent();
+                receiver = scope.getReceiver();
+                assertNull(receiver);
+
+                scope = scope.getParent();
+                receiver = scope.getReceiver();
+                assertEquals("thisReceiver", receiver.getName());
+                assertEquals("5", receiver.toDisplayString());
+            });
+            expectDone();
+        }
+    }
+
+    @Test
+    public void testVariables() {
+        final Source source = testSource("ROOT(DEFINE(foo,ROOT(\n" +
+                        "  VARIABLE(x, 10),\n" +
+                        "  VARIABLE(y, 20),\n" +
+                        "  STATEMENT())\n" +
+                        "),\n" +
+                        "CALL_WITH(foo, 42))\n");
+        try (DebuggerSession session = startSession()) {
+            session.suspendNextExecution();
+            startEval(source);
+
+            expectSuspended((SuspendedEvent event) -> {
+                DebugStackFrame frame = event.getTopStackFrame();
+                DebugValue receiver = frame.getScope().getReceiver();
+                assertEquals("THIS", receiver.getName());
+                assertEquals(42, receiver.asInt());
+                assertNull("Receiver is not a declared value", frame.getScope().getDeclaredValue("THIS"));
+                checkStack(frame, "x", "10", "y", "20");
+                assertEquals("foo", frame.getScope().getName());
+                assertEquals("foo", frame.getName());
+            });
+            expectDone();
+        }
+    }
+
+    @Test
+    public void testNoCallNode() {
+        Source source = Source.create(ProxyLanguage.ID, "abcde");
+        ProxyLanguage.setDelegate(new NoCallNodeTestLanguage());
+
+        try (DebuggerSession session = startSession()) {
+            session.suspendNextExecution();
+            startEval(source);
+
+            expectSuspended((SuspendedEvent event) -> {
+                checkNoCallFrames(event, 1);
+                event.prepareStepInto(1);
+            });
+            expectSuspended((SuspendedEvent event) -> {
+                checkNoCallFrames(event, 2);
+                event.prepareStepInto(1);
+            });
+            expectSuspended((SuspendedEvent event) -> {
+                checkNoCallFrames(event, 3);
+                event.prepareStepInto(1);
+            });
+            expectSuspended((SuspendedEvent event) -> {
+                checkNoCallFrames(event, 4);
+                event.prepareStepInto(1);
+            });
+            expectSuspended((SuspendedEvent event) -> {
+                checkNoCallFrames(event, 5);
+                event.prepareStepInto(1);
+            });
+            expectDone();
+        }
+    }
+
+    private static void checkNoCallFrames(SuspendedEvent event, int depth) {
+        DebugScope scope = event.getTopStackFrame().getScope();
+        assertNotNull(scope);
+        assertFalse(scope.getDeclaredValues().iterator().hasNext());
+
+        Iterator<DebugStackFrame> iterator = event.getStackFrames().iterator();
+        iterator.next(); // top frame
+        for (int d = 1; d < depth; d++) {
+            assertTrue("No next frame at dept " + d, iterator.hasNext());
+            DebugStackFrame frame = iterator.next();
+            assertEquals("abcde".substring(depth - d - 1), frame.getName());
+            assertNull(frame.getScope());
+        }
+    }
 }

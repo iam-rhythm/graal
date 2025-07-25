@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2017, 2019, Oracle and/or its affiliates.
+# Copyright (c) 2017, 2023, Oracle and/or its affiliates.
 #
 # All rights reserved.
 #
@@ -27,7 +27,7 @@
 # NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
 # OF THE POSSIBILITY OF SUCH DAMAGE.
 #
-QUIETLY$(MX_VERBOSE)  = @
+TOP := $(dir $(lastword $(MAKEFILE_LIST)))
 
 ifeq ($(BUILD_REF),1)
 REF_TARGETS:=$(TESTS:%=%/ref.out)
@@ -35,74 +35,43 @@ else
 REF_TARGETS:=
 endif
 
-BC_TARGETS:=$(foreach var,$(VARIANTS),$(TESTS:%=%/$(var).bc))
-
-CLANG?=clang
-CLANGXX?=clang++
-LLVM_AS?=llvm-as
-OPT?=opt
-FC?=gfortran
-
-CFLAGS+= $(SUITE_CFLAGS)
-CXXFLAGS+= $(SUITE_CXXFLAGS) -std=c++11 -stdlib=libc++ -DLIBCXXABI_SILENT_TERMINATE
-CPPFLAGS+= $(SUITE_CPPFLAGS)
-LDFLAGS+= $(SUITE_LDFLAGS)
-
-.PHONY: default
-default: $(REF_TARGETS) $(BC_TARGETS)
-
-ifeq ($(OS), darwin)
-EMBED_BC=-fembed-bitcode
-BC_FILE=
+ifeq ($(BUILD_SO),1)
+# SO_EXT is set by SulongTestSuite
+BC_TARGETS:=$(foreach var,$(VARIANTS),$(TESTS:%=%/$(var)$(SO_EXT)))
+CFLAGS+= -fPIC
+CXXFLAGS+= -fPIC
 else
-EMBED_BC=
-BC_FILE=%/O0.bc.o
-
-%.bc.o: %.bc
-	$(QUIETLY) objcopy -I binary -O elf64-x86-64 -B i386:x86-64 --rename-section .data=.llvmbc $< $@
+BC_TARGETS:=$(foreach var,$(VARIANTS),$(TESTS:%=%/$(var).bc))
 endif
 
-%/ref.out: %.c $(BC_FILE)
-	@mkdir -p $(shell dirname $@)
-	$(QUIETLY) $(CLANG) $(EMBED_BC) -Wno-everything $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $^
+CXXFLAGS+=-DLIBCXXABI_SILENT_TERMINATE
 
-%/ref.out: %.cpp $(BC_FILE)
-	@mkdir -p $(shell dirname $@)
-	$(QUIETLY) $(CLANGXX) $(EMBED_BC) -Wno-everything $(CPPFLAGS) $(CXXFLAGS) $(LDFLAGS) -o $@ $^
+.PHONY: default
+ifeq ($(strip $(REF_TARGETS) $(BC_TARGETS)),)
+$(error No test files to compile!)
+endif
+default: $(REF_TARGETS) $(BC_TARGETS)
 
-%/ref.out: %.ll $(BC_FILE)
-	@mkdir -p $(shell dirname $@)
-	$(QUIETLY) $(CLANG) $(EMBED_BC) -Wno-everything $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $^
+include $(TOP)/Makefile.common
 
-%/gcc_O0.bc: %/gcc_O0.ll
-	$(QUIETLY) $(DRAGONEGG_LLVMAS) -o $@ $<
+ifeq ($(OS), darwin)
+# NOTE: the darwin linker refuses bundle bitcode if any of the dependencies do not have a bundle section.
+#   However, it does include the bundle if linked with -flto, although the warning still says otherwise.
+EMBED_BC=-flto -Wl,-bitcode_bundle,-lto_library,$(shell ${LLVM_CONFIG} --libdir)/libLTO.dylib
 
-define OPT_RULES
-%/$(1).bc: %.c
-	@mkdir -p $$(shell dirname $$@)
-	$(QUIETLY) $(CLANG) -c -emit-llvm $(2) -Wno-everything $(CPPFLAGS) $(CFLAGS) -g -o $$@ $$<
+%$(SO_EXT): %.bc
+	$(QUIETLY) $(CLANG) $(EMBED_BC) -dynamiclib -Wall -Wextra -Werror -Wno-unused-command-line-argument $(LDFLAGS) -g -o $@ $<
+else
 
-%/$(1).bc: %.cpp
-	@mkdir -p $$(shell dirname $$@)
-	$(QUIETLY) $(CLANGXX) -c -emit-llvm $(2) -Wno-everything $(CPPFLAGS) $(CXXFLAGS) -g -o $$@ $$<
+# Rules for shared objects
+# NOTE: this relies on the fact that there is only a single source file:
+#   We produce an object file with embedded bitcode section.
+#   The linker will just copy this section into the final shared object.
+#   Since there is only one bitcode file there is no need for llvm-link.
+# NOTE2: -fembed-bitcode will not work with clang before version 4
+%_BC_EMBED_PIC.o: %.bc
+	$(QUIETLY) $(CLANG) -c -fembed-bitcode -O0 ${SULONG_MAKE_CLANG_IMPLICIT_ARGS} -Wall -Wextra -Werror -Wno-unused-command-line-argument -fPIC $(CPPFLAGS) $(CFLAGS) -g -o $@ $<
 
-%/gcc_$(1).ll: %.c
-	@mkdir -p $$(shell dirname $$@)
-	$(QUIETLY) $(DRAGONEGG_GCC) -w -S --std=gnu99 -fplugin=$(DRAGONEGG) -fplugin-arg-dragonegg-emit-ir -$(1) $(CPPFLAGS) $(CFLAGS) -o $$@ $$<
-
-%/$(1).bc: %.ll
-	@mkdir -p $$(shell dirname $$@)
-	$(QUIETLY) $(LLVM_AS) -o $$@ $$<
-
-endef
-
-$(eval $(call OPT_RULES,O0,-O0 ${SULONG_MAKE_CLANG_IMPLICIT_ARGS}))
-$(eval $(call OPT_RULES,O1,-O1))
-$(eval $(call OPT_RULES,O2,-O2))
-$(eval $(call OPT_RULES,O3,-O3))
-
-%_MISC_OPTS.bc: %.bc
-	$(QUIETLY) $(OPT) -o $@ -functionattrs -instcombine -always-inline -jump-threading -simplifycfg -mem2reg $<
-
-%_MEM2REG.bc: %.bc
-	$(QUIETLY) $(OPT) -o $@ -mem2reg $<
+%$(SO_EXT): %_BC_EMBED_PIC.o
+	$(QUIETLY) $(CLANG) -shared -Wall -Wextra -Werror -Wno-unused-command-line-argument $(LDFLAGS) -g -o $@ $<
+endif

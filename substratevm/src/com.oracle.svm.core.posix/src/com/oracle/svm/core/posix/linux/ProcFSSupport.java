@@ -24,11 +24,13 @@
  */
 package com.oracle.svm.core.posix.linux;
 
+import jdk.graal.compiler.word.Word;
 import org.graalvm.nativeimage.c.type.CCharPointer;
-import org.graalvm.nativeimage.c.type.CLongPointer;
-import org.graalvm.word.WordBase;
+import org.graalvm.nativeimage.c.type.WordPointer;
+import org.graalvm.word.Pointer;
+import org.graalvm.word.UnsignedWord;
 
-import com.oracle.svm.core.annotate.Uninterruptible;
+import com.oracle.svm.core.Uninterruptible;
 import com.oracle.svm.core.posix.PosixUtils;
 
 class ProcFSSupport {
@@ -47,7 +49,7 @@ class ProcFSSupport {
      * buffer is dual-purpose and used to return the file's path name if requested via the
      * {@code needName} parameter. As such the buffer should be large enough to accommodate a path.
      * If not enough buffer capacity is available, and needName is true, false will be returned. If
-     * a mapping is not found, or an error has occured, false will be returned.
+     * a mapping is not found, or an error has occurred, false will be returned.
      *
      * @param fd a file descriptor pointing to /proc/self/maps
      * @param buffer a buffer for reading operations, and optionally for returning the path name of
@@ -57,27 +59,25 @@ class ProcFSSupport {
      * @param endAddress the end address of the address range to find within a mapping
      * @param startAddrPtr the start address range for a found mapping
      * @param fileOffsetPtr the file offset of the found mapping in its backing file
-     * @param inodePtr the inode of the matching mapping's backing file
      * @param needName whether the matching path name is required and should be returned in buffer
      * @return true if a mapping is found and no errors occurred, false otherwise.
      */
     @Uninterruptible(reason = "Called during isolate initialization.")
     @SuppressWarnings("fallthrough")
-    static boolean findMapping(int fd, CCharPointer buffer, int bufferLen, WordBase beginAddress, WordBase endAddress, CLongPointer startAddrPtr,
-                    CLongPointer fileOffsetPtr, CLongPointer inodePtr, boolean needName) {
+    static boolean findMapping(int fd, CCharPointer buffer, int bufferLen, UnsignedWord beginAddress, UnsignedWord endAddress,
+                    WordPointer startAddrPtr, WordPointer fileOffsetPtr, boolean needName) {
         int readOffset = 0;
         int endOffset = 0;
         int position = 0;
         int state = ST_ADDR_START;
         int b;
 
-        long start = 0;
-        long end = 0;
-        long fileOffset = 0;
-        long inode = 0;
+        UnsignedWord start = Word.zero();
+        UnsignedWord end = Word.zero();
+        UnsignedWord fileOffset = Word.zero();
         OUT: for (;;) {
             while (position == endOffset) { // fill buffer
-                int readBytes = PosixUtils.readBytes(fd, buffer, bufferLen, readOffset);
+                int readBytes = PosixUtils.readUninterruptibly(fd, (Pointer) buffer, bufferLen, readOffset);
                 if (readBytes <= 0) {
                     return false; // read failure or 0 == EOF -> not matched
                 }
@@ -88,11 +88,11 @@ class ProcFSSupport {
             switch (state) {
                 case ST_ADDR_START: {
                     if (b == '-') {
-                        state = (beginAddress.rawValue() >= start) ? ST_ADDR_END : ST_SKIP;
+                        state = beginAddress.aboveOrEqual(start) ? ST_ADDR_END : ST_SKIP;
                     } else if ('0' <= b && b <= '9') {
-                        start = (start << 4) + (b - '0');
+                        start = start.shiftLeft(4).add(b - '0');
                     } else if ('a' <= b && b <= 'f') {
-                        start = (start << 4) + (b - 'a' + 10);
+                        start = start.shiftLeft(4).add(b - 'a' + 10);
                     } else {
                         return false; // garbage == not matched
                     }
@@ -100,11 +100,11 @@ class ProcFSSupport {
                 }
                 case ST_ADDR_END: {
                     if (b == ' ') {
-                        state = (endAddress.rawValue() <= end) ? ST_PERMS : ST_SKIP;
+                        state = endAddress.belowOrEqual(end) ? ST_PERMS : ST_SKIP;
                     } else if ('0' <= b && b <= '9') {
-                        end = (end << 4) + (b - '0');
+                        end = end.shiftLeft(4).add(b - '0');
                     } else if ('a' <= b && b <= 'f') {
-                        end = (end << 4) + (b - 'a' + 10);
+                        end = end.shiftLeft(4).add(b - 'a' + 10);
                     } else {
                         return false; // garbage == not matched
                     }
@@ -112,7 +112,7 @@ class ProcFSSupport {
                 }
                 case ST_PERMS: {
                     if (b == ' ') {
-                        fileOffset = 0;
+                        fileOffset = Word.zero();
                         state = ST_OFFSET;
                     }
                     break; // ignore anything else
@@ -121,9 +121,9 @@ class ProcFSSupport {
                     if (b == ' ') {
                         state = ST_DEV;
                     } else if ('0' <= b && b <= '9') {
-                        fileOffset = (fileOffset << 4) + (b - '0');
+                        fileOffset = fileOffset.shiftLeft(4).add(b - '0');
                     } else if ('a' <= b && b <= 'f') {
-                        fileOffset = (fileOffset << 4) + (b - 'a' + 10);
+                        fileOffset = fileOffset.shiftLeft(4).add(b - 'a' + 10);
                     } else {
                         return false; // garbage == not matched
                     }
@@ -131,7 +131,6 @@ class ProcFSSupport {
                 }
                 case ST_DEV: {
                     if (b == ' ') {
-                        inode = 0;
                         state = ST_INODE;
                     } // ignore anything else
                     break;
@@ -144,11 +143,7 @@ class ProcFSSupport {
                             break OUT;
                         }
                         state = ST_SPACE;
-                    } else if ('0' <= b && b <= '9') {
-                        inode = (inode << 3) + (inode << 1) + (b - '0');
-                    } else {
-                        return false; // garbage == not matched
-                    }
+                    } // ignore anything else
                     break;
                 }
                 case ST_SPACE: {
@@ -174,8 +169,8 @@ class ProcFSSupport {
                 }
                 case ST_SKIP: {
                     if (b == '\n') {
-                        start = 0;
-                        end = 0;
+                        start = Word.zero();
+                        end = Word.zero();
                         state = ST_ADDR_START;
                     }
                     break;
@@ -187,9 +182,6 @@ class ProcFSSupport {
         }
         if (fileOffsetPtr.isNonNull()) {
             fileOffsetPtr.write(fileOffset);
-        }
-        if (inodePtr.isNonNull()) {
-            inodePtr.write(inode);
         }
         return true;
     }

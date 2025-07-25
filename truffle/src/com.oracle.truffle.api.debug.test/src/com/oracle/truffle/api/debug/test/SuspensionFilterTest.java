@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -48,11 +48,26 @@ import org.junit.After;
 import org.junit.Assert;
 import org.junit.Test;
 
+import com.oracle.truffle.api.CallTarget;
+import com.oracle.truffle.api.TruffleLanguage;
 import com.oracle.truffle.api.debug.Breakpoint;
 import com.oracle.truffle.api.debug.DebuggerSession;
+import com.oracle.truffle.api.debug.SourceElement;
+import com.oracle.truffle.api.debug.SuspendAnchor;
 import com.oracle.truffle.api.debug.SuspendedEvent;
 import com.oracle.truffle.api.debug.SuspensionFilter;
+import com.oracle.truffle.api.frame.VirtualFrame;
+import com.oracle.truffle.api.instrumentation.GenerateWrapper;
+import com.oracle.truffle.api.instrumentation.InstrumentableNode;
+import com.oracle.truffle.api.instrumentation.ProbeNode;
+import com.oracle.truffle.api.instrumentation.StandardTags;
+import com.oracle.truffle.api.instrumentation.Tag;
 import com.oracle.truffle.api.instrumentation.test.InstrumentationTestLanguage;
+import com.oracle.truffle.api.nodes.Node;
+import com.oracle.truffle.api.nodes.RootNode;
+import com.oracle.truffle.api.source.SourceSection;
+import com.oracle.truffle.api.test.polyglot.ProxyLanguage;
+import java.util.List;
 
 import org.graalvm.polyglot.Source;
 
@@ -192,7 +207,7 @@ public class SuspensionFilterTest extends AbstractDebugTest {
             });
             expectSuspended((SuspendedEvent event) -> {
                 Assert.assertFalse(event.isLanguageContextInitialized());
-                checkState(event, 8, true, "STATEMENT(CONSTANT(1))").prepareContinue();
+                checkState(event, 8, true, "STATEMENT(CONSTANT(1))", "loopIndex0", String.valueOf(0), "loopResult0", "Null").prepareContinue();
             });
             expectDone();
         }
@@ -247,11 +262,7 @@ public class SuspensionFilterTest extends AbstractDebugTest {
                 session.install(bp);
                 event.prepareContinue();
             });
-            // Breakpoint stops there:
-            expectSuspended((SuspendedEvent event) -> {
-                checkState(event, 3, true, "STATEMENT(EXPRESSION)");
-                event.prepareContinue();
-            });
+            // Breakpoint does not stop there.
             expectDone();
         }
     }
@@ -292,12 +303,12 @@ public class SuspensionFilterTest extends AbstractDebugTest {
             session.suspendNextExecution();
             startEval(source);
             expectSuspended((SuspendedEvent event) -> {
-                checkState(event, 3, true, "STATEMENT(CALL(intern))");
+                checkState(event, 3, true, "STATEMENT(CALL(intern))", "loopIndex0", String.valueOf(0), "loopResult0", "Null");
                 event.prepareStepInto(1);
             });
             // Step into does not go into the internal source:
             expectSuspended((SuspendedEvent event) -> {
-                checkState(event, 3, true, "STATEMENT(CALL(intern))");
+                checkState(event, 3, true, "STATEMENT(CALL(intern))", "loopIndex0", String.valueOf(1), "loopResult0", "42");
                 // do not ignore instenal sources again
                 session.setSteppingFilter(SuspensionFilter.newBuilder().includeInternal(true).build());
                 event.prepareStepInto(1);
@@ -307,6 +318,61 @@ public class SuspensionFilterTest extends AbstractDebugTest {
                 checkState(event, 3, true, "STATEMENT(EXPRESSION)");
                 event.prepareContinue();
             });
+            expectDone();
+        }
+    }
+
+    @Test
+    public void testInternalBreakpoints() throws Exception {
+        final Source internSource = Source.newBuilder(InstrumentationTestLanguage.ID, "ROOT(\n" +
+                        "  DEFINE(intern, \n" +
+                        "    STATEMENT(EXPRESSION)\n" +
+                        "  ),\n" +
+                        "  CALL(intern)\n" +
+                        ")\n", "intern").internal(true).build();
+        try (DebuggerSession session = startSession()) {
+            Breakpoint breakpoint = Breakpoint.newBuilder(getSourceImpl(internSource)).lineIs(3).build();
+            session.install(breakpoint);
+            startEval(internSource);
+            // By default, breakpoint does not stop in the internal source.
+            expectDone();
+
+            // When allowed by the suspension filter, it does stop:
+            session.setSteppingFilter(SuspensionFilter.newBuilder().includeInternal(true).build());
+            startEval(internSource);
+            expectSuspended((SuspendedEvent event) -> {
+                checkState(event, 3, true, "STATEMENT(EXPRESSION)");
+                event.prepareContinue();
+            });
+            expectDone();
+
+            // In another session it does not stop:
+            try (DebuggerSession session2 = startSession()) {
+                session2.install(breakpoint);
+                startEval(internSource);
+                // Stops in the `session` only:
+                expectSuspended((SuspendedEvent event) -> {
+                    Assert.assertSame(session, event.getSession());
+                    event.prepareContinue();
+                });
+                expectDone();
+
+                // Stops in both sessions:
+                session2.setSteppingFilter(SuspensionFilter.newBuilder().includeInternal(true).build());
+                startEval(internSource);
+                expectSuspended((SuspendedEvent event) -> {
+                    Assert.assertSame(session, event.getSession());
+                    event.prepareContinue();
+                });
+                expectSuspended((SuspendedEvent event) -> {
+                    Assert.assertSame(session2, event.getSession());
+                    event.prepareContinue();
+                });
+                expectDone();
+            }
+            // Disallow internal sources again:
+            session.setSteppingFilter(SuspensionFilter.newBuilder().includeInternal(false).build());
+            startEval(internSource);
             expectDone();
         }
     }
@@ -389,6 +455,208 @@ public class SuspensionFilterTest extends AbstractDebugTest {
                 event.prepareContinue();
             });
             expectDone();
+        }
+    }
+
+    @Test
+    public void testSourceFilterBreakpoints() {
+        final Source source1 = Source.newBuilder(InstrumentationTestLanguage.ID, "ROOT(\n" +
+                        "  DEFINE(foo1,\n" +
+                        "    STATEMENT(CONSTANT(43))\n" +
+                        "  ))\n", "Source1").buildLiteral();
+        final Source source2 = Source.newBuilder(InstrumentationTestLanguage.ID, "ROOT(\n" +
+                        "  DEFINE(foo2,\n" +
+                        "    STATEMENT(CONSTANT(44))\n" +
+                        "  ))\n", "Source2").buildLiteral();
+        final Source source3 = testSource("ROOT(\n" +
+                        "  CALL(foo1),\n" +
+                        "  CALL(foo2)\n" +
+                        ")\n");
+        try (DebuggerSession session = startSession()) {
+            Breakpoint breakpoint1 = Breakpoint.newBuilder(getSourceImpl(source1)).lineIs(3).build();
+            Breakpoint breakpoint2 = Breakpoint.newBuilder(getSourceImpl(source2)).lineIs(3).build();
+            session.install(breakpoint1);
+            session.install(breakpoint2);
+            // Filter out all sections
+            SuspensionFilter suspensionFilter = SuspensionFilter.newBuilder().sourceIs(s -> false).build();
+            session.setSteppingFilter(suspensionFilter);
+            startEval(source1);
+            expectDone();
+            startEval(source2);
+            expectDone();
+            startEval(source3);
+            expectDone();
+
+            session.setSteppingFilter(SuspensionFilter.newBuilder().build()); // Allow all
+            startEval(source3);
+            expectSuspended((SuspendedEvent event) -> {
+                checkState(event, 3, true, "STATEMENT(CONSTANT(43))");
+                Assert.assertEquals(1, event.getBreakpoints().size());
+                Assert.assertSame(breakpoint1, event.getBreakpoints().get(0));
+                event.prepareContinue();
+            });
+            expectSuspended((SuspendedEvent event) -> {
+                checkState(event, 3, true, "STATEMENT(CONSTANT(44))");
+                Assert.assertEquals(1, event.getBreakpoints().size());
+                Assert.assertSame(breakpoint2, event.getBreakpoints().get(0));
+                event.prepareContinue();
+            });
+            expectDone();
+
+            // Filter out Source1:
+            Predicate<com.oracle.truffle.api.source.Source> filterSource1 = source -> {
+                return source.getName().indexOf("Source1") < 0;
+            };
+            suspensionFilter = SuspensionFilter.newBuilder().sourceIs(filterSource1).build();
+            session.setSteppingFilter(suspensionFilter);
+            startEval(source3);
+            expectSuspended((SuspendedEvent event) -> {
+                checkState(event, 3, true, "STATEMENT(CONSTANT(44))");
+                Assert.assertEquals(1, event.getBreakpoints().size());
+                Assert.assertSame(breakpoint2, event.getBreakpoints().get(0));
+                event.prepareContinue();
+            });
+            expectDone();
+
+            // A second session with different filters:
+            try (DebuggerSession session2 = startSession()) {
+                Predicate<com.oracle.truffle.api.source.Source> filterSource2 = source -> {
+                    return source.getName().indexOf("Source2") < 0;
+                };
+                session2.setSteppingFilter(SuspensionFilter.newBuilder().sourceIs(filterSource2).build());
+                session2.install(breakpoint1);
+                session2.install(breakpoint2);
+
+                startEval(source3);
+                expectSuspended((SuspendedEvent event) -> {
+                    checkState(event, 3, true, "STATEMENT(CONSTANT(43))");
+                    Assert.assertEquals(1, event.getBreakpoints().size());
+                    Assert.assertSame(breakpoint1, event.getBreakpoints().get(0));
+                    Assert.assertSame(session2, event.getSession());
+                    event.prepareContinue();
+                });
+                expectSuspended((SuspendedEvent event) -> {
+                    checkState(event, 3, true, "STATEMENT(CONSTANT(44))");
+                    Assert.assertEquals(1, event.getBreakpoints().size());
+                    Assert.assertSame(breakpoint2, event.getBreakpoints().get(0));
+                    Assert.assertSame(session, event.getSession());
+                    event.prepareContinue();
+                });
+                expectDone();
+            }
+        }
+    }
+
+    @Test
+    public void testUnavailableSourceSection() {
+        ProxyLanguage.setDelegate(createSectionAvailabilityTestLanguage());
+        try (DebuggerSession session = tester.startSession(SourceElement.ROOT)) {
+            session.suspendNextExecution();
+            for (Boolean availableOnly : List.of(Boolean.FALSE, Boolean.TRUE)) {
+                session.setSteppingFilter(SuspensionFilter.newBuilder().sourceSectionAvailableOnly(availableOnly).build());
+                for (int i = 0; i < 3; i++) {
+                    // Create RootWithUnavailableSection.sectionAvailability = i:
+                    Source source = Source.create(ProxyLanguage.ID, Integer.toString(i));
+                    tester.startEval(source);
+                    boolean suspends = !availableOnly || i == 0;
+                    if (suspends) {
+                        for (SuspendAnchor anchor : List.of(SuspendAnchor.BEFORE, SuspendAnchor.AFTER)) {
+                            final SuspendAnchor suspendAnchor = anchor;
+                            final int sectionAvailability = i;
+                            tester.expectSuspended((SuspendedEvent event) -> {
+                                Assert.assertEquals(suspendAnchor, event.getSuspendAnchor());
+                                SourceSection section = event.getSourceSection();
+                                switch (sectionAvailability) {
+                                    case 0:
+                                        Assert.assertTrue(section.isAvailable());
+                                        break;
+                                    case 1:
+                                        Assert.assertFalse(section.isAvailable());
+                                        break;
+                                    case 2:
+                                        Assert.assertNull(section);
+                                        break;
+                                }
+                                event.prepareStepOver(1);
+                            }, error -> error.contains("has null SourceSection"));
+                        }
+                    }
+                    tester.expectDone();
+                }
+            }
+        }
+    }
+
+    public static ProxyLanguage createSectionAvailabilityTestLanguage() {
+        return new ProxyLanguage() {
+            @Override
+            protected CallTarget parse(TruffleLanguage.ParsingRequest request) throws Exception {
+                return new TestRootNode(languageInstance, request.getSource()).getCallTarget();
+            }
+
+            final class TestRootNode extends RootNode {
+                @Node.Child RootWithUnavailableSection node;
+
+                TestRootNode(TruffleLanguage<?> language, com.oracle.truffle.api.source.Source source) {
+                    super(language);
+                    node = new RootWithUnavailableSection(source);
+                }
+
+                @Override
+                public Object execute(VirtualFrame frame) {
+                    return node.execute(frame);
+                }
+            }
+        };
+    }
+
+    @GenerateWrapper
+    static class RootWithUnavailableSection extends Node implements InstrumentableNode {
+
+        private final int sectionAvailability;
+        private final com.oracle.truffle.api.source.Source source;
+
+        RootWithUnavailableSection(com.oracle.truffle.api.source.Source source) {
+            this.sectionAvailability = Character.digit(source.getCharacters().charAt(0), 10);
+            this.source = source;
+        }
+
+        RootWithUnavailableSection(RootWithUnavailableSection root) {
+            this.sectionAvailability = root.sectionAvailability;
+            this.source = root.source;
+        }
+
+        @Override
+        public boolean isInstrumentable() {
+            return true;
+        }
+
+        @Override
+        public boolean hasTag(Class<? extends Tag> tag) {
+            return StandardTags.RootTag.class.equals(tag);
+        }
+
+        @Override
+        public InstrumentableNode.WrapperNode createWrapper(ProbeNode probe) {
+            return new RootWithUnavailableSectionWrapper(this, this, probe);
+        }
+
+        @Override
+        public SourceSection getSourceSection() {
+            switch (sectionAvailability) {
+                case 0: // Available
+                    return source.createSection(1);
+                case 1: // Unavailable
+                    return source.createUnavailableSection();
+                case 2: // null
+                    return null;
+                default:
+                    throw new IllegalStateException(String.format("Unknown sectionAvailability %d", sectionAvailability));
+            }
+        }
+
+        public int execute(@SuppressWarnings("unused") VirtualFrame frame) {
+            return 42;
         }
     }
 }

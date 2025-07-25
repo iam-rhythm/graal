@@ -24,8 +24,8 @@
  */
 package com.oracle.svm.core.windows.headers;
 
-import org.graalvm.nativeimage.Platform;
-import org.graalvm.nativeimage.Platforms;
+import static org.graalvm.nativeimage.c.function.CFunction.Transition.NO_TRANSITION;
+
 import org.graalvm.nativeimage.c.CContext;
 import org.graalvm.nativeimage.c.constant.CConstant;
 import org.graalvm.nativeimage.c.function.CFunction;
@@ -34,26 +34,44 @@ import org.graalvm.nativeimage.c.type.CIntPointer;
 import org.graalvm.word.PointerBase;
 import org.graalvm.word.UnsignedWord;
 
-//Checkstyle: stop
+import com.oracle.svm.core.windows.headers.WinBase.HANDLE;
+import com.oracle.svm.core.windows.headers.WindowsLibC.WCharPointer;
+
+// Checkstyle: stop
 
 /**
- * Definitions manually translated from the Windows header file fileapi.h.
+ * Definitions for Windows fileapi.h
  */
 @CContext(WindowsDirectives.class)
-@Platforms(Platform.WINDOWS.class)
 public class FileAPI {
 
-    /**
-     * Write nNumberOfBytesToWrite of lpBuffer to HANDLE hFile. Return non zero on success, zero on
-     * failure
-     */
+    /** Generic Access Rights */
+    @CConstant
+    public static native int GENERIC_READ();
+
+    /** Creates or opens a file or I/O device. */
+    @CFunction(transition = NO_TRANSITION)
+    public static native HANDLE CreateFileW(WCharPointer lpFileName, int dwDesiredAccess, int dwShareMode,
+                    PointerBase lpSecurityAttributes, int dwCreationDisposition, int dwFlagsAndAttributes,
+                    HANDLE hTemplateFile);
+
+    /** CreateFile - dwShareMode Constants */
+    @CConstant
+    public static native int FILE_SHARE_READ();
+
+    @CConstant
+    public static native int FILE_SHARE_DELETE();
+
+    /** CreateFile - dwCreationDisposition Constants */
+    @CConstant
+    public static native int OPEN_EXISTING();
+
     @CFunction
-    public static native int WriteFile(int hFile, CCharPointer lpBuffer, UnsignedWord nNumberOfBytesToWrite,
+    public static native int WriteFile(HANDLE hFile, CCharPointer lpBuffer, UnsignedWord nNumberOfBytesToWrite,
                     CIntPointer lpNumberOfBytesWritten, PointerBase lpOverlapped);
 
-    /** Flush the File Buffers for hFile. Return non zero on success, zero on failure */
     @CFunction
-    public static native int FlushFileBuffers(int hFile);
+    public static native int FlushFileBuffers(HANDLE hFile);
 
     @CConstant
     public static native int STD_INPUT_HANDLE();
@@ -64,8 +82,20 @@ public class FileAPI {
     @CConstant
     public static native int STD_ERROR_HANDLE();
 
-    /** Retrieve a handle for standard input, output, error */
     @CFunction
-    public static native int GetStdHandle(int stdHandle);
+    public static native HANDLE GetStdHandle(int stdHandle);
 
+    @CFunction(transition = NO_TRANSITION)
+    public static native int GetTempPathW(int nBufferLength, WCharPointer lpBuffer);
+
+    public static class NoTransition {
+        @CFunction(transition = NO_TRANSITION)
+        public static native int WriteFile(HANDLE hFile, CCharPointer lpBuffer, UnsignedWord nNumberOfBytesToWrite, CIntPointer lpNumberOfBytesWritten, PointerBase lpOverlapped);
+
+        @CFunction(transition = NO_TRANSITION)
+        public static native int FlushFileBuffers(HANDLE hFile);
+
+        @CFunction(transition = NO_TRANSITION)
+        public static native HANDLE GetStdHandle(int stdHandle);
+    }
 }

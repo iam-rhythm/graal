@@ -24,31 +24,61 @@
  */
 package com.oracle.svm.truffle;
 
-import org.graalvm.compiler.truffle.common.CompilableTruffleAST;
-import org.graalvm.compiler.truffle.compiler.TruffleCompilationIdentifier;
-import org.graalvm.compiler.truffle.runtime.OptimizedCallTarget;
-
 import com.oracle.svm.core.graal.code.SubstrateCompilationIdentifier;
+import com.oracle.truffle.compiler.TruffleCompilable;
+import com.oracle.truffle.compiler.TruffleCompilationTask;
 
-public class SubstrateTruffleCompilationIdentifier extends SubstrateCompilationIdentifier implements TruffleCompilationIdentifier {
+import jdk.graal.compiler.debug.GraalError;
+import jdk.graal.compiler.truffle.TruffleCompilationIdentifier;
 
-    private final OptimizedCallTarget optimizedCallTarget;
+public final class SubstrateTruffleCompilationIdentifier extends SubstrateCompilationIdentifier implements TruffleCompilationIdentifier {
 
-    public SubstrateTruffleCompilationIdentifier(OptimizedCallTarget optimizedCallTarget) {
-        this.optimizedCallTarget = optimizedCallTarget;
+    private final TruffleCompilationTask task;
+    private final TruffleCompilable compilable;
+
+    public SubstrateTruffleCompilationIdentifier(TruffleCompilationTask task, TruffleCompilable compilable) {
+        this.task = task;
+        this.compilable = compilable;
     }
 
     @Override
-    protected StringBuilder buildName(StringBuilder sb) {
-        return sb.append(optimizedCallTarget.toString());
+    protected StringBuilder buildString(StringBuilder sb, Verbosity verbosity) {
+        switch (verbosity) {
+            case ID:
+                buildID(sb);
+                break;
+            case NAME:
+                buildName(sb);
+                break;
+            case DETAILED:
+                buildID(sb);
+                sb.append('[');
+                buildName(sb);
+                sb.append(']');
+                break;
+            default:
+                throw new GraalError("Unknown verbosity: " + verbosity);
+        }
+        return sb;
     }
 
     @Override
-    public CompilableTruffleAST getCompilable() {
-        return optimizedCallTarget;
+    protected void buildName(StringBuilder sb) {
+        sb.append(compilable.toString());
     }
 
     @Override
-    public void close() {
+    public TruffleCompilationTask getTask() {
+        return task;
+    }
+
+    @Override
+    public TruffleCompilable getCompilable() {
+        return compilable;
+    }
+
+    @Override
+    public long getTruffleCompilationId() {
+        return id;
     }
 }

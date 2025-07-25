@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,21 +40,14 @@
  */
 package com.oracle.truffle.nfi.test;
 
-import com.oracle.truffle.api.CallTarget;
-import com.oracle.truffle.api.frame.VirtualFrame;
-import com.oracle.truffle.api.interop.ForeignAccess;
-import com.oracle.truffle.api.interop.InteropException;
-import com.oracle.truffle.api.interop.Message;
-import com.oracle.truffle.api.interop.TruffleObject;
-import com.oracle.truffle.api.nodes.Node;
-import com.oracle.truffle.nfi.test.interop.TestCallback;
-import com.oracle.truffle.tck.TruffleRunner;
-import com.oracle.truffle.tck.TruffleRunner.Inject;
+import static org.hamcrest.CoreMatchers.instanceOf;
+import static org.hamcrest.CoreMatchers.is;
+
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.function.DoubleFunction;
-import static org.hamcrest.CoreMatchers.instanceOf;
-import static org.hamcrest.CoreMatchers.is;
+
+import org.hamcrest.MatcherAssert;
 import org.junit.Assert;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -63,20 +56,28 @@ import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameter;
 import org.junit.runners.Parameterized.Parameters;
 
+import com.oracle.truffle.api.CallTarget;
+import com.oracle.truffle.api.frame.VirtualFrame;
+import com.oracle.truffle.api.interop.InteropException;
+import com.oracle.truffle.api.interop.InteropLibrary;
+import com.oracle.truffle.nfi.test.interop.TestCallback;
+import com.oracle.truffle.tck.TruffleRunner;
+import com.oracle.truffle.tck.TruffleRunner.Inject;
+
 @RunWith(Parameterized.class)
 @Parameterized.UseParametersRunnerFactory(TruffleRunner.ParametersFactory.class)
 public class GlobalNFITest extends NFITest {
 
-    static TruffleObject registerGlobalCallback;
-    static TruffleObject testGlobalCallback;
+    static Object registerGlobalCallback;
+    static Object testGlobalCallback;
 
     @BeforeClass
     public static void initContext() {
         registerGlobalCallback = lookupAndBind("registerGlobalCallback", "((double):double):object");
         testGlobalCallback = lookupAndBind("testGlobalCallback", "(double):double");
-        TruffleObject initializeGlobalContext = lookupAndBind("initializeGlobalContext", "(env):void");
+        Object initializeGlobalContext = lookupAndBind("initializeGlobalContext", "(env):void");
         try {
-            ForeignAccess.sendExecute(Message.EXECUTE.createNode(), initializeGlobalContext);
+            UNCACHED_INTEROP.execute(initializeGlobalContext);
         } catch (InteropException ex) {
             throw new AssertionError(ex);
         }
@@ -101,25 +102,25 @@ public class GlobalNFITest extends NFITest {
 
     public class TestGlobalMethod extends NFITestRootNode {
 
-        private final TruffleObject register = registerGlobalCallback;
-        private final TruffleObject test = testGlobalCallback;
+        private final Object register = registerGlobalCallback;
+        private final Object test = testGlobalCallback;
 
-        @Child Node executeRegister = Message.EXECUTE.createNode();
-        @Child Node executeTest = Message.EXECUTE.createNode();
+        @Child InteropLibrary registerInterop = getInterop(register);
+        @Child InteropLibrary testInterop = getInterop(test);
 
-        TruffleObject handle; // to keep the native callback alive
+        Object handle; // to keep the native callback alive
 
         @Override
         public Object executeTest(VirtualFrame frame) throws InteropException {
-            handle = (TruffleObject) ForeignAccess.sendExecute(executeRegister, register, callback);
-            return ForeignAccess.sendExecute(executeTest, test, frame.getArguments()[0]);
+            handle = registerInterop.execute(register, callback);
+            return testInterop.execute(test, frame.getArguments()[0]);
         }
     }
 
     @Test
     public void test(@Inject(TestGlobalMethod.class) CallTarget callTarget) {
         Object ret = callTarget.call(42.0);
-        Assert.assertThat("return value", ret, is(instanceOf(Double.class)));
+        MatcherAssert.assertThat("return value", ret, is(instanceOf(Double.class)));
         Assert.assertEquals("return value", op.apply(42.0), ret);
     }
 }

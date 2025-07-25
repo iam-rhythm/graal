@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates.
+ * Copyright (c) 2017, 2021, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -29,17 +29,21 @@
  */
 package com.oracle.truffle.llvm.runtime.interop.convert;
 
-import com.oracle.truffle.api.CompilerDirectives;
 import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
+import com.oracle.truffle.api.dsl.Cached;
+import com.oracle.truffle.api.dsl.GenerateUncached;
+import com.oracle.truffle.api.dsl.GenerateAOT;
 import com.oracle.truffle.api.dsl.Specialization;
-import com.oracle.truffle.api.interop.TruffleObject;
+import com.oracle.truffle.api.interop.InteropLibrary;
+import com.oracle.truffle.api.interop.UnsupportedMessageException;
 import com.oracle.truffle.api.interop.UnsupportedTypeException;
-import com.oracle.truffle.llvm.runtime.LLVMBoxedPrimitive;
-import com.oracle.truffle.llvm.runtime.memory.LLVMMemory;
+import com.oracle.truffle.api.library.CachedLibrary;
+import com.oracle.truffle.api.profiles.BranchProfile;
+import com.oracle.truffle.llvm.runtime.except.LLVMPolyglotException;
+import com.oracle.truffle.llvm.runtime.library.internal.LLVMAsForeignLibrary;
 
+@GenerateUncached
 public abstract class ToDouble extends ForeignToLLVM {
-
-    @Child private ForeignToLLVM toDouble;
 
     @Specialization
     protected double fromInt(int value) {
@@ -82,30 +86,27 @@ public abstract class ToDouble extends ForeignToLLVM {
     }
 
     @Specialization
-    protected double fromString(String value) {
-        return getSingleStringCharacter(value);
+    protected double fromString(String value,
+                    @Cached BranchProfile exception) {
+        return getSingleStringCharacter(value, exception);
     }
 
-    @Specialization
-    protected double fromForeignPrimitive(LLVMBoxedPrimitive boxed) {
-        return recursiveConvert(boxed.getValue());
-    }
-
-    @Specialization(guards = "notLLVM(obj)")
-    protected double fromTruffleObject(TruffleObject obj) {
-        return recursiveConvert(fromForeign(obj));
-    }
-
-    private double recursiveConvert(Object o) {
-        if (toDouble == null) {
-            CompilerDirectives.transferToInterpreterAndInvalidate();
-            toDouble = insert(getNodeFactory().createForeignToLLVM(ForeignToLLVMType.DOUBLE));
+    @Specialization(limit = "5", guards = {"foreigns.isForeign(obj)", "interop.isNumber(foreigns.asForeign(obj))"})
+    @GenerateAOT.Exclude
+    protected double fromForeign(Object obj,
+                    @CachedLibrary("obj") LLVMAsForeignLibrary foreigns,
+                    @CachedLibrary(limit = "3") InteropLibrary interop,
+                    @Cached BranchProfile exception) {
+        try {
+            return interop.asDouble(foreigns.asForeign(obj));
+        } catch (UnsupportedMessageException ex) {
+            exception.enter();
+            throw new LLVMPolyglotException(this, "Polyglot number can't be converted to double.");
         }
-        return (double) toDouble.executeWithTarget(o);
     }
 
     @TruffleBoundary
-    static double slowPathPrimitiveConvert(LLVMMemory memory, ForeignToLLVM thiz, Object value) {
+    static double slowPathPrimitiveConvert(ForeignToLLVM thiz, Object value) throws UnsupportedTypeException {
         if (value instanceof Number) {
             return ((Number) value).doubleValue();
         } else if (value instanceof Boolean) {
@@ -113,13 +114,13 @@ public abstract class ToDouble extends ForeignToLLVM {
         } else if (value instanceof Character) {
             return (char) value;
         } else if (value instanceof String) {
-            return thiz.getSingleStringCharacter((String) value);
-        } else if (value instanceof LLVMBoxedPrimitive) {
-            return slowPathPrimitiveConvert(memory, thiz, ((LLVMBoxedPrimitive) value).getValue());
-        } else if (value instanceof TruffleObject && notLLVM((TruffleObject) value)) {
-            return slowPathPrimitiveConvert(memory, thiz, thiz.fromForeign((TruffleObject) value));
+            return thiz.getSingleStringCharacter((String) value, BranchProfile.getUncached());
         } else {
-            throw UnsupportedTypeException.raise(new Object[]{value});
+            try {
+                return InteropLibrary.getFactory().getUncached().asDouble(value);
+            } catch (UnsupportedMessageException ex) {
+                throw UnsupportedTypeException.create(new Object[]{value});
+            }
         }
     }
 }

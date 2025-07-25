@@ -24,6 +24,7 @@
  */
 package com.oracle.svm.core.stack;
 
+import org.graalvm.nativeimage.c.function.CodePointer;
 import org.graalvm.nativeimage.c.struct.RawField;
 import org.graalvm.nativeimage.c.struct.RawStructure;
 import org.graalvm.word.Pointer;
@@ -31,11 +32,23 @@ import org.graalvm.word.PointerBase;
 
 /**
  * A stack-based structure that is present in the stack frame of a Java method that calls to C code.
- * It stores the last Java frame information, so that stack walking can start the stack walk from
- * there. The head of the linked list is maintained by {@link JavaFrameAnchors}
+ * It stores the last Java frame information (stack pointer and instruction pointer), so that stack
+ * walking can start the stack walk from there. The head of the linked list is maintained by
+ * {@link JavaFrameAnchors}
  */
 @RawStructure
-public interface JavaFrameAnchor extends PointerBase {
+public interface JavaFrameAnchor extends JavaFrameAnchorFields {
+    long MAGIC = 0xFEDCBA9876543210L;
+
+    @RawField
+    long getMagicAfter();
+
+    @RawField
+    void setMagicAfter(long value);
+}
+
+@RawStructure
+interface JavaFrameAnchorFields extends JavaFrameAnchorPreamble {
     @RawField
     JavaFrameAnchor getPreviousAnchor();
 
@@ -47,4 +60,19 @@ public interface JavaFrameAnchor extends PointerBase {
 
     @RawField
     void setLastJavaSP(Pointer value);
+
+    @RawField
+    CodePointer getLastJavaIP();
+
+    @RawField
+    void setLastJavaIP(CodePointer value);
+}
+
+@RawStructure
+interface JavaFrameAnchorPreamble extends PointerBase {
+    @RawField
+    long getMagicBefore();
+
+    @RawField
+    void setMagicBefore(long value);
 }

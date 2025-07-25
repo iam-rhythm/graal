@@ -24,87 +24,124 @@
  */
 package com.oracle.svm.core.posix.darwin;
 
-import static com.oracle.svm.core.posix.headers.Time.gettimeofday;
-import static com.oracle.svm.core.posix.headers.darwin.DarwinTime.mach_absolute_time;
-import static com.oracle.svm.core.posix.headers.darwin.DarwinTime.mach_timebase_info;
+import static com.oracle.svm.core.posix.headers.darwin.DarwinTime.NoTransitions.mach_absolute_time;
+import static com.oracle.svm.core.posix.headers.darwin.DarwinTime.NoTransitions.mach_timebase_info;
 
-import org.graalvm.nativeimage.Feature;
+import java.util.Objects;
+
 import org.graalvm.nativeimage.ImageSingletons;
 import org.graalvm.nativeimage.Platform;
 import org.graalvm.nativeimage.Platforms;
 import org.graalvm.nativeimage.StackValue;
-import org.graalvm.word.WordFactory;
 
-import com.oracle.svm.core.annotate.AutomaticFeature;
+import com.oracle.svm.core.Uninterruptible;
+import com.oracle.svm.core.annotate.Delete;
 import com.oracle.svm.core.annotate.Substitute;
 import com.oracle.svm.core.annotate.TargetClass;
-import com.oracle.svm.core.annotate.Uninterruptible;
-import com.oracle.svm.core.posix.headers.Time.timeval;
-import com.oracle.svm.core.posix.headers.Time.timezone;
-import com.oracle.svm.core.posix.headers.darwin.DarwinTime.MachTimebaseInfo;
+import com.oracle.svm.core.feature.AutomaticallyRegisteredImageSingleton;
+import com.oracle.svm.core.posix.PosixUtils;
+import com.oracle.svm.core.posix.headers.darwin.DarwinTime;
+import com.oracle.svm.core.util.BasedOnJDKFile;
 
-@Platforms(Platform.DARWIN_AND_JNI.class)
+import jdk.internal.misc.Unsafe;
+
 @TargetClass(java.lang.System.class)
-final class Target_java_lang_System {
+final class Target_java_lang_System_Darwin {
 
     @Substitute
-    @Uninterruptible(reason = "Does basic math after a few simple system calls")
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     private static long nanoTime() {
-        final Util_java_lang_System utilJavaLangSystem = ImageSingletons.lookup(Util_java_lang_System.class);
-
-        if (utilJavaLangSystem.fastTime) {
-            return mach_absolute_time();
-        }
-
-        if (!utilJavaLangSystem.timeBaseValid) {
-            MachTimebaseInfo timeBaseInfo = StackValue.get(MachTimebaseInfo.class);
-            if (mach_timebase_info(timeBaseInfo) == 0) {
-                if (timeBaseInfo.getdenom() == 1 && timeBaseInfo.getnumer() == 1) {
-                    utilJavaLangSystem.fastTime = true;
-                    return mach_absolute_time();
-                }
-                utilJavaLangSystem.factor = (double) timeBaseInfo.getnumer() / (double) timeBaseInfo.getdenom();
-            }
-            utilJavaLangSystem.timeBaseValid = true;
-        }
-
-        if (utilJavaLangSystem.factor != 0) {
-            return (long) (mach_absolute_time() * utilJavaLangSystem.factor);
-        }
-
-        /* High precision time is not available, fall back to low precision. */
-        timeval timeval = StackValue.get(timeval.class);
-        timezone timezone = WordFactory.nullPointer();
-        gettimeofday(timeval, timezone);
-        return timeval.tv_sec() * 1_000_000_000L + timeval.tv_usec() * 1_000L;
+        return ImageSingletons.lookup(DarwinTimeUtil.class).nanoTime();
     }
 
     @Substitute
     public static String mapLibraryName(String libname) {
+        Objects.requireNonNull(libname);
         return "lib" + libname + ".dylib";
     }
 }
 
-/** Additional static-like fields for {@link Target_java_lang_System}. */
-@Platforms(Platform.DARWIN_AND_JNI.class)
-final class Util_java_lang_System {
-    boolean timeBaseValid = false;
-    boolean fastTime = false;
-    double factor = 0.0;
+/** Additional static-like fields for {@link Target_java_lang_System_Darwin}. */
+@AutomaticallyRegisteredImageSingleton
+final class DarwinTimeUtil {
+    private static final Unsafe U = Unsafe.getUnsafe();
+    private static final long INITIALIZED_OFFSET = U.objectFieldOffset(DarwinTimeUtil.class, "initialized");
+    private static final long MAX_ABS_TIME_OFFSET = U.objectFieldOffset(DarwinTimeUtil.class, "maxAbsTime");
 
-    Util_java_lang_System() {
-        /* Nothing to do. */
+    @SuppressWarnings("unused") //
+    private volatile boolean initialized;
+    @SuppressWarnings("unused") //
+    private volatile long maxAbsTime;
+    private int numer;
+    private int denom;
+
+    @Platforms(Platform.HOSTED_ONLY.class)
+    DarwinTimeUtil() {
+    }
+
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-23+10/src/hotspot/os/bsd/os_bsd.cpp#L799-L821")
+    long nanoTime() {
+        if (!U.getBooleanAcquire(this, INITIALIZED_OFFSET)) {
+            /* Can be called by multiple threads but they should all query the same data. */
+            DarwinTime.MachTimebaseInfo timeBaseInfo = StackValue.get(DarwinTime.MachTimebaseInfo.class);
+            int status = mach_timebase_info(timeBaseInfo);
+            PosixUtils.checkStatusIs0(status, "mach_timebase_info() failed.");
+
+            numer = timeBaseInfo.getnumer();
+            denom = timeBaseInfo.getdenom();
+            /* Ensure that the stores from above are visible when initialized is set to true. */
+            U.putBooleanRelease(this, INITIALIZED_OFFSET, true);
+        }
+
+        long tm = mach_absolute_time();
+        long now = (tm * numer) / denom;
+        long prev = U.getLongOpaque(this, MAX_ABS_TIME_OFFSET);
+        if (now <= prev) {
+            return prev; // same or retrograde time;
+        }
+        long obsv = U.compareAndExchangeLong(this, MAX_ABS_TIME_OFFSET, prev, now);
+        assert obsv >= prev : "invariant to ensure monotonicity";
+        /*
+         * If the CAS succeeded then we're done and return "now". If the CAS failed and the observed
+         * value "obsv" is >= now then we should return "obsv". If the CAS failed and now > obsv >
+         * prv then some other thread raced this thread and installed a new value, in which case we
+         * could either (a) retry the entire operation, (b) retry trying to install now or (c) just
+         * return obsv. We use (c). No loop is required although in some cases we might discard a
+         * higher "now" value in deference to a slightly lower but freshly installed obsv value.
+         * That's entirely benign -- it admits no new orderings compared to (a) or (b) -- and
+         * greatly reduces coherence traffic. We might also condition (c) on the magnitude of the
+         * delta between obsv and now. Avoiding excessive CAS operations to hot RW locations is
+         * critical. See https://blogs.oracle.com/dave/entry/cas_and_cache_trivia_invalidate
+         */
+        return (prev == obsv) ? now : obsv;
     }
 }
 
-@Platforms(Platform.DARWIN_AND_JNI.class)
-@AutomaticFeature
-class DarwinSubsitutionsFeature implements Feature {
+/**
+ * Native functions don't exist on Darwin because this whole class is used, and should exist, only
+ * on Linux. See <code>java.util.prefs.Preferences#factory</code>.
+ */
+@TargetClass(className = "java.util.prefs.FileSystemPreferences")
+final class Target_java_util_prefs_FileSystemPreferences {
+    @Delete
+    private static native int[] lockFile0(String fileName, int permission, boolean shared);
 
-    @Override
-    public void afterRegistration(AfterRegistrationAccess access) {
-        ImageSingletons.add(Util_java_lang_System.class, new Util_java_lang_System());
-    }
+    @Delete
+    private static native int unlockFile0(int lockHandle);
+
+    @Delete
+    private static native int chmod(String fileName, int permission);
+}
+
+/**
+ * Not used in native image and has linker errors with XCode 13. Can be removed in the future when
+ * XCode 14 becomes omnipresent.
+ */
+@TargetClass(className = "sun.util.locale.provider.HostLocaleProviderAdapterImpl")
+final class Target_sun_util_locale_provider_HostLocaleProviderAdapterImpl {
+    @Delete
+    private static native String getDefaultLocale(int cat);
 }
 
 /** Dummy class to have a class with the file's name. */

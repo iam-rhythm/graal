@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2025, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -43,14 +43,16 @@ package org.graalvm.polyglot;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.io.Reader;
 import java.net.URI;
-import java.net.URISyntaxException;
 import java.net.URL;
+import java.nio.charset.Charset;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Objects;
 
-import org.graalvm.polyglot.impl.AbstractPolyglotImpl.AbstractSourceImpl;
+import org.graalvm.polyglot.impl.AbstractPolyglotImpl;
+import org.graalvm.polyglot.impl.AbstractPolyglotImpl.AbstractSourceDispatch;
 import org.graalvm.polyglot.io.ByteSequence;
 
 /**
@@ -61,18 +63,34 @@ import org.graalvm.polyglot.io.ByteSequence;
  *
  * Each file is represented as a canonical object, indexed by the absolute, canonical path name of
  * the file. File content is <em>read eagerly</em> and may be optionally <em>cached</em>. Sample
- * usage: <br>
+ * usage:
  *
- * {@link SourceSnippets#fromFile}
+ * <pre>
+ * File file = new File(dir, name);
+ * assert name.endsWith(".java") : "Imagine proper file";
+ *
+ * String language = Source.findLanguage(file);
+ * Source source = Source.newBuilder(language, file).build();
+ *
+ * assert file.getName().equals(source.getName());
+ * assert file.getPath().equals(source.getPath());
+ * assert file.toURI().equals(source.getURI());
+ * </pre>
  *
  * The starting point is {@link Source#newBuilder(String, java.io.File)} method.
  *
- * <h3>Read from an URL</h3>
+ * <h3>Read from a URL</h3>
  *
  * One can read remote or in JAR resources using the {@link Source#newBuilder(String, java.net.URL)}
- * factory: <br>
+ * factory:
  *
- * {@link SourceSnippets#fromURL}
+ * <pre>
+ * URL resource = relativeClass.getResource("sample.js");
+ * Source source = Source.newBuilder("js", resource).build();
+ * assert resource.toExternalForm().equals(source.getPath());
+ * assert "sample.js".equals(source.getName());
+ * assert resource.toURI().equals(source.getURI());
+ * </pre>
  *
  * Each URL source is represented as a canonical object, indexed by the URL. Contents are <em>read
  * eagerly</em> once the {@link Builder#build()} method is called.
@@ -82,14 +100,22 @@ import org.graalvm.polyglot.io.ByteSequence;
  * An anonymous immutable code snippet can be created from a string via the
  * {@link Source#newBuilder(String, java.lang.CharSequence, String) } factory method: <br>
  *
- * {@link SourceSnippets#fromAString}
+ * <pre>
+ * Source source = Source.newBuilder("js", "function() {\n" + "  return 'Hi';\n" + "}\n", "hi.js").buildLiteral();
+ * assert "hi.js".equals(source.getName());
+ * </pre>
  *
  * <h3>Reading from a stream</h3>
  *
  * If one has a {@link Reader} one can convert its content into a {@link Source} via
  * {@link Source#newBuilder(String, java.io.Reader, String)} method: <br>
  *
- * {@link SourceSnippets#fromReader}
+ * <pre>
+ * Reader stream = new InputStreamReader(
+ *                 relativeClass.getResourceAsStream("sample.js"));
+ * Source source = Source.newBuilder("js", stream, "sample.js").build();
+ * assert "sample.js".equals(source.getName());
+ * </pre>
  *
  * the content is <em>read eagerly</em> once the {@link Builder#build()} method is called.
  *
@@ -98,7 +124,12 @@ import org.graalvm.polyglot.io.ByteSequence;
  * Sources can be created from bytes. Please note that all character related methods will throw an
  * {@link UnsupportedOperationException} if that is the case.
  *
- * {@link SourceSnippets#fromBytes}
+ * <pre>
+ * byte[] bytes = new byte[]{ /* Binary &#42;/ };
+ * Source source = Source.newBuilder("llvm",
+ *                 ByteSequence.create(bytes),
+ *                 "&lt;literal&gt;").buildLiteral();
+ * </pre>
  *
  * <h2>Attributes</h2>
  *
@@ -110,55 +141,54 @@ import org.graalvm.polyglot.io.ByteSequence;
  *
  * <h2>Character and byte based Sources</h2>
  *
- * A source is either {@link #hasBytes() byte} or {@link #hasCharacters() character} based. For
- * literal sources it depends on whether the byte or character based factory method was used. When
- * the source was loaded from a {@link File file} or {@link URL url} then the
- * {@link Language#getDefaultMimeType() default MIME type} of the provided language will be used to
- * determine whether bytes or characters should be loaded. The behavior can be customized by
- * specifying a {@link Builder#mimeType(String) MIME type} or {@link Builder#content(ByteSequence)
- * content} explicitly. If the specified or inferred MIME type starts with <code>'text/</code> or
- * the MIME types is <code>null</code> then it will be interpreted as character based, otherwise
- * byte based.
+ * A source is {@link #hasBytes() byte} or {@link #hasCharacters() character} based, or none of
+ * those when no content is specified. For literal sources it depends on whether the byte or
+ * character based factory method was used. When the source was loaded from a {@link File file} or
+ * {@link URL url} then the {@link Language#getDefaultMimeType() default MIME type} of the provided
+ * language will be used to determine whether bytes or characters should be loaded. The behavior can
+ * be customized by specifying a {@link Builder#mimeType(String) MIME type} or
+ * {@link Builder#content(ByteSequence) content} explicitly. If the specified or inferred MIME type
+ * starts with <code>'text/</code> or the MIME types is <code>null</code> then it will be
+ * interpreted as character based, otherwise byte based.
  *
  * @see Context#eval(Source) To evaluate sources.
  * @see Source#findLanguage(File) To detect a language using a File
- * @see Source#findLanguage(URL) To detect a language using an URL.
+ * @see Source#findLanguage(URL) To detect a language using a URL.
  * @see Source#findMimeType(File) To detect a MIME type using a File.
- * @see Source#findMimeType(URL) To detect a MIME type using an URL.
- * @since 1.0
+ * @see Source#findMimeType(URL) To detect a MIME type using a URL.
+ * @since 19.0
  */
 public final class Source {
 
-    private static volatile AbstractSourceImpl IMPL;
+    private static volatile AbstractPolyglotImpl IMPL;
 
-    static AbstractSourceImpl getImpl() {
+    static AbstractPolyglotImpl getImpl() {
         if (IMPL == null) {
             synchronized (Engine.class) {
                 if (IMPL == null) {
-                    IMPL = Engine.getImpl().getSourceImpl();
-                    SourceSection.IMPL = Engine.getImpl().getSourceSectionImpl();
+                    IMPL = Engine.getImpl();
                 }
             }
         }
         return IMPL;
     }
 
-    final String language;
-    final Object impl;
+    final AbstractSourceDispatch dispatch;
+    final Object receiver;
 
-    Source(String language, Object impl) {
-        this.language = language;
-        this.impl = impl;
+    Source(AbstractSourceDispatch dispatch, Object receiver) {
+        this.dispatch = dispatch;
+        this.receiver = receiver;
     }
 
     /**
      * Returns the language this source created with. The string returned matches the
      * {@link Language#getId() id} of the language.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public String getLanguage() {
-        return language;
+        return dispatch.getLanguage(receiver);
     }
 
     /**
@@ -168,30 +198,32 @@ public final class Source {
      *
      * @return the name of the guest language program
      * @see Builder#name(String)
-     * @since 1.0
+     * @since 19.0
      */
     public String getName() {
-        return getImpl().getName(impl);
+        return dispatch.getName(receiver);
     }
 
     /**
      * The fully qualified name of the source. In case this source originates from a {@link File},
-     * then the default path is the normalized, {@link File#getCanonicalPath() canonical path}.
+     * then the path is the normalized, {@link File#getCanonicalPath() canonical path} for absolute
+     * files, or the relative path otherwise. If the source originates from an {@link URL}, then
+     * it's the path component of the URL.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public String getPath() {
-        return getImpl().getPath(impl);
+        return dispatch.getPath(receiver);
     }
 
     /**
      * The URL if the source is retrieved via URL.
      *
      * @return URL or <code>null</code>
-     * @since 1.0
+     * @since 19.0
      */
     public URL getURL() {
-        return getImpl().getURL(impl);
+        return dispatch.getURL(receiver);
     }
 
     /**
@@ -202,10 +234,10 @@ public final class Source {
      * {@link Source#newBuilder(String, java.io.File) file on a disk} changes and is re-loaded.
      *
      * @return a URI, never <code>null</code>
-     * @since 1.0
+     * @since 19.0
      */
     public URI getURI() {
-        return getImpl().getURI(impl);
+        return dispatch.getURI(receiver);
     }
 
     /**
@@ -217,10 +249,10 @@ public final class Source {
      * building it}.
      *
      * @return whether this source is marked as <em>interactive</em>
-     * @since 1.0
+     * @since 19.0
      */
     public boolean isInteractive() {
-        return getImpl().isInteractive(impl);
+        return dispatch.isInteractive(receiver);
     }
 
     /**
@@ -236,10 +268,10 @@ public final class Source {
      * it}.
      *
      * @return whether this source is marked as <em>internal</em>
-     * @since 1.0
+     * @since 19.0
      */
     public boolean isInternal() {
-        return getImpl().isInternal(impl);
+        return dispatch.isInternal(receiver);
     }
 
     /**
@@ -248,30 +280,30 @@ public final class Source {
      *
      * @throws UnsupportedOperationException if this source cannot contain {@link #hasCharacters()
      *             characters}.
-     * @since 1.0
+     * @since 19.0
      */
     public Reader getReader() {
-        return getImpl().getReader(impl);
+        return dispatch.getReader(receiver);
     }
 
     /**
-     * @since 1.0
+     * @since 19.0
      * @deprecated use {@link #getReader()}, {@link #getCharacters()} or {@link #getBytes()}
      *             instead. The implementation is inefficient and can not distinguish byte and
      *             character based sources.
      */
-    @Deprecated
+    @Deprecated(since = "19.0")
     public InputStream getInputStream() {
-        return getImpl().getInputStream(impl);
+        return dispatch.getInputStream(receiver);
     }
 
     /**
      * Gets the number of characters or bytes of the source.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public int getLength() {
-        return getImpl().getLength(impl);
+        return dispatch.getLength(receiver);
     }
 
     /**
@@ -279,10 +311,10 @@ public final class Source {
      *
      * @throws UnsupportedOperationException if this source cannot contain {@link #hasCharacters()
      *             characters}.
-     * @since 1.0
+     * @since 19.0
      */
     public CharSequence getCharacters() {
-        return getImpl().getCode(impl);
+        return dispatch.getCharacters(receiver);
     }
 
     /**
@@ -303,10 +335,10 @@ public final class Source {
      * @see Source#findMimeType(File)
      * @see Source#findMimeType(URL)
      * @return MIME type of this source or <code>null</code>, if not explicitly set.
-     * @since 1.0
+     * @since 19.0
      */
     public String getMimeType() {
-        return getImpl().getMimeType(impl);
+        return dispatch.getMimeType(receiver);
     }
 
     /**
@@ -316,10 +348,10 @@ public final class Source {
      * @throws UnsupportedOperationException if this source cannot contain {@link #hasCharacters()
      *             characters}.
      * @see #hasCharacters()
-     * @since 1.0
+     * @since 19.0
      */
     public CharSequence getCharacters(int lineNumber) {
-        return getImpl().getCode(impl, lineNumber);
+        return dispatch.getCharacters(receiver, lineNumber);
     }
 
     /**
@@ -328,16 +360,16 @@ public final class Source {
      * @throws UnsupportedOperationException if this source cannot contain {@link #hasBytes() bytes}
      *             .
      * @see #hasBytes()
-     * @since 1.0
+     * @since 19.0
      */
     public ByteSequence getBytes() {
-        return getImpl().getBytes(impl);
+        return dispatch.getBytes(receiver);
     }
 
     /**
      * Returns <code>true</code> if this source represents a character based source, else
-     * <code>false</code>. A source is either a byte based or a character based source, never both
-     * at the same time.
+     * <code>false</code>. A source is either a byte based, a character based, or with no content,
+     * but never both byte and character based at the same time.
      *
      * <p>
      * The following methods are only supported if {@link #hasCharacters()} is <code>true</code>:
@@ -351,24 +383,24 @@ public final class Source {
      * <li>{@link #getLineLength(int)}
      * </ul>
      *
-     * @since 1.0
+     * @since 19.0
      */
     public boolean hasCharacters() {
-        return getImpl().hasCharacters(impl);
+        return dispatch.hasCharacters(receiver);
     }
 
     /**
      * Returns <code>true</code> if this source represents a byte based source, else
-     * <code>false</code>. A source is either a byte based or a character based source, never both
-     * at the same time.
+     * <code>false</code>. A source is either a byte based, a character based, or with no content,
+     * but never both byte and character based at the same time.
      * <p>
      * The method {@link #getBytes()} is only supported if this method returns <code>true</code>.
      *
      * @see #getBytes()
-     * @since 1.0
+     * @since 19.0
      */
     public boolean hasBytes() {
-        return getImpl().hasBytes(impl);
+        return dispatch.hasBytes(receiver);
     }
 
     /**
@@ -378,10 +410,10 @@ public final class Source {
      *
      * @throws UnsupportedOperationException if this source cannot contain {@link #hasCharacters()
      *             characters}.
-     * @since 1.0
+     * @since 19.0
      */
     public int getLineCount() {
-        return getImpl().getLineCount(impl);
+        return dispatch.getLineCount(receiver);
     }
 
     /**
@@ -391,10 +423,10 @@ public final class Source {
      * @throws UnsupportedOperationException if this source cannot contain {@link #hasCharacters()
      *             characters}.
      * @throws IllegalArgumentException if the offset is outside the text contents
-     * @since 1.0
+     * @since 19.0
      */
     public int getLineNumber(int offset) throws IllegalArgumentException {
-        return getImpl().getLineNumber(impl, offset);
+        return dispatch.getLineNumber(receiver, offset);
     }
 
     /**
@@ -404,10 +436,10 @@ public final class Source {
      * @throws UnsupportedOperationException if this source cannot contain {@link #hasCharacters()
      *             characters}.
      * @throws IllegalArgumentException if the offset is outside the text contents
-     * @since 1.0
+     * @since 19.0
      */
     public int getColumnNumber(int offset) throws IllegalArgumentException {
-        return getImpl().getColumnNumber(impl, offset);
+        return dispatch.getColumnNumber(receiver, offset);
     }
 
     /**
@@ -416,10 +448,10 @@ public final class Source {
      * @throws UnsupportedOperationException if this source cannot contain {@link #hasCharacters()
      *             characters}.
      * @throws IllegalArgumentException if there is no such line in the text
-     * @since 1.0
+     * @since 19.0
      */
     public int getLineStartOffset(int lineNumber) throws IllegalArgumentException {
-        return getImpl().getLineStartOffset(impl, lineNumber);
+        return dispatch.getLineStartOffset(receiver, lineNumber);
     }
 
     /**
@@ -429,75 +461,86 @@ public final class Source {
      * @throws UnsupportedOperationException if this source cannot contain {@link #hasCharacters()
      *             characters}.
      * @throws IllegalArgumentException if there is no such line in the text
-     * @since 1.0
+     * @since 19.0
      */
     public int getLineLength(int lineNumber) throws IllegalArgumentException {
-        return getImpl().getLineLength(impl, lineNumber);
+        return dispatch.getLineLength(receiver, lineNumber);
     }
 
     /**
      * {@inheritDoc}
      *
-     * @since 1.0
+     * @since 19.0
      */
     @Override
     public String toString() {
-        return getImpl().toString(impl);
+        return dispatch.toString(receiver);
     }
 
     /**
      * {@inheritDoc}
      *
-     * @since 1.0
+     * @since 19.0
      */
     @Override
     public int hashCode() {
-        return getImpl().hashCode(impl);
+        return dispatch.hashCode(receiver);
     }
 
     /**
      * {@inheritDoc}
      *
-     * @since 1.0
+     * @since 19.0
      */
     @Override
     public boolean equals(Object obj) {
         Object otherImpl;
         if (obj instanceof Source) {
-            otherImpl = ((Source) obj).impl;
+            otherImpl = ((Source) obj).receiver;
         } else {
             return false;
         }
-        return getImpl().equals(impl, otherImpl);
+        return dispatch.equals(receiver, otherImpl);
     }
 
     /**
-     * Creates a new character based source from a character sequence. The given characters must not
-     * mutate after they were accessed for the first time.
+     * Creates a new character based literal source from a character sequence. The given characters
+     * must not mutate after they were accessed for the first time.
      * <p>
-     * Example usage: {@link SourceSnippets#fromAString}
+     * Use this method for sources that do originate from a literal. For file or URL sources use the
+     * appropriate builder constructor and {@link Builder#content(CharSequence)}. Example usage:
+     *
+     * <pre>
+     * Source source = Source.newBuilder("js", "function() {\n" + "  return 'Hi';\n" + "}\n", "hi.js").buildLiteral();
+     * assert "hi.js".equals(source.getName());
+     * </pre>
      *
      * @param language the language id, must not be <code>null</code>
      * @param characters the character sequence or string, must not be <code>null</code>
      * @param name the name of the source, if <code>null</code> then <code>"Unnamed"</code> will be
      *            used as name.
-     * @since 1.0
+     * @since 19.0
      */
     public static Builder newBuilder(String language, CharSequence characters, String name) {
         return EMPTY.new Builder(language, characters).name(name);
     }
 
     /**
-     * Creates a new byte based source from a byte sequence. The given bytes must not mutate after
-     * they were accessed for the first time.
+     * Creates a new byte based literal source from a byte sequence. The given bytes must not mutate
+     * after they were accessed for the first time.
      * <p>
-     * Example usage: {@link SourceSnippets#fromBytes}
+     * Use this method for sources that do originate from a literal. For file or URL sources use the
+     * appropriate builder constructor and {@link Builder#content(CharSequence)}. Example usage:
+     *
+     * <pre>
+     *
+     * </pre>
      *
      * @param language the language id, must not be <code>null</code>
      * @param bytes the byte sequence or string, must not be <code>null</code>
      * @param name the name of the source, if <code>null</code> then <code>"Unnamed"</code> will be
      *            used as name.
-     * @since 1.0
+     * @since 19.0
      */
     public static Builder newBuilder(String language, ByteSequence bytes, String name) {
         return EMPTY.new Builder(language, bytes).name(name);
@@ -510,12 +553,22 @@ public final class Source {
      * language, the {@link Builder#content(ByteSequence) contents} or the specified
      * {@link Builder#mimeType(String) MIME type}. A language may be detected from an existing file
      * using {@link #findLanguage(File)}.
-     * <p>
-     * Example usage: {@link SourceSnippets#fromFile}
+     *
+     * <pre>
+     * File file = new File(dir, name);
+     * assert name.endsWith(".java") : "Imagine proper file";
+     *
+     * String language = Source.findLanguage(file);
+     * Source source = Source.newBuilder(language, file).build();
+     *
+     * assert file.getName().equals(source.getName());
+     * assert file.getPath().equals(source.getPath());
+     * assert file.toURI().equals(source.getURI());
+     * </pre>
      *
      * @param language the language id, must not be <code>null</code>
      * @param file the file to use, must not be <code>null</code>
-     * @since 1.0
+     * @since 19.0
      */
     public static Builder newBuilder(String language, File file) {
         return EMPTY.new Builder(language, file);
@@ -529,22 +582,39 @@ public final class Source {
      * {@link Builder#mimeType(String) MIME type}. A language may be detected from an existing file
      * using {@link #findLanguage(URL)}.
      * <p>
-     * Example usage: {@link SourceSnippets#fromURL}
+     * Example usage:
+     *
+     * <pre>
+     * URL resource = relativeClass.getResource("sample.js");
+     * Source source = Source.newBuilder("js", resource).build();
+     * assert resource.toExternalForm().equals(source.getPath());
+     * assert "sample.js".equals(source.getName());
+     * assert resource.toURI().equals(source.getURI());
+     * </pre>
      *
      * @param language the language id, must not be <code>null</code>
      * @param url the URL to use and load, must not be <code>null</code>
-     * @since 1.0
+     * @since 19.0
      */
     public static Builder newBuilder(String language, URL url) {
         return EMPTY.new Builder(language, url);
     }
 
     /**
-     * Creates new character based source from a reader.
+     * Creates new character based literal source from a reader.
      * <p>
-     * Example usage: {@link SourceSnippets#fromReader}
+     * Use this method for sources that do originate from a literal. For file or URL sources use the
+     * appropriate builder constructor and {@link Builder#content(CharSequence)}.
      *
-     * @since 1.0
+     * <pre>
+     * Reader stream = new InputStreamReader(
+     *                 relativeClass.getResourceAsStream("sample.js"));
+     * Source source = Source.newBuilder("js", stream, "sample.js").build();
+     * assert "sample.js".equals(source.getName());
+     * </pre>
+     *
+     * @see Source
+     * @since 19.0
      */
     public static Builder newBuilder(String language, Reader source, String name) {
         return EMPTY.new Builder(language, source).name(name);
@@ -553,8 +623,11 @@ public final class Source {
     /**
      * Shortcut for creating a source object from a language and char sequence. The given characters
      * must not mutate after they were accessed for the first time.
+     * <p>
+     * Use for sources that do not come from a file, or URL. If they do, use the appropriate builder
+     * and {@link Builder#content(CharSequence)}.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public static Source create(String language, CharSequence source) {
         return newBuilder(language, source, "Unnamed").buildLiteral();
@@ -575,7 +648,7 @@ public final class Source {
      * @throws IOException if an error opening the file occurred.
      * @see #findMimeType(URL)
      * @see #findLanguage(String)
-     * @since 1.0
+     * @since 19.0
      */
     public static String findLanguage(File file) throws IOException {
         return getImpl().findLanguage(file);
@@ -596,7 +669,7 @@ public final class Source {
      * @throws IOException if an error opening the url occurred.
      * @see #findMimeType(URL)
      * @see #findLanguage(String)
-     * @since 1.0
+     * @since 19.0
      */
     public static String findLanguage(URL url) throws IOException {
         return getImpl().findLanguage(url);
@@ -609,7 +682,7 @@ public final class Source {
      *
      * @throws IOException if an error opening the file occurred.
      * @see #findLanguage(File)
-     * @since 1.0
+     * @since 19.0
      */
     public static String findMimeType(File file) throws IOException {
         return getImpl().findMimeType(file);
@@ -619,12 +692,12 @@ public final class Source {
      * Returns the probed MIME type for a given url, or <code>null</code> if no MIME type could be
      * resolved. Typically the MIME type is identified using the file extension, connection
      * meta-data and/or using it contents. Returns <code>null</code> if the language of the given
-     * file could not be detected. Probing the language of an URL may require to open a new URL
+     * file could not be detected. Probing the language of a URL may require to open a new URL
      * connection.
      *
      * @throws IOException if an error opening the url occurred.
      * @see #findLanguage(URL)
-     * @since 1.0
+     * @since 19.0
      */
     public static String findMimeType(URL url) throws IOException {
         return getImpl().findMimeType(url);
@@ -636,7 +709,7 @@ public final class Source {
      * languages are queried in the same order as returned by {@link Engine#getLanguages()}.
      * Mime-types don't adhere to the MIME type format will return <code>null</code>.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public static String findLanguage(String mimeType) {
         return getImpl().findLanguage(mimeType);
@@ -668,31 +741,60 @@ public final class Source {
 
     /**
      * Represents a builder to build {@link Source} objects.
-     *
+     * <p>
      * To load a source from disk one can use:
-     * <p>
-     * {@link SourceSnippets#fromFile}
-     * <p>
+     *
+     * <pre>
+     * File file = new File(dir, name);
+     * assert name.endsWith(".java") : "Imagine proper file";
+     *
+     * String language = Source.findLanguage(file);
+     * Source source = Source.newBuilder(language, file).build();
+     *
+     * assert file.getName().equals(source.getName());
+     * assert file.getPath().equals(source.getPath());
+     * assert file.toURI().equals(source.getURI());
+     * </pre>
+     *
      * To load source from a {@link URL} one can use:
-     * <p>
-     * {@link SourceSnippets#fromURL}
-     * <p>
+     *
+     * <pre>
+     * URL resource = relativeClass.getResource("sample.js");
+     * Source source = Source.newBuilder("js", resource).build();
+     * assert resource.toExternalForm().equals(source.getPath());
+     * assert "sample.js".equals(source.getName());
+     * assert resource.toURI().equals(source.getURI());
+     * </pre>
+     *
      * To create a source representing characters:
-     * <p>
-     * {@link SourceSnippets#fromAString}
-     * <p>
+     *
+     * <pre>
+     * Source source = Source.newBuilder("js", "function() {\n" + "  return 'Hi';\n" + "}\n", "hi.js").buildLiteral();
+     * assert "hi.js".equals(source.getName());
+     * </pre>
+     *
      * or read a source from a {@link Reader}:
-     * <p>
-     * {@link SourceSnippets#fromReader}
-     * <p>
+     *
+     * <pre>
+     * Reader stream = new InputStreamReader(
+     *                 relativeClass.getResourceAsStream("sample.js"));
+     * Source source = Source.newBuilder("js", stream, "sample.js").build();
+     * assert "sample.js".equals(source.getName());
+     * </pre>
+     *
      * To create a source representing bytes:
-     * <p>
-     * {@link SourceSnippets#fromBytes}
+     *
+     * <pre>
+     * byte[] bytes = new byte[]{ /* Binary &#42;/ };
+     * Source source = Source.newBuilder("llvm",
+     *                 ByteSequence.create(bytes),
+     *                 "&lt;literal&gt;").buildLiteral();
+     * </pre>
      *
      * Once your builder is configured, call {@link #build()} to perform the loading and
      * construction of new {@link Source}.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public class Builder {
 
@@ -705,6 +807,8 @@ public final class Source {
         private boolean cached = true;
         private Object content;
         private String mimeType;
+        private Charset fileEncoding;
+        private Map<String, String> options;
 
         Builder(String language, Object origin) {
             Objects.requireNonNull(language);
@@ -719,7 +823,7 @@ public final class Source {
          * @param newName name that replaces the previously given one. If set to <code>null</code>
          *            then <code>"Unnamed"</code> will be used.
          * @return instance of <code>this</code> builder
-         * @since 1.0
+         * @since 19.0
          */
         public Builder name(String newName) {
             this.name = newName;
@@ -731,11 +835,18 @@ public final class Source {
          * can ignore the real content of a file or URL and use already read one, or completely
          * different one. Example:
          *
-         * {@link SourceSnippets#fromURLWithOwnContent}
+         * <pre>
+         * URL resource = relativeClass.getResource("sample.js");
+         * Source source = Source.newBuilder("js", resource).content("{}").buildLiteral();
+         * assert resource.toExternalForm().equals(source.getPath());
+         * assert "sample.js".equals(source.getName());
+         * assert resource.toExternalForm().equals(source.getURI().toString());
+         * assert "{}".equals(source.getCharacters());
+         * </pre>
          *
          * @param code the code to be available via {@link Source#getCharacters()}
          * @return instance of this builder
-         * @since 1.0
+         * @since 19.0
          */
         public Builder content(String code) {
             return content((CharSequence) code);
@@ -747,12 +858,19 @@ public final class Source {
          * completely different one. The given characters must not mutate after they were accessed
          * for the first time. Example:
          *
-         * {@link SourceSnippets#fromURLWithOwnContent}
+         * <pre>
+         * URL resource = relativeClass.getResource("sample.js");
+         * Source source = Source.newBuilder("js", resource).content("{}").buildLiteral();
+         * assert resource.toExternalForm().equals(source.getPath());
+         * assert "sample.js".equals(source.getName());
+         * assert resource.toExternalForm().equals(source.getURI().toString());
+         * assert "{}".equals(source.getCharacters());
+         * </pre>
          *
          * @param characters the code to be available via {@link Source#getCharacters()}
          * @return instance of this builder - which's {@link #build()} method no longer throws an
          *         {@link IOException}
-         * @since 1.0
+         * @since 19.0
          */
         public Builder content(CharSequence characters) {
             Objects.requireNonNull(characters);
@@ -766,12 +884,20 @@ public final class Source {
          * completely different one. The given bytes must not mutate after they were accessed for
          * the first time. Example:
          *
-         * {@link SourceSnippets#fromURLWithOwnContent}
+         * <pre>
+         * URL resource = relativeClass.getResource("sample.js");
+         * Source source = Source.newBuilder("js", resource).content("{}").buildLiteral();
+         * assert resource.toExternalForm().equals(source.getPath());
+         * assert "sample.js".equals(source.getName());
+         * assert resource.toExternalForm().equals(source.getURI().toString());
+         * assert "{}".equals(source.getCharacters());
+         * </pre>
          *
          * @param bytes the code to be available via {@link Source#getBytes()}
          * @return instance of this builder - which's {@link #build()} method no longer throws an
          *         {@link IOException}
-         * @since 1.0
+         * @see #content(String)
+         * @since 19.0
          */
         public Builder content(ByteSequence bytes) {
             Objects.requireNonNull(bytes);
@@ -801,7 +927,7 @@ public final class Source {
          * @param mimeType the new mime type to be assigned, or <code>null</code> if default MIME
          *            type should be used.
          * @return instance of <code>this</code> builder ready to {@link #build() create new source}
-         * @since 1.0
+         * @since 19.0
          */
         public Builder mimeType(@SuppressWarnings("hiding") String mimeType) {
             validateMimeType(mimeType);
@@ -819,7 +945,7 @@ public final class Source {
          * influences the result of {@link Source#isInteractive()}.
          *
          * @return the instance of this builder
-         * @since 1.0
+         * @since 19.0
          */
         public Builder interactive(@SuppressWarnings("hiding") boolean interactive) {
             this.interactive = interactive;
@@ -837,7 +963,7 @@ public final class Source {
          * <p>
          *
          * @return the instance of this builder
-         * @since 1.0
+         * @since 19.0
          */
         public Builder internal(@SuppressWarnings("hiding") boolean internal) {
             this.internal = internal;
@@ -856,7 +982,7 @@ public final class Source {
          * then cached code for evaluated sources will be freed automatically.
          *
          * @return instance of <code>this</code> builder ready to {@link #build() create new source}
-         * @since 1.0
+         * @since 19.0
          */
         public Builder cached(@SuppressWarnings("hiding") boolean cached) {
             this.cached = cached;
@@ -871,7 +997,7 @@ public final class Source {
          *
          * @param newUri the URL to use instead of default one, cannot be <code>null</code>
          * @return the instance of this builder
-         * @since 1.0
+         * @since 19.0
          */
         public Builder uri(URI newUri) {
             Objects.requireNonNull(newUri);
@@ -880,14 +1006,74 @@ public final class Source {
         }
 
         /**
+         * Assigns an encoding used to read the file content. If the encoding is {@code null} then
+         * the file contained encoding information is used. If the file doesn't provide an encoding
+         * information the default {@code UTF-8} encoding is used.
+         *
+         * @param encoding the new file encoding to be used for reading the content
+         * @return instance of <code>this</code> builder ready to {@link #build() create new source}
+         * @since 19.0
+         */
+        public Builder encoding(Charset encoding) {
+            this.fileEncoding = encoding;
+            return this;
+        }
+
+        /**
+         * Sets a source option key and value for the built source. Source options allow you to
+         * attach language- or instrument-specific configuration to a source. These options are
+         * parsed and validated only when {@link Context#eval(Source)} or
+         * {@link Context#parse(Source)} is invoked, rather than when the source is created.
+         * <p>
+         * If the source is validated, all source options will be validated. Therefore, each
+         * language or instrument associated with a source option must be installed.
+         * <p>
+         * Source options of any language or instrument can be supplied to all sources. Some source
+         * options may only have an effect when provided to sources of the language with the same
+         * id. The available source option keys can be found in the respective language or
+         * instrument documentation, or at runtime via {@link Language#getSourceOptions()} or
+         * {@link Instrument#getSourceOptions()}.
+         *
+         * @param key the option key (must not be null)
+         * @param value the option value (must not be null)
+         * @see Context#eval(Source)
+         * @see Context#parse(Source)
+         * @see Language#getSourceOptions()
+         * @see Instrument#getSourceOptions()
+         * @since 25.0
+         */
+        public Builder option(String key, String value) {
+            Objects.requireNonNull(key);
+            Objects.requireNonNull(value);
+            if (this.options == null) {
+                this.options = new HashMap<>();
+            }
+            this.options.put(key, value);
+            return this;
+        }
+
+        /**
+         * Shortcut for setting multiple {@link #option(String, String) options} using a map. All
+         * values of the provided map must be non-null.
+         *
+         * @since 25.0
+         */
+        public Builder options(@SuppressWarnings("hiding") Map<String, String> options) {
+            for (var entry : options.entrySet()) {
+                option(entry.getKey(), entry.getValue());
+            }
+            return this;
+        }
+
+        /**
          * Uses configuration of this builder to create new {@link Source} object. The method throws
-         * an {@link IOException} if an error loading the source occured.
+         * an {@link IOException} if an error loading the source occurred.
          *
          * @return the source object
-         * @since 1.0
+         * @since 19.0
          */
         public Source build() throws IOException {
-            Source source = getImpl().build(language, origin, uri, name, mimeType, content, interactive, internal, cached);
+            Source source = (Source) getImpl().buildSource(language, origin, uri, name, mimeType, content, interactive, internal, cached, fileEncoding, null, null, options);
 
             // make sure origin is not consumed again if builder is used twice
             if (source.hasBytes()) {
@@ -901,13 +1087,13 @@ public final class Source {
         }
 
         /**
-         * Uses configuration of this builder to create new {@link Source} object. This method can
-         * only be used if the builder was created as
-         * {@link Source#newBuilder(String, CharSequence, String) string literal} builder and
-         * otherwise throws an {@link UnsupportedOperationException}.
+         * Uses configuration of this builder to create a new {@link Source} object. This method
+         * suppresses any {@link IOException} as {@link AssertionError} and should only be used if
+         * the builder was created using {@link Source#newBuilder(String, CharSequence, String) or
+         * Source#newBuilder(String, ByteSequence, String) byte sequence literal}.
          *
          * @return the source object
-         * @since 1.0
+         * @since 19.0
          */
         public Source buildLiteral() {
             try {
@@ -918,94 +1104,3 @@ public final class Source {
         }
     }
 }
-
-//@formatter:off
-//Checkstyle: stop
-class SourceSnippets {
- public static Source fromFile(File dir, String name) throws IOException  {
-     // BEGIN: SourceSnippets#fromFile
-     File file = new File(dir, name);
-     assert name.endsWith(".java") : "Imagine proper file";
-
-     String language = Source.findLanguage(file);
-     Source source = Source.newBuilder(language, file).build();
-
-     assert file.getName().equals(source.getName());
-     assert file.getPath().equals(source.getPath());
-     assert file.toURI().equals(source.getURI());
-     // END: SourceSnippets#fromFile
-     return source;
- }
-
- public static Source likeFileName(String fileName) throws IOException {
-     // BEGIN: SourceSnippets#likeFileName
-     File file = new File(fileName);
-     String language = Source.findLanguage(file);
-     Source source = Source.newBuilder(language, file.getCanonicalFile()).
-         name(file.getPath()).
-         build();
-     // END: SourceSnippets#likeFileName
-     return source;
- }
-
- public static Source fromURL(Class<?> relativeClass) throws URISyntaxException, IOException {
-     // BEGIN: SourceSnippets#fromURL
-     URL resource = relativeClass.getResource("sample.js");
-     Source source = Source.newBuilder("js", resource)
-                     .build();
-     assert resource.toExternalForm().equals(source.getPath());
-     assert "sample.js".equals(source.getName());
-     assert resource.toURI().equals(source.getURI());
-     // END: SourceSnippets#fromURL
-     return source;
- }
-
- public static Source fromURLWithOwnContent(Class<?> relativeClass) {
-     // BEGIN: SourceSnippets#fromURLWithOwnContent
-     URL resource = relativeClass.getResource("sample.js");
-     Source source = Source.newBuilder("js", resource)
-         .content("{}")
-         .buildLiteral();
-     assert resource.toExternalForm().equals(source.getPath());
-     assert "sample.js".equals(source.getName());
-     assert resource.toExternalForm().equals(source.getURI().toString());
-     assert "{}".equals(source.getCharacters());
-     // END: SourceSnippets#fromURLWithOwnContent
-     return source;
- }
-
- public static Source fromReader(Class<?> relativeClass) throws IOException {
-     // BEGIN: SourceSnippets#fromReader
-     Reader stream = new InputStreamReader(
-                     relativeClass.getResourceAsStream("sample.js")
-     );
-     Source source = Source.newBuilder("js", stream, "sample.js")
-         .build();
-     assert "sample.js".equals(source.getName());
-     // END: SourceSnippets#fromReader
-     return source;
- }
-
- public static Source fromAString() {
-     // BEGIN: SourceSnippets#fromAString
-     Source source = Source.newBuilder("js", "function() {\n"
-         + "  return 'Hi';\n"
-         + "}\n", "hi.js").buildLiteral();
-     assert "hi.js".equals(source.getName());
-     // END: SourceSnippets#fromAString
-     return source;
- }
-
- public static Source fromBytes() {
-     // BEGIN: SourceSnippets#fromBytes
-     byte[] bytes = new byte[] {/* Binary */};
-     Source source = Source.newBuilder("llvm",
-                     ByteSequence.create(bytes),
-                     "<literal>").buildLiteral();
-     // END: SourceSnippets#fromBytes
-     return source;
- }
-
- public static boolean loaded = true;
-}
-//@formatter:on

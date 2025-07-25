@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -45,30 +45,34 @@ import java.util.Objects;
 /**
  * Represents metadata for a single option.
  *
- * @since 1.0
+ * @since 19.0
  */
 public final class OptionDescriptor {
 
     private final OptionKey<?> key;
     private final String name;
     private final String help;
-    private final OptionCategory kind;
+    private final OptionCategory category;
     private final OptionStability stability;
     private final boolean deprecated;
+    private final String deprecationMessage;
+    private final String usageSyntax;
 
-    OptionDescriptor(OptionKey<?> key, String name, String help, OptionCategory kind, OptionStability stability, boolean deprecated) {
+    OptionDescriptor(OptionKey<?> key, String name, String help, OptionCategory category, OptionStability stability, boolean deprecated, String deprecationMessage, String usageSyntax) {
         this.key = key;
         this.name = name;
         this.help = help;
-        this.kind = kind;
+        this.category = category;
         this.stability = stability;
         this.deprecated = deprecated;
+        this.deprecationMessage = deprecationMessage;
+        this.usageSyntax = usageSyntax;
     }
 
     /**
      * Returns the name of the option that this descriptor represents.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public String getName() {
         return name;
@@ -77,7 +81,7 @@ public final class OptionDescriptor {
     /**
      * Returns the key for this option.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public OptionKey<?> getKey() {
         return key;
@@ -87,53 +91,128 @@ public final class OptionDescriptor {
      * Returns <code>true</code> if this option was marked deprecated. This indicates that the
      * option is going to be removed in a future release or its use is not recommended.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public boolean isDeprecated() {
         return deprecated;
     }
 
     /**
+     * Returns the deprecation reason and the recommended fix. For newlines, use <code>%n</code>.
+     *
+     * @since 20.1.0
+     */
+    public String getDeprecationMessage() {
+        return deprecationMessage;
+    }
+
+    /**
+     * Returns <code>true</code> if this option is an option map. Options maps allow to collect
+     * key=value pairs whose keys are unknown beforehand e.g. user defined properties.
+     *
+     * @since 19.2
+     */
+    public boolean isOptionMap() {
+        return getKey().getType().isOptionMap();
+    }
+
+    /**
      * Returns the user category of this option.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public OptionCategory getCategory() {
-        return kind;
+        return category;
     }
 
     /**
      * Returns the stability of this option.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public OptionStability getStability() {
         return stability;
     }
 
     /**
-     * Returns a human-readable description on how to use the option.
+     * Returns a human-readable description on how to use the option. For newlines, use
+     * <code>%n</code>.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public String getHelp() {
         return help;
     }
 
     /**
-     * {@inheritDoc}
+     * Specifies a human-readable syntax describing the accepted values for this option.
      *
-     * @since 1.0
+     * @return null if no usage syntax should be used, the usage syntax otherwise
+     *
+     * @since 22.1
      */
-    @Override
-    public String toString() {
-        return "OptionDescriptor [key=" + key + ", help=" + help + ", kind=" + kind + ", deprecated=" + deprecated + "]";
+    public String getUsageSyntax() {
+        // Empty string is considered a 'not set' value, everything else, including null, is fair
+        // game
+        if (usageSyntax == null || !usageSyntax.isEmpty()) {
+            return usageSyntax;
+        }
+        if (!key.getType().isDefaultType()) {
+            return "";
+        }
+        Object defaultValue = getKey().getDefaultValue();
+        if (Boolean.FALSE.equals(defaultValue)) {
+            return null;
+        }
+        if (Boolean.TRUE.equals(defaultValue)) {
+            return "true|false";
+        }
+        if (isOptionMap()) {
+            return "<value>";
+        }
+        Class<?> aClass = defaultValue.getClass();
+        if (Enum.class.isAssignableFrom(aClass)) {
+            return enumUsageSyntax(defaultValue, aClass);
+        }
+        return "";
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private static String enumUsageSyntax(Object defaultValue, Class<?> aClass) {
+        StringBuilder sb = new StringBuilder();
+        Class<? extends Enum> enumType = (Class<? extends Enum>) aClass;
+        Enum[] enumConstants = enumType.getEnumConstants();
+        // Append the default value first
+        for (Enum constant : enumConstants) {
+            if (defaultValue.equals(constant)) {
+                sb.append(constant);
+                break;
+            }
+        }
+        // Append the other values
+        for (Enum constant : enumConstants) {
+            if (!defaultValue.equals(constant)) {
+                sb.append("|");
+                sb.append(constant.toString());
+            }
+        }
+        return sb.toString();
     }
 
     /**
      * {@inheritDoc}
      *
-     * @since 1.0
+     * @since 19.0
+     */
+    @Override
+    public String toString() {
+        return "OptionDescriptor [key=" + key + ", help=" + help + ", usageSyntax=" + usageSyntax + ", category=" + category + ", deprecated=" + deprecated + ", optionMap=" + isOptionMap() + "]";
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * @since 19.0
      */
     @Override
     public int hashCode() {
@@ -142,7 +221,7 @@ public final class OptionDescriptor {
         result = prime * result + (deprecated ? 1231 : 1237);
         result = prime * result + ((help == null) ? 0 : help.hashCode());
         result = prime * result + ((key == null) ? 0 : key.hashCode());
-        result = prime * result + ((kind == null) ? 0 : kind.hashCode());
+        result = prime * result + ((category == null) ? 0 : category.hashCode());
         result = prime * result + ((name == null) ? 0 : name.hashCode());
         return result;
     }
@@ -150,7 +229,7 @@ public final class OptionDescriptor {
     /**
      * {@inheritDoc}
      *
-     * @since 1.0
+     * @since 19.0
      */
     @Override
     public boolean equals(Object obj) {
@@ -166,14 +245,14 @@ public final class OptionDescriptor {
                         Objects.equals(deprecated, other.deprecated) &&
                         Objects.equals(help, other.help) &&
                         Objects.equals(key, other.key) &&
-                        Objects.equals(kind, other.kind);
+                        Objects.equals(category, other.category);
     }
 
     /**
      * Creates a new option descriptor builder by key. The option group and name is inferred by the
      * key.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public static <T> Builder newBuilder(OptionKey<T> key, String name) {
         Objects.requireNonNull(key);
@@ -181,21 +260,23 @@ public final class OptionDescriptor {
         return EMPTY.new Builder(key, name);
     }
 
-    private static final OptionDescriptor EMPTY = new OptionDescriptor(null, null, null, null, null, false);
+    private static final OptionDescriptor EMPTY = new OptionDescriptor(null, null, null, null, null, false, null, "");
 
     /**
      * Represents an option descriptor builder.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public final class Builder {
 
         private final OptionKey<?> key;
         private final String name;
         private boolean deprecated = false;
+        private String deprecationMessage = "";
         private OptionCategory category = OptionCategory.INTERNAL;
         private OptionStability stability = OptionStability.EXPERIMENTAL;
         private String help = "";
+        private String usageSyntax = "";
 
         Builder(OptionKey<?> key, String name) {
             this.key = key;
@@ -206,7 +287,7 @@ public final class OptionDescriptor {
          * Defines the user category for this option. The default value is
          * {@link OptionCategory#INTERNAL}.
          *
-         * @since 1.0
+         * @since 19.0
          */
         public Builder category(@SuppressWarnings("hiding") OptionCategory category) {
             Objects.requireNonNull(category);
@@ -218,7 +299,7 @@ public final class OptionDescriptor {
          * Defines the stability of this option. The default value is
          * {@link OptionStability#EXPERIMENTAL}.
          *
-         * @since 1.0
+         * @since 19.0
          */
         public Builder stability(@SuppressWarnings("hiding") OptionStability stability) {
             Objects.requireNonNull(stability);
@@ -230,7 +311,7 @@ public final class OptionDescriptor {
          * Defines if this option is deprecated. The default value for deprecated is
          * <code>false</code>. This can be used to evolve options between releases.
          *
-         * @since 1.0
+         * @since 19.0
          */
         public Builder deprecated(@SuppressWarnings("hiding") boolean deprecated) {
             this.deprecated = deprecated;
@@ -240,7 +321,7 @@ public final class OptionDescriptor {
         /**
          * Specifies a human-readable description on how to use the option.
          *
-         * @since 1.0
+         * @since 19.0
          */
         public Builder help(@SuppressWarnings("hiding") String help) {
             Objects.requireNonNull(help);
@@ -249,14 +330,34 @@ public final class OptionDescriptor {
         }
 
         /**
-         * Builds and returns a new option descriptor.
-         *
-         * @since 1.0
+         * Specifies a human-readable syntax describing the accepted values for this option.
+         * 
+         * @since 22.1
          */
-        public OptionDescriptor build() {
-            return new OptionDescriptor(key, name, help, category, stability, deprecated);
+        public Builder usageSyntax(@SuppressWarnings("hiding") String usageSyntax) {
+            this.usageSyntax = usageSyntax;
+            return this;
         }
 
+        /**
+         * Specifies a human-readable deprecation reason and the recommended fix.
+         *
+         * @since 20.1.0
+         */
+        public Builder deprecationMessage(@SuppressWarnings("hiding") String deprecationMessage) {
+            Objects.requireNonNull(deprecationMessage);
+            this.deprecationMessage = deprecationMessage;
+            return this;
+        }
+
+        /**
+         * Builds and returns a new option descriptor.
+         *
+         * @since 19.0
+         */
+        public OptionDescriptor build() {
+            return new OptionDescriptor(key, name, help, category, stability, deprecated, deprecationMessage, usageSyntax);
+        }
     }
 
 }

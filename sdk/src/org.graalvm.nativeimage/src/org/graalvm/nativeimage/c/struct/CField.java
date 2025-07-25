@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -78,8 +78,8 @@ import org.graalvm.word.WordBase;
  * <p>
  * Multiple accessor methods, with different signatures according to the rules of allowed
  * signatures, are allowed for a single field.
- * 
- * @since 1.0
+ *
+ * @since 19.0
  */
 @Retention(RetentionPolicy.RUNTIME)
 @Target({ElementType.METHOD})
@@ -90,7 +90,7 @@ public @interface CField {
      * method name is used as the field name. A possible "get" or "set" prefix of the method name is
      * removed.
      *
-     * @since 1.0
+     * @since 19.0
      */
     String value() default "";
 }

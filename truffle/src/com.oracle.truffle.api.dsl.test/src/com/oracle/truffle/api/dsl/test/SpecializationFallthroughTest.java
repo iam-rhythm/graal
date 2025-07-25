@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -123,7 +123,7 @@ public class SpecializationFallthroughTest {
                         });
     }
 
-    /* TODO assert falltrough do1 before do2 */
+    /* TODO GR-38632 assert falltrough do1 before do2 */
     @NodeChildren({@NodeChild("a")})
     static class FallthroughTest1 extends ValueNode {
 
@@ -384,8 +384,7 @@ public class SpecializationFallthroughTest {
     @NodeChildren({@NodeChild("a")})
     static class FallthroughExceptionType2 extends ValueNode {
 
-        @ExpectError("A checked exception 'java.lang.Throwable' is thrown but is not specified using the rewriteOn property. " +
-                        "Checked exceptions that are not used for rewriting are not handled by the DSL. Use RuntimeExceptions for this purpose instead.")
+        @ExpectError("Specialization guard method or cache initializer declares an undeclared checked exception [java.lang.Throwable]. Only checked exceptions are allowed that were declared in the execute signature. Allowed exceptions are: [].")
         @Specialization
         int do4(int a) throws Throwable {
             return a;

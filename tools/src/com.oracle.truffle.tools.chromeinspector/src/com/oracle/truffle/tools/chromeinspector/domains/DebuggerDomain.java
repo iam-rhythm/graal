@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -38,11 +38,9 @@ public abstract class DebuggerDomain extends Domain {
     protected DebuggerDomain() {
     }
 
-    public abstract void enable();
+    public abstract String getUniqueDebuggerId();
 
-    public abstract void disable();
-
-    public abstract void setAsyncCallStackDepth(int maxDepth);
+    public abstract void setAsyncCallStackDepth(int maxDepth) throws CommandProcessException;
 
     public abstract void setBlackboxPatterns(String[] patterns);
 
@@ -62,6 +60,8 @@ public abstract class DebuggerDomain extends Domain {
 
     public abstract void stepOut(CommandPostProcessor postProcessor);
 
+    public abstract Params searchInContent(String scriptId, String query, boolean caseSensitive, boolean isRegex) throws CommandProcessException;
+
     public abstract void setBreakpointsActive(Optional<Boolean> breakpointsActive) throws CommandProcessException;
 
     public abstract void setSkipAllPauses(Optional<Boolean> skip) throws CommandProcessException;
@@ -69,6 +69,8 @@ public abstract class DebuggerDomain extends Domain {
     public abstract Params setBreakpointByUrl(String url, String urlRegex, int line, int column, String condition) throws CommandProcessException;
 
     public abstract Params setBreakpoint(Location location, String condition) throws CommandProcessException;
+
+    public abstract Params setBreakpointOnFunctionCall(String functionObjectId, String condition) throws CommandProcessException;
 
     public abstract void removeBreakpoint(String id) throws CommandProcessException;
 

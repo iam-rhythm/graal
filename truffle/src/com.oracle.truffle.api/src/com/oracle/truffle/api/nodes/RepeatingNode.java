@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -50,11 +50,41 @@ import com.oracle.truffle.api.frame.VirtualFrame;
  * Repeating nodes are intended to be implemented by guest language implementations. For a full
  * usage example please see {@link LoopNode}.
  *
+ * Note: The result of <code>{@link RepeatingNode#shouldContinue shouldContinue}(
+ * {@link RepeatingNode#executeRepeatingWithValue executeRepeatingWithValue}())</code> is
+ * automatically profiled by the loop node, so the {@link RepeatingNode repeating node} should not
+ * use a loop condition profile.
+ *
  * @see LoopNode
  * @see TruffleRuntime#createLoopNode(RepeatingNode)
  * @since 0.8 or earlier
  */
 public interface RepeatingNode extends NodeInterface {
+    /**
+     * A value indicating that the loop should be repeated.
+     *
+     * @since 19.3
+     */
+    Object CONTINUE_LOOP_STATUS = new Object() {
+        @Override
+        public String toString() {
+            return "CONTINUE_LOOP_STATUS";
+        }
+    };
+
+    /**
+     * A value indicating that the loop should not be repeated. Any other value different than
+     * {@code CONTINUE_LOOP_STATUS} can also be used to indicate that the loop should not be
+     * repeated.
+     *
+     * @since 19.3
+     */
+    Object BREAK_LOOP_STATUS = new Object() {
+        @Override
+        public String toString() {
+            return "BREAK_LOOP_STATUS";
+        }
+    };
 
     /**
      * Repeatedly invoked by a {@link LoopNode loop node} implementation until the method returns
@@ -67,4 +97,47 @@ public interface RepeatingNode extends NodeInterface {
      */
     boolean executeRepeating(VirtualFrame frame);
 
+    /**
+     * Repeatedly invoked by a {@link LoopNode loop node} implementation, but allows returning a
+     * language-specific loop exit status. Only languages that need to return custom loop statuses
+     * should override this method.
+     *
+     * @param frame the current execution frame passed through the interpreter
+     * @return a value <code>v</code> satisfying {@link RepeatingNode#shouldContinue
+     *         shouldContinue(v)}<code> == true</code> if the method should be executed again to
+     *         complete the loop and any other value if it must not.
+     * @since 19.3
+     */
+    default Object executeRepeatingWithValue(VirtualFrame frame) {
+        if (executeRepeating(frame)) {
+            return CONTINUE_LOOP_STATUS;
+        } else {
+            return BREAK_LOOP_STATUS;
+        }
+    }
+
+    /**
+     * Returns a placeholder loop status used internally before the first iteration.
+     *
+     * @return a value satisfying
+     *         <code>{@link RepeatingNode#shouldContinue shouldContinue}({@link RepeatingNode#initialLoopStatus initialLoopStatus}(v)) == true</code>
+     * @since 20.3
+     */
+    default Object initialLoopStatus() {
+        return CONTINUE_LOOP_STATUS;
+    }
+
+    /**
+     * Predicate called on values returned by
+     * {@link RepeatingNode#executeRepeatingWithValue(VirtualFrame) executeRepeatingWithValue()}.
+     *
+     * @param returnValue a value returned by
+     *            {@link RepeatingNode#executeRepeatingWithValue(VirtualFrame)
+     *            executeRepeatingWithValue()}
+     * @return true if the loop should continue executing or false otherwise
+     * @since 20.3
+     */
+    default boolean shouldContinue(Object returnValue) {
+        return returnValue == initialLoopStatus();
+    }
 }

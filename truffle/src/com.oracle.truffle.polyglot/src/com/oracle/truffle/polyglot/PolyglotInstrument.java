@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,48 +40,105 @@
  */
 package com.oracle.truffle.polyglot;
 
-import static com.oracle.truffle.polyglot.VMAccessor.INSTRUMENT;
+import static com.oracle.truffle.polyglot.EngineAccessor.INSTRUMENT;
+import static com.oracle.truffle.polyglot.EngineAccessor.LANGUAGE;
 
+import java.util.Map;
+import java.util.function.Supplier;
+
+import org.graalvm.options.OptionDescriptor;
 import org.graalvm.options.OptionDescriptors;
-import org.graalvm.polyglot.Instrument;
-import org.graalvm.polyglot.impl.AbstractPolyglotImpl.AbstractInstrumentImpl;
+import org.graalvm.polyglot.SandboxPolicy;
+import org.graalvm.polyglot.impl.AbstractPolyglotImpl.APIAccess;
 
 import com.oracle.truffle.api.InstrumentInfo;
+import com.oracle.truffle.api.instrumentation.TruffleInstrument;
+import com.oracle.truffle.api.source.Source;
+import com.oracle.truffle.polyglot.PolyglotLocals.LocalLocation;
 
-class PolyglotInstrument extends AbstractInstrumentImpl implements com.oracle.truffle.polyglot.PolyglotImpl.VMObject {
+/** The data corresponding to a given {@link TruffleInstrument}. */
+class PolyglotInstrument implements com.oracle.truffle.polyglot.PolyglotImpl.VMObject {
 
-    Instrument api;
     InstrumentInfo info;
     final InstrumentCache cache;
     final PolyglotEngineImpl engine;
-    private final Object instrumentLock = new Object();
 
-    private volatile OptionDescriptors options;
+    private final Object instrumentLock = new Object();
+    private volatile OptionDescriptors engineOptions;
+    private volatile OptionDescriptors contextOptions;
+    private volatile OptionDescriptors allOptions;
     private volatile OptionValuesImpl optionValues;
+    private volatile OptionValuesImpl emptySourceOptionValues;
+    private volatile OptionDescriptors sourceOptions;
     private volatile boolean initialized;
     private volatile boolean created;
+    private volatile boolean readyForContextEvents;
+    private volatile boolean finalized;
+    private volatile boolean closed;
+    int requestedAsyncStackDepth = 0;
+    LocalLocation[] contextLocalLocations;
+    LocalLocation[] contextThreadLocalLocations;
 
     PolyglotInstrument(PolyglotEngineImpl engine, InstrumentCache cache) {
-        super(engine.impl);
         this.engine = engine;
         this.cache = cache;
     }
 
-    @Override
     public OptionDescriptors getOptions() {
-        engine.checkState();
-        ensureInitialized();
-        return options;
+        try {
+            engine.checkState();
+            return getAllOptionsInternal();
+        } catch (Throwable t) {
+            throw PolyglotImpl.guestToHostException(engine, t);
+        }
     }
 
-    OptionValuesImpl getOptionValues() {
+    public OptionDescriptors getSourceOptions() {
+        try {
+            engine.checkState();
+            return getSourceOptionsInternal();
+        } catch (Throwable t) {
+            throw PolyglotImpl.guestToHostException(engine, t);
+        }
+    }
+
+    OptionDescriptors getAllOptionsInternal() {
+        ensureInitialized();
+        return allOptions;
+    }
+
+    OptionDescriptors getEngineOptionsInternal() {
+        ensureInitialized();
+        return engineOptions;
+    }
+
+    OptionDescriptors getContextOptionsInternal() {
+        ensureInitialized();
+        return contextOptions;
+    }
+
+    OptionDescriptors getSourceOptionsInternal() {
+        ensureInitialized();
+        return sourceOptions;
+    }
+
+    OptionValuesImpl getEmptySourceOptionsInternal() {
+        ensureInitialized();
+        return emptySourceOptionValues;
+    }
+
+    OptionValuesImpl getEngineOptionValues() {
         if (optionValues == null) {
             synchronized (instrumentLock) {
                 if (optionValues == null) {
-                    optionValues = new OptionValuesImpl(engine, getOptions());
+                    optionValues = new OptionValuesImpl(getAllOptionsInternal(), engine.sandboxPolicy, false, false);
                 }
             }
         }
+        return optionValues;
+    }
+
+    OptionValuesImpl getOptionValuesIfExists() {
         return optionValues;
     }
 
@@ -90,102 +147,187 @@ class PolyglotInstrument extends AbstractInstrumentImpl implements com.oracle.tr
         return engine;
     }
 
-    void ensureInitialized() {
+    @Override
+    public APIAccess getAPIAccess() {
+        return engine.apiAccess;
+    }
+
+    @Override
+    public PolyglotImpl getImpl() {
+        return engine.impl;
+    }
+
+    @SuppressWarnings("hiding")
+    private void ensureInitialized() {
         if (!initialized) {
             synchronized (instrumentLock) {
                 if (!initialized) {
                     try {
-                        Class<?> loadedInstrument = cache.getInstrumentationClass();
-                        INSTRUMENT.initializeInstrument(engine.instrumentationHandler, this, loadedInstrument);
-                        this.options = INSTRUMENT.describeOptions(engine.instrumentationHandler, this, cache.getId());
+                        INSTRUMENT.initializeInstrument(engine.instrumentationHandler, this, cache.getClassName(), new Supplier<TruffleInstrument>() {
+                            @Override
+                            public TruffleInstrument get() {
+                                return cache.loadInstrument();
+                            }
+                        });
+                        OptionDescriptors engineOptions = INSTRUMENT.describeEngineOptions(engine.instrumentationHandler, this, cache.getId());
+                        OptionDescriptors contextOptions = INSTRUMENT.describeContextOptions(engine.instrumentationHandler, this, cache.getId());
+                        OptionDescriptors sourceOptions = INSTRUMENT.describeSourceOptions(engine.instrumentationHandler, this, cache.getId());
+                        assert verifyNoOverlap(engineOptions, contextOptions);
+                        this.engineOptions = engineOptions;
+                        this.contextOptions = contextOptions;
+                        this.sourceOptions = sourceOptions;
+                        this.emptySourceOptionValues = new OptionValuesImpl(sourceOptions, SandboxPolicy.TRUSTED, false, false);
+                        this.allOptions = LANGUAGE.createOptionDescriptorsUnion(engineOptions, contextOptions);
                     } catch (Exception e) {
-                        throw new IllegalStateException(String.format("Error initializing instrument '%s' using class '%s'.", cache.getId(), cache.getClassName()), e);
+                        throw new IllegalStateException(String.format("Error initializing instrument '%s' using class '%s'. Message: %s.", cache.getId(), cache.getClassName(), e.getMessage()), e);
                     }
+                    assert contextLocalLocations != null : "context local locations not initialized";
                     initialized = true;
                 }
             }
         }
     }
 
+    private static boolean verifyNoOverlap(OptionDescriptors engineOptions, OptionDescriptors contextOptions) {
+        for (OptionDescriptor engineDescriptor : engineOptions) {
+            if (contextOptions.get(engineDescriptor.getName()) != null) {
+                throw new AssertionError("Overlapping descriptor name " + engineDescriptor.getName() + " between context and engine options detected.");
+            }
+        }
+        return true;
+    }
+
+    public boolean isInitialized() {
+        return initialized;
+    }
+
+    public boolean isCreated() {
+        return created;
+    }
+
+    public boolean isReadyForContextEvents() {
+        return readyForContextEvents;
+    }
+
     void ensureCreated() {
         if (!created) {
+            validateSandbox(engine.sandboxPolicy);
+            PolyglotContextImpl[] contexts = null;
             synchronized (instrumentLock) {
                 if (!created) {
                     if (!initialized) {
                         ensureInitialized();
                     }
-                    INSTRUMENT.createInstrument(engine.instrumentationHandler, this, cache.services(), getOptionValues());
+                    if (contextLocalLocations.length > 0) {
+                        // trigger initialization of locals under context lock.
+                        synchronized (engine.lock) {
+                            contexts = engine.collectAliveContexts().toArray(new PolyglotContextImpl[0]);
+                        }
+                    }
+                    INSTRUMENT.createInstrument(engine.instrumentationHandler, this, cache.services(), getEngineOptionValues());
                     created = true;
                 }
             }
+            if (contexts != null) {
+                for (PolyglotContextImpl context : contexts) {
+                    context.invokeLocalsFactories(contextLocalLocations, contextThreadLocalLocations);
+                }
+            }
+            /*
+             * This instrument might have installed various listeners that access context locals
+             * defined by this instrument. Therefore, the listener events must not be invoked before
+             * the context locals for all contexts are initialized.
+             */
+            readyForContextEvents = true;
         }
     }
 
-    void notifyClosing() {
-        if (created) {
+    void ensureFinalized() {
+        if (created && !finalized && !closed) {
             synchronized (instrumentLock) {
-                if (created) {
+                if (created && !finalized && !closed) {
                     INSTRUMENT.finalizeInstrument(engine.instrumentationHandler, this);
+                    finalized = true;
                 }
             }
         }
     }
 
     void ensureClosed() {
-        assert Thread.holdsLock(engine);
-        if (created) {
+        if (created && !closed) {
             synchronized (instrumentLock) {
-                if (created) {
+                if (created && !closed) {
                     INSTRUMENT.disposeInstrument(engine.instrumentationHandler, this, false);
                 }
-                created = false;
-                initialized = false;
-                options = null;
+                closed = true;
+                engineOptions = null;
                 optionValues = null;
             }
         }
     }
 
-    @Override
     public <T> T lookup(Class<T> serviceClass) {
-        return lookup(serviceClass, true);
+        try {
+            engine.checkState();
+            return lookupInternal(serviceClass);
+        } catch (Throwable t) {
+            throw PolyglotImpl.guestToHostException(engine, t);
+        }
     }
 
-    <T> T lookup(Class<T> serviceClass, boolean wrapExceptions) {
-        engine.checkState();
+    <T> T lookupInternal(Class<T> serviceClass) {
         if (cache.supportsService(serviceClass)) {
-            try {
-                ensureCreated();
-            } catch (Throwable t) {
-                if (wrapExceptions) {
-                    throw PolyglotImpl.wrapGuestException(engine, t);
-                } else {
-                    throw t;
-                }
-            }
+            ensureCreated();
             return INSTRUMENT.getInstrumentationHandlerService(engine.instrumentationHandler, this, serviceClass);
         } else {
             return null;
         }
     }
 
-    @Override
+    OptionValuesImpl parseSourceOptions(Source source, String componentOnly) {
+        Map<String, String> rawOptions = EngineAccessor.SOURCE.getSourceOptions(source);
+        if (rawOptions.isEmpty()) {
+            // fast-path: no options
+            return getEmptySourceOptionsInternal();
+        }
+        Map<String, OptionValuesImpl> options = PolyglotSourceCache.parseSourceOptions(getEngine(),
+                        rawOptions, componentOnly,
+                        engine.sandboxPolicy,
+                        engine.allowExperimentalOptions);
+        OptionValuesImpl languageOptions = options.get(componentOnly);
+        if (languageOptions == null) {
+            return getEmptySourceOptionsInternal();
+        }
+        return languageOptions;
+    }
+
     public String getId() {
         return cache.getId();
     }
 
-    @Override
     public String getName() {
         return cache.getName();
     }
 
-    @Override
     public String getVersion() {
         final String version = cache.getVersion();
         if (version.equals("inherit")) {
             return engine.getVersion();
         } else {
             return version;
+        }
+    }
+
+    public String getWebsite() {
+        return PolyglotLanguage.websiteSubstitutions(cache.getWebsite());
+    }
+
+    private void validateSandbox(SandboxPolicy sandboxPolicy) {
+        SandboxPolicy instrumentSandboxPolicy = cache.getSandboxPolicy();
+        if (sandboxPolicy.isStricterThan(instrumentSandboxPolicy)) {
+            throw PolyglotEngineException.illegalArgument(PolyglotImpl.sandboxPolicyException(sandboxPolicy,
+                            String.format("The instrument %s can only be used up to the %s sandbox policy.", getId(), instrumentSandboxPolicy),
+                            String.format("do not enable %s instrument by removing any of the instrument's options from Builder.option(String,String)", getId())));
         }
     }
 

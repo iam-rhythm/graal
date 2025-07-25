@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -52,6 +52,7 @@ public class NodeFieldData extends MessageContainer {
     private final AnnotationMirror messageAnnotation;
     private final boolean generated;
     private ExecutableElement getter;
+    private ExecutableElement setter;
     private final VariableElement variable;
 
     public NodeFieldData(Element messageElement, AnnotationMirror messageAnnotation, VariableElement variableElement, boolean generated) {
@@ -63,6 +64,18 @@ public class NodeFieldData extends MessageContainer {
 
     public VariableElement getVariable() {
         return variable;
+    }
+
+    public ExecutableElement getSetter() {
+        return setter;
+    }
+
+    public boolean isSettable() {
+        return isGenerated() && getSetter() != null && getGetter().getModifiers().contains(javax.lang.model.element.Modifier.ABSTRACT);
+    }
+
+    public void setSetter(ExecutableElement setter) {
+        this.setter = setter;
     }
 
     public void setGetter(ExecutableElement getter) {

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -41,245 +41,151 @@
 package com.oracle.truffle.polyglot;
 
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 
-import org.graalvm.polyglot.Value;
-
-import com.oracle.truffle.api.CallTarget;
-import com.oracle.truffle.api.CompilerDirectives;
 import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
-import com.oracle.truffle.api.Truffle;
-import com.oracle.truffle.api.frame.VirtualFrame;
-import com.oracle.truffle.api.interop.ForeignAccess;
-import com.oracle.truffle.api.interop.ForeignAccess.StandardFactory;
-import com.oracle.truffle.api.interop.InteropException;
-import com.oracle.truffle.api.interop.KeyInfo;
-import com.oracle.truffle.api.interop.Message;
+import com.oracle.truffle.api.interop.InteropLibrary;
+import com.oracle.truffle.api.interop.InvalidArrayIndexException;
 import com.oracle.truffle.api.interop.TruffleObject;
 import com.oracle.truffle.api.interop.UnknownIdentifierException;
-import com.oracle.truffle.api.interop.UnsupportedMessageException;
-import com.oracle.truffle.api.nodes.RootNode;
+import com.oracle.truffle.api.library.ExportLibrary;
+import com.oracle.truffle.api.library.ExportMessage;
+import com.oracle.truffle.api.utilities.TriState;
 
+@ExportLibrary(InteropLibrary.class)
 final class PolyglotBindings implements TruffleObject {
 
-    // a bindings object for each language.
+    // a bindings object for engine.
+    private final PolyglotContextImpl context;
+    // a bindings object for each language, can be null.
     private final PolyglotLanguageContext languageContext;
     // the bindings map that shared across a bindings object for each language context
-    private final Map<String, Value> bindings;
+    private volatile Map<String, Object> valueBindings;
 
-    PolyglotBindings(PolyglotLanguageContext languageContext, Map<String, Value> bindings) {
-        this.languageContext = languageContext;
-        this.bindings = bindings;
+    PolyglotBindings(PolyglotContextImpl context) {
+        this(context, null);
     }
 
-    public ForeignAccess getForeignAccess() {
-        return PolyglotBindingsFactory.INSTANCE;
+    PolyglotBindings(PolyglotLanguageContext languageContext) {
+        this(languageContext.context, languageContext);
     }
 
-    private static final class PolyglotBindingsFactory implements StandardFactory {
+    private PolyglotBindings(PolyglotContextImpl context, PolyglotLanguageContext languageContext) {
+        Objects.requireNonNull(context);
+        this.context = context;
+        this.languageContext = languageContext; // Can be null
+    }
 
-        private static final ForeignAccess INSTANCE = ForeignAccess.create(PolyglotBindings.class, new PolyglotBindingsFactory());
+    public Map<String, Object> getBindings() {
+        Map<String, Object> localBindings = this.valueBindings;
+        if (localBindings == null) {
+            this.valueBindings = localBindings = context.getPolyglotGuestBindings();
+        }
+        return localBindings;
+    }
 
-        @Override
-        public CallTarget accessWrite() {
-            return Truffle.getRuntime().createCallTarget(new WriteNode());
+    @SuppressWarnings("static-method")
+    @ExportMessage
+    boolean hasMembers() {
+        return true;
+    }
+
+    @ExportMessage
+    @TruffleBoundary
+    Object readMember(String member) throws UnknownIdentifierException {
+        Object value = getBindings().get(member);
+        if (value == null) {
+            throw UnknownIdentifierException.create(member);
+        }
+        if (languageContext != null) {
+            return context.toGuestValue(null, value, false);
+        } else {
+            return context.getAPIAccess().getValueReceiver(value);
+        }
+    }
+
+    @ExportMessage
+    @TruffleBoundary
+    void writeMember(String member, Object value) {
+        Object v = (languageContext != null) ? languageContext.asValue(value) : context.asValue(value);
+        getBindings().put(member, v);
+    }
+
+    @ExportMessage
+    @TruffleBoundary
+    void removeMember(String member) throws UnknownIdentifierException {
+        Object ret = getBindings().remove(member);
+        if (ret == null) {
+            throw UnknownIdentifierException.create(member);
+        }
+    }
+
+    @ExportMessage
+    @TruffleBoundary
+    Object getMembers(@SuppressWarnings("unused") boolean includeInternal) {
+        return new Members(getBindings().keySet());
+    }
+
+    @ExportMessage(name = "isMemberReadable")
+    @ExportMessage(name = "isMemberModifiable")
+    @ExportMessage(name = "isMemberRemovable")
+    @TruffleBoundary
+    boolean isMemberExisting(String member) {
+        return getBindings().containsKey(member);
+    }
+
+    @ExportMessage
+    boolean isMemberInsertable(String member) {
+        return !isMemberExisting(member);
+    }
+
+    @ExportLibrary(InteropLibrary.class)
+    @SuppressWarnings("static-method")
+    static final class Members implements TruffleObject {
+
+        final String[] names;
+
+        Members(Set<String> names) {
+            this.names = names.toArray(new String[0]);
         }
 
-        @Override
-        public CallTarget accessIsBoxed() {
-            return Truffle.getRuntime().createCallTarget(RootNode.createConstantNode(Boolean.FALSE));
+        @ExportMessage
+        boolean hasArrayElements() {
+            return true;
         }
 
-        @Override
-        public CallTarget accessUnbox() {
-            return null;
+        @ExportMessage
+        long getArraySize() {
+            return names.length;
         }
 
-        @Override
-        public CallTarget accessRead() {
-            return Truffle.getRuntime().createCallTarget(new ReadNode());
-        }
-
-        @Override
-        public CallTarget accessRemove() {
-            return Truffle.getRuntime().createCallTarget(new RemoveNode());
-        }
-
-        @Override
-        public CallTarget accessIsInstantiable() {
-            return Truffle.getRuntime().createCallTarget(RootNode.createConstantNode(Boolean.FALSE));
-        }
-
-        @Override
-        public CallTarget accessNew(int argumentsLength) {
-            return null;
-        }
-
-        @Override
-        public CallTarget accessHasKeys() {
-            return Truffle.getRuntime().createCallTarget(RootNode.createConstantNode(Boolean.TRUE));
-        }
-
-        @Override
-        public CallTarget accessKeys() {
-            return Truffle.getRuntime().createCallTarget(new KeysNode());
-        }
-
-        @Override
-        public CallTarget accessKeyInfo() {
-            return Truffle.getRuntime().createCallTarget(new KeyInfoNode());
-        }
-
-        @Override
-        public CallTarget accessIsNull() {
-            return Truffle.getRuntime().createCallTarget(RootNode.createConstantNode(false));
-        }
-
-        @Override
-        public CallTarget accessIsExecutable() {
-            return Truffle.getRuntime().createCallTarget(RootNode.createConstantNode(false));
-        }
-
-        @Override
-        public CallTarget accessInvoke(int argumentsLength) {
-            return null;
-        }
-
-        @Override
-        public CallTarget accessHasSize() {
-            return Truffle.getRuntime().createCallTarget(RootNode.createConstantNode(false));
-        }
-
-        @Override
-        public CallTarget accessGetSize() {
-            return null;
-        }
-
-        @Override
-        public CallTarget accessExecute(int argumentsLength) {
-            return null;
-        }
-
-        @Override
-        public CallTarget accessIsPointer() {
-            return Truffle.getRuntime().createCallTarget(RootNode.createConstantNode(false));
-        }
-
-        @Override
-        public CallTarget accessAsPointer() {
-            return null;
-        }
-
-        @Override
-        public CallTarget accessToNative() {
-            return null;
-        }
-
-        @Override
-        public CallTarget accessMessage(Message unknown) {
-            return null;
-        }
-
-        private abstract static class BaseNode extends RootNode {
-
-            protected BaseNode() {
-                super(null);
+        @ExportMessage
+        Object readArrayElement(long index) throws InvalidArrayIndexException {
+            if (!isArrayElementReadable(index)) {
+                throw InvalidArrayIndexException.create(index);
             }
-
-            @Override
-            public final Object execute(VirtualFrame frame) {
-                Object[] arguments = frame.getArguments();
-                PolyglotBindings bindings = (PolyglotBindings) arguments[0];
-                try {
-                    return execute(bindings.languageContext, bindings.bindings, arguments, 1);
-                } catch (InteropException e) {
-                    CompilerDirectives.transferToInterpreter();
-                    throw e.raise();
-                }
-            }
-
-            protected static final String expectIdentifier(Object[] arguments, int offset, Message message) {
-                Object key = arguments[offset];
-                if (!(key instanceof String)) {
-                    CompilerDirectives.transferToInterpreter();
-                    throw UnsupportedMessageException.raise(message);
-                }
-                return (String) key;
-            }
-
-            abstract Object execute(PolyglotLanguageContext context, Map<String, Value> map, Object[] arguments, int offset) throws InteropException;
-
+            return names[(int) index];
         }
 
-        private static class ReadNode extends BaseNode {
-
-            @Override
-            @TruffleBoundary
-            Object execute(PolyglotLanguageContext context, Map<String, Value> map, Object[] arguments, int offset) throws InteropException {
-                String identifier = expectIdentifier(arguments, offset, Message.READ);
-                Value value = map.get(identifier);
-                if (value == null) {
-                    CompilerDirectives.transferToInterpreter();
-                    // legacy support
-                    Value legacyValue = context.context.findLegacyExportedSymbol(identifier);
-                    if (legacyValue != null) {
-                        return context.getAPIAccess().getReceiver(legacyValue);
-                    }
-                    throw UnknownIdentifierException.raise(identifier);
-                }
-                return context.toGuestValue(value);
-            }
-
+        @ExportMessage
+        boolean isArrayElementReadable(long index) {
+            return index >= 0 && index < names.length;
         }
+    }
 
-        private static class WriteNode extends BaseNode {
-
-            @Override
-            @TruffleBoundary
-            Object execute(PolyglotLanguageContext context, Map<String, Value> map, Object[] arguments, int offset) throws InteropException {
-                String identifier = expectIdentifier(arguments, offset, Message.WRITE);
-                Object value = arguments[offset + 1];
-                map.put(identifier, context.asValue(value));
-                return value;
-            }
-
+    @ExportMessage
+    TriState isIdenticalOrUndefined(Object other) {
+        if (this == other) {
+            return TriState.TRUE;
         }
+        return TriState.UNDEFINED;
+    }
 
-        private static class RemoveNode extends BaseNode {
-
-            @Override
-            @TruffleBoundary
-            Object execute(PolyglotLanguageContext context, Map<String, Value> map, Object[] arguments, int offset) throws InteropException {
-                String identifier = expectIdentifier(arguments, offset, Message.REMOVE);
-                Value ret = map.remove(identifier);
-                return ret != null;
-            }
-        }
-
-        private static class KeysNode extends BaseNode {
-
-            @Override
-            @TruffleBoundary
-            Object execute(PolyglotLanguageContext context, Map<String, Value> map, Object[] arguments, int offset) throws InteropException {
-                return new DefaultScope.VariableNamesObject(map.keySet());
-            }
-
-        }
-
-        private static class KeyInfoNode extends BaseNode {
-
-            @Override
-            @TruffleBoundary
-            Object execute(PolyglotLanguageContext context, Map<String, Value> map, Object[] arguments, int offset) throws InteropException {
-                String identifier = expectIdentifier(arguments, offset, Message.KEY_INFO);
-                if (map.containsKey(identifier)) {
-                    return KeyInfo.READABLE | KeyInfo.MODIFIABLE | KeyInfo.REMOVABLE;
-                } else {
-                    return KeyInfo.INSERTABLE;
-                }
-            }
-
-        }
-
+    @ExportMessage
+    @TruffleBoundary
+    int identityHashCode() {
+        return System.identityHashCode(this);
     }
 
 }

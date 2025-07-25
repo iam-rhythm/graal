@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -44,6 +44,7 @@ import static com.oracle.truffle.dsl.processor.java.ElementUtils.getQualifiedNam
 
 import java.io.IOException;
 import java.io.Writer;
+import java.lang.annotation.Repeatable;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -70,6 +71,7 @@ import javax.lang.model.type.TypeMirror;
 import javax.lang.model.util.AbstractAnnotationValueVisitor8;
 import javax.lang.model.util.ElementFilter;
 
+import com.oracle.truffle.dsl.processor.ProcessorContext;
 import com.oracle.truffle.dsl.processor.java.ElementUtils;
 import com.oracle.truffle.dsl.processor.java.model.CodeElementScanner;
 import com.oracle.truffle.dsl.processor.java.model.CodeExecutableElement;
@@ -83,14 +85,21 @@ public abstract class AbstractCodeWriter extends CodeElementScanner<Void, Void> 
 
     private static final int MAX_LINE_LENGTH = Integer.MAX_VALUE; // line wrapping disabled
     private static final int LINE_WRAP_INDENTS = 3;
+    private static final int MAX_JAVADOC_LINE_LENGTH = 500;
     private static final String IDENT_STRING = "    ";
-    private static final String LN = "\n"; /* unix style */
+    private static final String LN = System.lineSeparator(); /* unix style */
 
     protected Writer writer;
     private int indent;
     private boolean newLine;
     private int lineLength;
     private boolean lineWrapping = false;
+    /* Use LINE_WRAP_INDENTS when wrapping lines as long as a line is wrapped. */
+    private boolean indentLineWrapping = true;
+    private boolean lineWrappingAtWords = false;
+
+    private String linePrefix;
+    private int maxLineLength = MAX_LINE_LENGTH;
 
     private OrganizedImports imports;
 
@@ -119,7 +128,7 @@ public abstract class AbstractCodeWriter extends CodeElementScanner<Void, Void> 
                         w.close();
                     } catch (Throwable e1) {
                         // see eclipse bug https://bugs.eclipse.org/bugs/show_bug.cgi?id=361378
-                        // TODO temporary suppress errors on close.
+                        // TODO GR-38632 temporary suppress errors on close.
                     }
                 }
                 writer = null;
@@ -137,7 +146,7 @@ public abstract class AbstractCodeWriter extends CodeElementScanner<Void, Void> 
             writeEmptyLn();
         }
 
-        Set<CodeImport> generateImports = imports.generateImports();
+        Set<CodeImport> generateImports = getImports().generateImports();
         List<CodeImport> typeImports = new ArrayList<>();
         List<CodeImport> staticImports = new ArrayList<>();
 
@@ -170,15 +179,19 @@ public abstract class AbstractCodeWriter extends CodeElementScanner<Void, Void> 
         writeClassImpl(e);
     }
 
-    private String useImport(Element enclosedType, TypeMirror type) {
+    private String useImport(Element enclosedType, TypeMirror type, boolean rawType) {
         if (imports != null) {
-            return imports.createTypeReference(enclosedType, type);
+            return imports.createTypeReference(enclosedType, type, rawType);
         } else {
             return ElementUtils.getSimpleName(type);
         }
     }
 
     private void writeClassImpl(CodeTypeElement e) {
+        if (e.getDocTree() != null) {
+            visitTree(e.getDocTree(), null, e);
+        }
+
         for (AnnotationMirror annotation : e.getAnnotationMirrors()) {
             visitAnnotation(e, annotation);
             writeLn();
@@ -187,19 +200,48 @@ public abstract class AbstractCodeWriter extends CodeElementScanner<Void, Void> 
         writeModifiers(e.getModifiers(), true);
         if (e.getKind() == ElementKind.ENUM) {
             write("enum ");
+        } else if (e.getKind() == ElementKind.INTERFACE) {
+            write("interface ");
         } else {
             write("class ");
         }
         write(e.getSimpleName());
-        if (e.getSuperclass() != null && !getQualifiedName(e.getSuperclass()).equals("java.lang.Object")) {
-            write(" extends ").write(useImport(e, e.getSuperclass()));
+
+        writeTypeParameters(e, e.getTypeParameters());
+
+        if (e.getKind() == ElementKind.CLASS) {
+            if (e.getSuperclass() != null && !getQualifiedName(e.getSuperclass()).equals("java.lang.Object")) {
+                write(" extends ").write(useImport(e, e.getSuperclass(), false));
+            }
+            if (e.getImplements().size() > 0) {
+                write(" implements ");
+                for (int i = 0; i < e.getImplements().size(); i++) {
+                    write(useImport(e, e.getImplements().get(i), false));
+                    if (i < e.getImplements().size() - 1) {
+                        write(", ");
+                    }
+                }
+            }
+        } else if (e.getKind() == ElementKind.INTERFACE) {
+            if (e.getImplements().size() > 0) {
+                write(" extends ");
+                for (int i = 0; i < e.getImplements().size(); i++) {
+                    write(useImport(e, e.getImplements().get(i), false));
+                    if (i < e.getImplements().size() - 1) {
+                        write(", ");
+                    }
+                }
+            }
         }
-        if (e.getImplements().size() > 0) {
-            write(" implements ");
-            for (int i = 0; i < e.getImplements().size(); i++) {
-                write(useImport(e, e.getImplements().get(i)));
-                if (i < e.getImplements().size() - 1) {
-                    write(", ");
+
+        if (e.getKind() == ElementKind.INTERFACE || e.getKind() == ElementKind.CLASS) {
+            if (e.getModifiers().contains(Modifier.SEALED)) {
+                write(" permits ");
+                String sep = "";
+                for (TypeMirror permitSubclass : e.getPermittedSubclasses()) {
+                    write(sep);
+                    write(useImport(e, permitSubclass, false));
+                    sep = ", ";
                 }
             }
         }
@@ -209,8 +251,8 @@ public abstract class AbstractCodeWriter extends CodeElementScanner<Void, Void> 
         indent(1);
 
         List<VariableElement> staticFields = getStaticFields(e);
-        List<VariableElement> instanceFields = getInstanceFields(e);
 
+        boolean hasStaticFields = false;
         for (int i = 0; i < staticFields.size(); i++) {
             VariableElement field = staticFields.get(i);
             field.accept(this, null);
@@ -221,18 +263,22 @@ public abstract class AbstractCodeWriter extends CodeElementScanner<Void, Void> 
                 write(";");
                 writeLn();
             }
+            hasStaticFields = true;
         }
 
-        if (staticFields.size() > 0) {
+        if (hasStaticFields) {
             writeEmptyLn();
         }
 
-        for (VariableElement field : instanceFields) {
+        boolean hasInstanceFields = false;
+        for (VariableElement field : getInstanceFields(e)) {
             field.accept(this, null);
             write(";");
             writeLn();
+            hasInstanceFields = true;
         }
-        if (instanceFields.size() > 0) {
+
+        if (hasInstanceFields) {
             writeEmptyLn();
         }
 
@@ -255,6 +301,40 @@ public abstract class AbstractCodeWriter extends CodeElementScanner<Void, Void> 
         dedent(1);
         write("}");
         writeEmptyLn();
+    }
+
+    private void writeTypeParameters(Element enclosedType, List<? extends TypeParameterElement> parameters) {
+        if (!parameters.isEmpty()) {
+            write("<");
+            String sep = "";
+            for (TypeParameterElement typeParameter : parameters) {
+                write(sep);
+                write(typeParameter.getSimpleName().toString());
+                if (needsBound(typeParameter)) {
+                    write(" extends ");
+                    String genericBoundsSep = "";
+                    for (TypeMirror type : typeParameter.getBounds()) {
+                        write(genericBoundsSep);
+                        write(useImport(enclosedType, type, false));
+                        genericBoundsSep = ", ";
+                    }
+                }
+                sep = ", ";
+            }
+            write(">");
+        }
+    }
+
+    private static boolean needsBound(TypeParameterElement typeParameter) {
+        var bounds = typeParameter.getBounds();
+        return switch (bounds.size()) {
+            case 0 -> false;
+            case 1 -> {
+                ProcessorContext ctx = ProcessorContext.getInstance();
+                yield !ctx.getEnvironment().getTypeUtils().isSameType(bounds.get(0), ctx.getDeclaredType(Object.class));
+            }
+            default -> true;
+        };
     }
 
     private static List<VariableElement> getStaticFields(CodeTypeElement clazz) {
@@ -301,14 +381,19 @@ public abstract class AbstractCodeWriter extends CodeElementScanner<Void, Void> 
     public Void visitVariable(VariableElement f, Void p) {
         Element parent = f.getEnclosingElement();
 
+        CodeTree init = null;
+        if (f instanceof CodeVariableElement) {
+            CodeVariableElement codeVar = ((CodeVariableElement) f);
+            init = codeVar.getInit();
+
+            if (codeVar.getDocTree() != null) {
+                visitTree(codeVar.getDocTree(), null, f);
+            }
+        }
+
         for (AnnotationMirror annotation : f.getAnnotationMirrors()) {
             visitAnnotation(f, annotation);
             write(" ");
-        }
-
-        CodeTree init = null;
-        if (f instanceof CodeVariableElement) {
-            init = ((CodeVariableElement) f).getInit();
         }
 
         if (parent != null && parent.getKind() == ElementKind.ENUM && f.getModifiers().contains(Modifier.STATIC)) {
@@ -322,7 +407,7 @@ public abstract class AbstractCodeWriter extends CodeElementScanner<Void, Void> 
             writeModifiers(f.getModifiers(), true);
 
             boolean varArgs = false;
-            if (parent != null && parent.getKind() == ElementKind.METHOD) {
+            if (parent != null && (parent.getKind() == ElementKind.METHOD || parent.getKind() == ElementKind.CONSTRUCTOR)) {
                 ExecutableElement method = (ExecutableElement) parent;
                 if (method.isVarArgs() && method.getParameters().indexOf(f) == method.getParameters().size() - 1) {
                     varArgs = true;
@@ -334,10 +419,10 @@ public abstract class AbstractCodeWriter extends CodeElementScanner<Void, Void> 
                 if (varType.getKind() == TypeKind.ARRAY) {
                     varType = ((ArrayType) varType).getComponentType();
                 }
-                write(useImport(f, varType));
+                write(useImport(f, varType, false));
                 write("...");
             } else {
-                write(useImport(f, varType));
+                write(useImport(f, varType, false));
             }
 
             write(" ");
@@ -351,13 +436,23 @@ public abstract class AbstractCodeWriter extends CodeElementScanner<Void, Void> 
     }
 
     private void visitAnnotation(Element enclosedElement, AnnotationMirror e) {
-        write("@").write(useImport(enclosedElement, e.getAnnotationType()));
+        List<AnnotationMirror> repeatableAnnotations = unpackRepeatable(e);
+        if (repeatableAnnotations != null) {
+            for (AnnotationMirror annotationMirror : repeatableAnnotations) {
+                visitAnnotationImpl(enclosedElement, annotationMirror);
+            }
+        } else {
+            visitAnnotationImpl(enclosedElement, e);
+        }
+    }
 
+    private void visitAnnotationImpl(Element enclosedElement, AnnotationMirror e) {
+        final ExecutableElement defaultElement = findExecutableElement(e.getAnnotationType(), "value");
+        Map<? extends ExecutableElement, ? extends AnnotationValue> values = e.getElementValues();
+
+        write("@").write(useImport(enclosedElement, e.getAnnotationType(), true));
         if (!e.getElementValues().isEmpty()) {
             write("(");
-            final ExecutableElement defaultElement = findExecutableElement(e.getAnnotationType(), "value");
-
-            Map<? extends ExecutableElement, ? extends AnnotationValue> values = e.getElementValues();
             if (defaultElement != null && values.size() == 1 && values.get(defaultElement) != null) {
                 visitAnnotationValue(enclosedElement, values.get(defaultElement));
             } else {
@@ -369,7 +464,6 @@ public abstract class AbstractCodeWriter extends CodeElementScanner<Void, Void> 
                     }
                     methodsList.add(method);
                 }
-
                 Collections.sort(methodsList, new Comparator<ExecutableElement>() {
 
                     @Override
@@ -393,6 +487,64 @@ public abstract class AbstractCodeWriter extends CodeElementScanner<Void, Void> 
 
             write(")");
         }
+    }
+
+    /**
+     * This method checks whether an annotation can be written as a set of repeatable annotations
+     * instead. Returns a list of elements if it can or <code>null</code> if it can't.
+     */
+    static List<AnnotationMirror> unpackRepeatable(AnnotationMirror e) {
+        final ExecutableElement defaultElement = findExecutableElement(e.getAnnotationType(), "value");
+        if (defaultElement == null) {
+            return null;
+        }
+        TypeMirror returnType = defaultElement.getReturnType();
+        if (returnType.getKind() != TypeKind.ARRAY) {
+            /*
+             * Not an array. Not a repeatable annotation.
+             */
+            return null;
+        }
+
+        ArrayType arrayReturnType = (ArrayType) returnType;
+
+        TypeElement typeElement = ElementUtils.fromTypeMirror(arrayReturnType.getComponentType());
+        if (typeElement == null) {
+            // just to be robust against not referenced classes.
+            return null;
+        }
+
+        AnnotationMirror repeatable = ElementUtils.findAnnotationMirror(typeElement.getAnnotationMirrors(), ProcessorContext.getInstance().getType(Repeatable.class));
+        if (repeatable == null) {
+            /*
+             * Annotation type does not declare repeatable.
+             */
+            return null;
+        }
+
+        TypeMirror repeatableType = ElementUtils.getAnnotationValue(TypeMirror.class, repeatable, "value");
+        if (!ElementUtils.typeEquals(repeatableType, e.getAnnotationType())) {
+            /*
+             * Not the right repeatable type.
+             */
+            return null;
+        }
+
+        if (e.getElementValues().size() != 1) {
+            /*
+             * Repeating annotation has more than one attribute. We should not unpack repeatable
+             * annotations to not loose some attributes there.
+             */
+            return null;
+        }
+        if (!e.getElementValues().containsKey(defaultElement)) {
+            /*
+             * Does not contain the default element.
+             */
+            return null;
+        }
+
+        return ElementUtils.getAnnotationValueList(AnnotationMirror.class, e, "value");
     }
 
     private void visitAnnotationValue(Element enclosedElement, AnnotationValue e) {
@@ -465,14 +617,14 @@ public abstract class AbstractCodeWriter extends CodeElementScanner<Void, Void> 
 
         @Override
         public Void visitType(TypeMirror t, Void p) {
-            write(useImport(enclosedElement, t));
+            write(useImport(enclosedElement, t, true));
             write(".class");
             return null;
         }
 
         @Override
         public Void visitEnumConstant(VariableElement c, Void p) {
-            write(useImport(enclosedElement, c.asType()));
+            write(useImport(enclosedElement, c.asType(), true));
             write(".");
             write(c.getSimpleName().toString());
             return null;
@@ -486,15 +638,20 @@ public abstract class AbstractCodeWriter extends CodeElementScanner<Void, Void> 
 
         @Override
         public Void visitArray(List<? extends AnnotationValue> vals, Void p) {
-            write("{");
-            for (int i = 0; i < vals.size(); i++) {
+            int size = vals.size();
+            if (size > 1) {
+                write("{");
+            }
+            for (int i = 0; i < size; i++) {
                 AnnotationValue value = vals.get(i);
                 AbstractCodeWriter.this.visitAnnotationValue(enclosedElement, value);
-                if (i < vals.size() - 1) {
+                if (i < size - 1) {
                     write(", ");
                 }
             }
-            write("}");
+            if (size > 1) {
+                write("}");
+            }
             return null;
         }
     }
@@ -523,63 +680,72 @@ public abstract class AbstractCodeWriter extends CodeElementScanner<Void, Void> 
 
     @Override
     public Void visitExecutable(CodeExecutableElement e, Void p) {
+        if (e.getDocTree() != null) {
+            visitTree(e.getDocTree(), null, e);
+        }
+
         for (AnnotationMirror annotation : e.getAnnotationMirrors()) {
             visitAnnotation(e, annotation);
             writeLn();
         }
 
-        writeModifiers(e.getModifiers(), !e.getEnclosingClass().getModifiers().contains(Modifier.FINAL));
+        writeModifiers(e.getModifiers(), e.getEnclosingClass() == null || !e.getEnclosingClass().getModifiers().contains(Modifier.FINAL));
 
-        List<TypeParameterElement> typeParameters = e.getTypeParameters();
-        if (!typeParameters.isEmpty()) {
-            write("<");
-            for (int i = 0; i < typeParameters.size(); i++) {
-                TypeParameterElement param = typeParameters.get(i);
-                write(param.getSimpleName().toString());
-                List<? extends TypeMirror> bounds = param.getBounds();
-                if (!bounds.isEmpty()) {
-                    write(" extends ");
-                    for (int j = 0; j < bounds.size(); j++) {
-                        TypeMirror bound = bounds.get(i);
-                        write(useImport(e, bound));
-                        if (j < bounds.size() - 1) {
-                            write(" ");
-                            write(", ");
+        String name = e.getSimpleName().toString();
+        if (name.equals("<cinit>") || name.equals("<init>")) {
+            // no name
+        } else {
+
+            List<TypeParameterElement> typeParameters = e.getTypeParameters();
+            if (!typeParameters.isEmpty()) {
+                write("<");
+                for (int i = 0; i < typeParameters.size(); i++) {
+                    TypeParameterElement param = typeParameters.get(i);
+                    write(param.getSimpleName().toString());
+                    if (needsBound(param)) {
+                        write(" extends ");
+                        List<? extends TypeMirror> bounds = param.getBounds();
+                        for (int j = 0; j < bounds.size(); j++) {
+                            TypeMirror bound = bounds.get(i);
+                            write(useImport(e, bound, true));
+                            if (j < bounds.size() - 1) {
+                                write(" ");
+                                write(", ");
+                            }
                         }
                     }
-                }
 
-                if (i < typeParameters.size() - 1) {
-                    write(" ");
+                    if (i < typeParameters.size() - 1) {
+                        write(" ");
+                        write(", ");
+                    }
+                }
+                write("> ");
+            }
+
+            if (e.getReturnType() != null) {
+                write(useImport(e, e.getReturnType(), false));
+                write(" ");
+            }
+            write(e.getSimpleName());
+            write("(");
+
+            for (int i = 0; i < e.getParameters().size(); i++) {
+                VariableElement param = e.getParameters().get(i);
+                param.accept(this, p);
+                if (i < e.getParameters().size() - 1) {
                     write(", ");
                 }
             }
-            write("> ");
-        }
-
-        if (e.getReturnType() != null) {
-            write(useImport(e, e.getReturnType()));
-            write(" ");
-        }
-        write(e.getSimpleName());
-        write("(");
-
-        for (int i = 0; i < e.getParameters().size(); i++) {
-            VariableElement param = e.getParameters().get(i);
-            param.accept(this, p);
-            if (i < e.getParameters().size() - 1) {
-                write(", ");
-            }
-        }
-        write(")");
-
-        List<TypeMirror> throwables = e.getThrownTypes();
-        if (throwables.size() > 0) {
-            write(" throws ");
-            for (int i = 0; i < throwables.size(); i++) {
-                write(useImport(e, throwables.get(i)));
-                if (i < throwables.size() - 1) {
-                    write(", ");
+            write(")");
+            List<TypeMirror> throwables = e.getThrownTypes();
+            if (throwables.size() > 0) {
+                write(" throws ");
+                for (int i = 0; i < throwables.size(); i++) {
+                    write(useImport(e, throwables.get(i), true));
+                    if (i < throwables.size() - 1) {
+                        write(", ");
+                    }
                 }
             }
         }
@@ -602,6 +768,13 @@ public abstract class AbstractCodeWriter extends CodeElementScanner<Void, Void> 
         }
         writeEmptyLn();
         return null;
+    }
+
+    private OrganizedImports getImports() {
+        if (imports == null) {
+            return OrganizedImports.organize(null);
+        }
+        return imports;
     }
 
     @Override
@@ -633,27 +806,64 @@ public abstract class AbstractCodeWriter extends CodeElementScanner<Void, Void> 
                 break;
             case STRING:
                 if (e.getString() != null) {
-                    write(e.getString());
+                    String s = e.getString();
+                    if (lineWrappingAtWords) {
+                        int index = -1;
+                        int start = 0;
+                        while ((index = s.indexOf(' ', start)) != -1) {
+                            write(s.substring(start, index + 1));
+                            start = index + 1;
+                        }
+                        if (start < s.length()) {
+                            write(s.substring(start, s.length()));
+                        }
+                    } else {
+                        write(e.getString());
+                    }
                 } else {
                     write("null");
                 }
                 break;
             case STATIC_FIELD_REFERENCE:
                 if (e.getString() != null) {
-                    write(imports.createStaticFieldReference(enclosingElement, e.getType(), e.getString()));
+                    write(getImports().createStaticFieldReference(enclosingElement, e.getType(), e.getString()));
                 } else {
                     write("null");
                 }
                 break;
             case STATIC_METHOD_REFERENCE:
                 if (e.getString() != null) {
-                    write(imports.createStaticMethodReference(enclosingElement, e.getType(), e.getString()));
+                    write(getImports().createStaticMethodReference(enclosingElement, e.getType(), e.getString()));
                 } else {
                     write("null");
                 }
                 break;
             case TYPE:
-                write(useImport(enclosingElement, e.getType()));
+                write(useImport(enclosingElement, e.getType(), false));
+                break;
+            case TYPE_LITERAL:
+                write(useImport(enclosingElement, e.getType(), true));
+                break;
+            case JAVA_DOC:
+            case DOC:
+                write("/*");
+                if (kind == CodeTreeKind.JAVA_DOC) {
+                    write("*");
+                }
+                write(" ");
+                writeLn();
+                indentLineWrapping = false; // avoid wrapping indents
+                int prevMaxLineLength = this.maxLineLength;
+                maxLineLength = MAX_JAVADOC_LINE_LENGTH;
+                linePrefix = " * ";
+                lineWrappingAtWords = true;
+                super.visitTree(e, p, enclosingElement);
+                linePrefix = null;
+                lineWrappingAtWords = false;
+                maxLineLength = prevMaxLineLength;
+                indentLineWrapping = true;
+                write(" */");
+                writeLn();
                 break;
             default:
                 assert false;
@@ -696,9 +906,8 @@ public abstract class AbstractCodeWriter extends CodeElementScanner<Void, Void> 
         write(LN);
         lineLength = 0;
         newLine = true;
-        if (lineWrapping) {
+        if (lineWrapping && indentLineWrapping) {
             dedent(LINE_WRAP_INDENTS);
-            lineWrapping = false;
         }
         lineWrapping = false;
     }
@@ -722,7 +931,7 @@ public abstract class AbstractCodeWriter extends CodeElementScanner<Void, Void> 
                 writeIndent();
                 newLine = false;
             }
-            if (lineLength > MAX_LINE_LENGTH) {
+            if (lineLength > maxLineLength) {
                 s = wrapLine(s);
             }
             writer.write(s);
@@ -752,16 +961,16 @@ public abstract class AbstractCodeWriter extends CodeElementScanner<Void, Void> 
                     write("+ ");
                 }
 
-                int nextSize = MAX_LINE_LENGTH - lineLength - 2;
+                int nextSize = maxLineLength - lineLength - 2;
                 if (nextSize <= 0) {
                     writeLn();
-                    nextSize = MAX_LINE_LENGTH - lineLength - 2;
+                    nextSize = maxLineLength - lineLength - 2;
                 }
 
                 int end = Math.min(i + nextSize, string.length());
 
-                // TODO(CH): fails in normal usage - output ok though
-                // assert lineLength + (end - i) + 2 < MAX_LINE_LENGTH;
+                // TODO GR-38632 (CH): fails in normal usage - output ok though
+                // assert lineLength + (end - i) + 2 < maxLineLength;
                 write("\"");
                 write(string.substring(i, end));
                 write("\"");
@@ -773,7 +982,7 @@ public abstract class AbstractCodeWriter extends CodeElementScanner<Void, Void> 
             return m;
         }
 
-        if (!lineWrapping) {
+        if (!lineWrapping && indentLineWrapping) {
             indent(LINE_WRAP_INDENTS);
         }
         lineWrapping = true;
@@ -787,6 +996,10 @@ public abstract class AbstractCodeWriter extends CodeElementScanner<Void, Void> 
         lineLength += indentSize();
         for (int i = 0; i < indent; i++) {
             writer.write(IDENT_STRING);
+        }
+        if (linePrefix != null) {
+            lineLength += linePrefix.length();
+            writer.write(linePrefix);
         }
     }
 
@@ -822,7 +1035,7 @@ public abstract class AbstractCodeWriter extends CodeElementScanner<Void, Void> 
                 String lhs = trimTrailing(buffer.substring(0, newLinePoint));
                 delegate.write(lhs);
                 delegate.write(LN);
-                buffer.delete(0, newLinePoint + 1);
+                buffer.delete(0, newLinePoint + LN.length());
             }
         }
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -41,6 +41,9 @@
 package com.oracle.truffle.dsl.processor;
 
 import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import javax.lang.model.element.Element;
@@ -50,6 +53,7 @@ import javax.lang.model.type.DeclaredType;
 import com.oracle.truffle.dsl.processor.generator.CodeTypeElementFactory;
 import com.oracle.truffle.dsl.processor.java.ElementUtils;
 import com.oracle.truffle.dsl.processor.java.model.CodeTypeElement;
+import com.oracle.truffle.dsl.processor.java.model.GeneratedElement;
 import com.oracle.truffle.dsl.processor.java.transform.FixWarningsVisitor;
 import com.oracle.truffle.dsl.processor.java.transform.GenerateOverrideVisitor;
 import com.oracle.truffle.dsl.processor.model.Template;
@@ -58,12 +62,13 @@ import com.oracle.truffle.dsl.processor.parser.AbstractParser;
 /**
  * THIS IS NOT PUBLIC API.
  */
-class AnnotationProcessor<M extends Template> {
+public final class AnnotationProcessor<M extends Template> {
 
     private final AbstractParser<M> parser;
     private final CodeTypeElementFactory<M> factory;
 
     private final Set<String> processedElements = new HashSet<>();
+    private final Map<String, Map<String, Element>> serviceRegistrations = new LinkedHashMap<>();
 
     AnnotationProcessor(AbstractParser<M> parser, CodeTypeElementFactory<M> factory) {
         this.parser = parser;
@@ -74,51 +79,70 @@ class AnnotationProcessor<M extends Template> {
         return parser;
     }
 
-    @SuppressWarnings({"unchecked"})
-    public void process(Element element, boolean callback) {
-        if (!(element instanceof TypeElement)) {
-            return;
+    public Map<String, Map<String, Element>> getServiceRegistrations() {
+        return serviceRegistrations;
+    }
+
+    public void registerService(String serviceBinaryName, String implBinaryName, Element sourceElement) {
+        if (sourceElement instanceof GeneratedElement) {
+            throw new IllegalArgumentException("Service source element must not be generated.");
         }
+        Map<String, Element> services = serviceRegistrations.get(serviceBinaryName);
+        if (services == null) {
+            services = new LinkedHashMap<>();
+            serviceRegistrations.put(serviceBinaryName, services);
+        }
+        services.put(implBinaryName, sourceElement);
+    }
+
+    public void process(Element element) {
         // since it is not guaranteed to be called only once by the compiler
         // we check for already processed elements to avoid errors when writing files.
-        if (!callback) {
-            String qualifiedName = ElementUtils.getQualifiedName((TypeElement) element);
-            if (processedElements.contains(qualifiedName)) {
-                return;
-            }
-            processedElements.add(qualifiedName);
+        String qualifiedName = ElementUtils.getQualifiedName((TypeElement) element);
+        if (processedElements.contains(qualifiedName)) {
+            return;
         }
+        processedElements.add(qualifiedName);
 
+        processImpl(element);
+    }
+
+    @SuppressWarnings({"unchecked", "try"})
+    private void processImpl(Element element) {
         ProcessorContext context = ProcessorContext.getInstance();
         TypeElement type = (TypeElement) element;
+        M model = context.parseIfAbsent(type, parser.getClass(), (e) -> {
+            try (Timer timer = Timer.create("Parse", e)) {
+                return parser.parse(e);
+            }
+        });
 
-        M model = (M) context.getTemplate(type.asType(), false);
-        boolean firstRun = !context.containsTemplate(type);
-
-        if (firstRun || !callback) {
-            context.registerTemplate(type, null);
-            model = parser.parse(element);
-            context.registerTemplate(type, model);
-
-            if (model != null) {
-                CodeTypeElement unit;
-                try {
-                    unit = factory.create(ProcessorContext.getInstance(), model);
-                } catch (Throwable e) {
-                    throw new RuntimeException(String.format("Failed to write code for %s. Parserdump:%s.", ElementUtils.getQualifiedName(type), ""), e);
+        if (model != null) {
+            List<CodeTypeElement> units;
+            try {
+                try (Timer timer = Timer.create("Generate", element)) {
+                    units = factory.create(ProcessorContext.getInstance(), this, model);
                 }
-                if (unit == null) {
-                    return;
+            } catch (Throwable e) {
+                RuntimeException ex = new RuntimeException(String.format("Failed to write code for %s.", ElementUtils.getQualifiedName(type)));
+                e.addSuppressed(ex);
+                throw e;
+            }
+            if (units == null || units.isEmpty()) {
+                return;
+            }
+            try (Timer timer = Timer.create("Fixup", element)) {
+                for (CodeTypeElement unit : units) {
+                    unit.setGeneratorAnnotationMirror(model.getTemplateTypeAnnotation());
+                    unit.setGeneratorElement(model.getTemplateType());
+
+                    DeclaredType overrideType = (DeclaredType) context.getType(Override.class);
+                    unit.accept(new GenerateOverrideVisitor(overrideType), null);
+                    unit.accept(new FixWarningsVisitor(overrideType), null);
                 }
-                unit.setGeneratorAnnotationMirror(model.getTemplateTypeAnnotation());
-                unit.setGeneratorElement(model.getTemplateType());
-
-                DeclaredType overrideType = (DeclaredType) context.getType(Override.class);
-                DeclaredType unusedType = (DeclaredType) context.getType(SuppressWarnings.class);
-                unit.accept(new GenerateOverrideVisitor(overrideType), null);
-                unit.accept(new FixWarningsVisitor(context.getEnvironment(), unusedType, overrideType), null);
-
-                if (!callback) {
+            }
+            try (Timer timer = Timer.create("CodeWriter", element)) {
+                for (CodeTypeElement unit : units) {
                     unit.accept(new CodeWriter(context.getEnvironment(), element), null);
                 }
             }

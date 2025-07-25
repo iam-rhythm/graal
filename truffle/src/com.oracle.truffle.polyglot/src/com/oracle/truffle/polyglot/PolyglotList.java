@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,39 +40,46 @@
  */
 package com.oracle.truffle.polyglot;
 
-import static com.oracle.truffle.api.interop.ForeignAccess.sendGetSize;
-import static com.oracle.truffle.api.interop.ForeignAccess.sendHasSize;
-import static com.oracle.truffle.api.interop.ForeignAccess.sendKeyInfo;
-import static com.oracle.truffle.api.interop.ForeignAccess.sendRead;
-import static com.oracle.truffle.api.interop.ForeignAccess.sendRemove;
-import static com.oracle.truffle.api.interop.ForeignAccess.sendWrite;
-
 import java.lang.reflect.Type;
 import java.util.AbstractList;
-import java.util.List;
+import java.util.Objects;
 
 import com.oracle.truffle.api.CallTarget;
-import com.oracle.truffle.api.CompilerDirectives;
 import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
-import com.oracle.truffle.api.interop.KeyInfo;
-import com.oracle.truffle.api.interop.Message;
+import com.oracle.truffle.api.TruffleSafepoint;
+import com.oracle.truffle.api.dsl.Bind;
+import com.oracle.truffle.api.dsl.Cached;
+import com.oracle.truffle.api.dsl.Specialization;
+import com.oracle.truffle.api.interop.InteropLibrary;
+import com.oracle.truffle.api.interop.InvalidArrayIndexException;
 import com.oracle.truffle.api.interop.TruffleObject;
-import com.oracle.truffle.api.interop.UnknownIdentifierException;
 import com.oracle.truffle.api.interop.UnsupportedMessageException;
 import com.oracle.truffle.api.interop.UnsupportedTypeException;
+import com.oracle.truffle.api.library.CachedLibrary;
 import com.oracle.truffle.api.nodes.Node;
+import com.oracle.truffle.api.profiles.InlinedBranchProfile;
 import com.oracle.truffle.polyglot.PolyglotLanguageContext.ToGuestValueNode;
+import com.oracle.truffle.polyglot.PolyglotListFactory.CacheFactory.RemoveNodeGen;
+import com.oracle.truffle.polyglot.PolyglotListFactory.CacheFactory.SetNodeGen;
+import com.oracle.truffle.polyglot.PolyglotListFactory.CacheFactory.SizeNodeGen;
+import org.graalvm.polyglot.Context;
 
-class PolyglotList<T> extends AbstractList<T> implements HostWrapper {
+class PolyglotList<T> extends AbstractList<T> implements PolyglotWrapper {
 
-    final TruffleObject guestObject;
+    final Object guestObject;
     final PolyglotLanguageContext languageContext;
     final Cache cache;
+    /**
+     * Strong reference to the creator {@link Context} to prevent it from being garbage collected
+     * and closed while this list is still reachable.
+     */
+    final Context contextAnchor;
 
-    PolyglotList(Class<T> elementClass, Type elementType, TruffleObject array, PolyglotLanguageContext languageContext) {
+    PolyglotList(Class<T> elementClass, Type elementType, Object array, PolyglotLanguageContext languageContext) {
         this.guestObject = array;
         this.languageContext = languageContext;
         this.cache = Cache.lookup(languageContext, array.getClass(), elementClass, elementType);
+        this.contextAnchor = languageContext.context.getContextAPI();
     }
 
     @Override
@@ -91,7 +98,7 @@ class PolyglotList<T> extends AbstractList<T> implements HostWrapper {
     }
 
     @TruffleBoundary
-    public static <T> List<T> create(PolyglotLanguageContext languageContext, TruffleObject array, boolean implementFunction, Class<T> elementClass, Type elementType) {
+    public static <T> PolyglotList<T> create(PolyglotLanguageContext languageContext, Object array, boolean implementFunction, Class<T> elementClass, Type elementType) {
         if (implementFunction) {
             return new PolyglotListAndFunction<>(elementClass, elementType, array, languageContext);
         } else {
@@ -102,78 +109,96 @@ class PolyglotList<T> extends AbstractList<T> implements HostWrapper {
     @SuppressWarnings("unchecked")
     @Override
     public T get(int index) {
-        return (T) cache.get.call(languageContext, guestObject, index);
+        return (T) cache.get.call(null, languageContext, guestObject, index);
+    }
+
+    @Override
+    public boolean add(T element) {
+        return (boolean) cache.add.call(null, languageContext, guestObject, element);
+    }
+
+    @Override
+    public void add(int index, T element) {
+        cache.addAtIndex.call(null, languageContext, guestObject, index, element);
     }
 
     @Override
     public T set(int index, T element) {
         T prev = get(index);
-        cache.set.call(languageContext, guestObject, index, element);
+        cache.set.call(null, languageContext, guestObject, index, element);
         return prev;
     }
 
     @SuppressWarnings("unchecked")
     @Override
     public T remove(int index) {
-        return (T) cache.remove.call(languageContext, guestObject, index);
+        T prev = get(index);
+        cache.remove.call(null, languageContext, guestObject, index);
+        return prev;
     }
 
     @Override
     public int size() {
-        return (Integer) cache.size.call(languageContext, guestObject);
+        return (Integer) cache.size.call(null, languageContext, guestObject);
     }
 
     @Override
     public String toString() {
-        return HostWrapper.toString(this);
+        return PolyglotWrapper.toString(this);
     }
 
     @Override
     public int hashCode() {
-        return HostWrapper.hashCode(this);
+        return PolyglotWrapper.hashCode(languageContext, guestObject);
     }
 
     @Override
     public boolean equals(Object o) {
-        return HostWrapper.equals(this, o);
+        if (o instanceof PolyglotList) {
+            return PolyglotWrapper.equals(languageContext, guestObject, ((PolyglotList<?>) o).guestObject);
+        } else {
+            return false;
+        }
     }
 
     static final class Cache {
 
+        final PolyglotLanguageInstance languageInstance;
         final Class<?> receiverClass;
         final Class<?> valueClass;
         final Type valueType;
 
         final CallTarget get;
+        final CallTarget add;
+        final CallTarget addAtIndex;
         final CallTarget set;
         final CallTarget remove;
         final CallTarget size;
         final CallTarget apply;
 
-        Cache(Class<?> receiverClass, Class<?> valueClass, Type valueType) {
+        Cache(PolyglotLanguageInstance languageInstance, Class<?> receiverClass, Class<?> valueClass, Type valueType) {
+            this.languageInstance = languageInstance;
             this.receiverClass = receiverClass;
             this.valueClass = valueClass;
             this.valueType = valueType;
-            this.get = initializeCall(new Get(this));
-            this.size = initializeCall(new Size(this));
-            this.set = initializeCall(new Set(this));
-            this.remove = initializeCall(new Remove(this));
-            this.apply = initializeCall(new Apply(this));
-        }
-
-        private static CallTarget initializeCall(PolyglotListNode node) {
-            return HostRootNode.createTarget(node);
+            this.get = PolyglotListFactory.CacheFactory.GetNodeGen.create(this).getCallTarget();
+            this.add = PolyglotListFactory.CacheFactory.AddNodeGen.create(this).getCallTarget();
+            this.addAtIndex = PolyglotListFactory.CacheFactory.AddAtIndexNodeGen.create(this).getCallTarget();
+            this.size = SizeNodeGen.create(this).getCallTarget();
+            this.set = SetNodeGen.create(this).getCallTarget();
+            this.remove = RemoveNodeGen.create(this).getCallTarget();
+            this.apply = new Apply(this).getCallTarget();
         }
 
         static Cache lookup(PolyglotLanguageContext languageContext, Class<?> receiverClass, Class<?> valueClass, Type valueType) {
             Key cacheKey = new Key(receiverClass, valueClass, valueType);
-            Cache cache = HostRootNode.lookupHostCodeCache(languageContext, cacheKey, Cache.class);
+            Cache cache = HostToGuestRootNode.lookupHostCodeCache(languageContext, cacheKey, Cache.class);
             if (cache == null) {
-                cache = HostRootNode.installHostCodeCache(languageContext, cacheKey, new Cache(receiverClass, valueClass, valueType), Cache.class);
+                cache = HostToGuestRootNode.installHostCodeCache(languageContext, cacheKey, new Cache(languageContext.getLanguageInstance(), receiverClass, valueClass, valueType), Cache.class);
             }
             assert cache.receiverClass == receiverClass;
             assert cache.valueClass == valueClass;
-            assert cache.valueType == valueType;
+            assert Objects.equals(cache.valueType, valueType);
             return cache;
         }
 
@@ -184,15 +209,17 @@ class PolyglotList<T> extends AbstractList<T> implements HostWrapper {
             final Type valueType;
 
             Key(Class<?> receiverClass, Class<?> valueClass, Type valueType) {
-                assert receiverClass != null;
-                this.receiverClass = receiverClass;
-                this.valueClass = valueClass;
+                this.receiverClass = Objects.requireNonNull(receiverClass);
+                this.valueClass = Objects.requireNonNull(valueClass);
                 this.valueType = valueType;
             }
 
             @Override
             public int hashCode() {
-                return 31 * (31 * (valueType == null ? 0 : valueType.hashCode()) + receiverClass.hashCode()) + valueClass.hashCode();
+                int res = receiverClass.hashCode();
+                res = res * 31 + valueClass.hashCode();
+                res = res * 31 + (valueType == null ? 0 : valueType.hashCode());
+                return res;
             }
 
             @Override
@@ -203,15 +230,18 @@ class PolyglotList<T> extends AbstractList<T> implements HostWrapper {
                     return false;
                 }
                 Key other = (Key) obj;
-                return valueType == other.valueType && valueClass == other.valueClass && receiverClass == other.receiverClass;
+                return receiverClass == other.receiverClass && valueClass == other.valueClass && Objects.equals(valueType, other.valueType);
             }
         }
 
-        private abstract static class PolyglotListNode extends HostRootNode<TruffleObject> {
+        abstract static class PolyglotListNode extends HostToGuestRootNode {
+
+            static final int LIMIT = 5;
 
             final Cache cache;
 
             PolyglotListNode(Cache cache) {
+                super(cache.languageInstance);
                 this.cache = cache;
             }
 
@@ -230,26 +260,21 @@ class PolyglotList<T> extends AbstractList<T> implements HostWrapper {
 
         }
 
-        private static class Size extends PolyglotListNode {
+        abstract static class SizeNode extends PolyglotListNode {
 
-            @Child private Node getSize = Message.GET_SIZE.createNode();
-            @Child private Node hasSize = Message.HAS_SIZE.createNode();
-
-            Size(Cache cache) {
+            SizeNode(Cache cache) {
                 super(cache);
             }
 
-            @Override
-            protected Object executeImpl(PolyglotLanguageContext languageContext, TruffleObject receiver, Object[] args) {
-                int size = 0;
-                if (sendHasSize(hasSize, receiver)) {
-                    try {
-                        size = ((Number) sendGetSize(getSize, receiver)).intValue();
-                    } catch (UnsupportedMessageException e) {
-                        size = 0;
-                    }
+            @Specialization(limit = "LIMIT")
+            @SuppressWarnings("unused")
+            Object doCached(PolyglotLanguageContext languageContext, Object receiver, Object[] args,
+                            @CachedLibrary("receiver") InteropLibrary interop) {
+                try {
+                    return (int) interop.getArraySize(receiver);
+                } catch (UnsupportedMessageException e) {
                 }
-                return size;
+                return 0;
             }
 
             @Override
@@ -259,15 +284,32 @@ class PolyglotList<T> extends AbstractList<T> implements HostWrapper {
 
         }
 
-        private static class Get extends PolyglotListNode {
+        abstract static class GetNode extends PolyglotListNode {
 
-            @Child private Node keyInfo = Message.KEY_INFO.createNode();
-            @Child private Node read = Message.READ.createNode();
-            @Child private ToHostNode toHost = ToHostNode.create();
-            @Child private Node hasSize = Message.HAS_SIZE.createNode();
-
-            Get(Cache cache) {
+            GetNode(Cache cache) {
                 super(cache);
+            }
+
+            @Specialization(limit = "LIMIT")
+            @SuppressWarnings({"unused", "truffle-static-method"})
+            final Object doCached(PolyglotLanguageContext languageContext, Object receiver, Object[] args,
+                            @Bind Node node,
+                            @CachedLibrary("receiver") InteropLibrary interop,
+                            @Cached PolyglotToHostNode toHost,
+                            @Cached InlinedBranchProfile error) {
+                Object key = args[ARGUMENT_OFFSET];
+                Object result = null;
+                assert key instanceof Integer;
+                int index = (int) key;
+                try {
+                    return toHost.execute(node, languageContext, interop.readArrayElement(receiver, index), cache.valueClass, cache.valueType);
+                } catch (InvalidArrayIndexException e) {
+                    error.enter(node);
+                    throw PolyglotInteropErrors.invalidListIndex(languageContext, receiver, cache.valueType, index);
+                } catch (UnsupportedMessageException e) {
+                    error.enter(node);
+                    throw PolyglotInteropErrors.listUnsupported(languageContext, receiver, cache.valueType, "get()");
+                }
             }
 
             @Override
@@ -275,44 +317,110 @@ class PolyglotList<T> extends AbstractList<T> implements HostWrapper {
                 return "get";
             }
 
-            @Override
-            protected Object executeImpl(PolyglotLanguageContext languageContext, TruffleObject receiver, Object[] args) {
-                Object key = args[ARGUMENT_OFFSET];
-                Object result = null;
-                assert key instanceof Integer;
-                if (sendHasSize(hasSize, receiver)) {
-                    if (KeyInfo.isReadable(sendKeyInfo(keyInfo, receiver, key))) {
-                        try {
-                            result = toHost.execute(sendRead(read, receiver, key), cache.valueClass, cache.valueType, languageContext);
-                        } catch (UnknownIdentifierException e) {
-                            CompilerDirectives.transferToInterpreter();
-                            throw HostInteropErrors.invalidListIndex(languageContext, receiver, cache.valueType, (int) key);
-                        } catch (UnsupportedMessageException e) {
-                            CompilerDirectives.transferToInterpreter();
-                            throw HostInteropErrors.listUnsupported(languageContext, receiver, cache.valueType, "get()");
-                        }
-                    } else {
-                        CompilerDirectives.transferToInterpreter();
-                        throw HostInteropErrors.invalidListIndex(languageContext, receiver, cache.valueType, (int) key);
-                    }
-                } else {
-                    CompilerDirectives.transferToInterpreter();
-                    throw HostInteropErrors.listUnsupported(languageContext, receiver, cache.valueType, "get()");
-                }
-                return result;
-            }
-
         }
 
-        private static class Set extends PolyglotListNode {
+        abstract static class AddNode extends PolyglotListNode {
 
-            @Child private Node keyInfo = Message.KEY_INFO.createNode();
-            @Child private Node write = Message.WRITE.createNode();
-            @Child private ToHostNode toHost = ToHostNode.create();
-            @Child private Node hasSize = Message.HAS_SIZE.createNode();
-            private final ToGuestValueNode toGuest = ToGuestValueNode.create();
+            AddNode(Cache cache) {
+                super(cache);
+            }
 
-            Set(Cache cache) {
+            @Override
+            protected String getOperationName() {
+                return "add";
+            }
+
+            @Specialization(limit = "LIMIT")
+            @SuppressWarnings({"unused", "truffle-static-method"})
+            final Object doCached(PolyglotLanguageContext languageContext, Object receiver, Object[] args,
+                            @Bind Node node,
+                            @CachedLibrary("receiver") InteropLibrary interop,
+                            @Cached(inline = true) ToGuestValueNode toGuest,
+                            @Cached InlinedBranchProfile error) {
+                Object value = toGuest.execute(node, languageContext, args[ARGUMENT_OFFSET]);
+                long size = 0;
+                try {
+                    size = interop.getArraySize(receiver);
+                    if (interop.isArrayElementInsertable(receiver, size)) {
+                        interop.writeArrayElement(receiver, size, value);
+                    } else {
+                        error.enter(node);
+                        throw PolyglotInteropErrors.listUnsupported(languageContext, receiver, cache.valueType, "add");
+                    }
+                } catch (UnsupportedMessageException e) {
+                    error.enter(node);
+                    throw PolyglotInteropErrors.listUnsupported(languageContext, receiver, cache.valueType, "add");
+                } catch (UnsupportedTypeException e) {
+                    error.enter(node);
+                    throw PolyglotInteropErrors.invalidListValue(languageContext, receiver, cache.valueType, size, value);
+                } catch (InvalidArrayIndexException e) {
+                    error.enter(node);
+                    throw PolyglotInteropErrors.invalidListIndex(languageContext, receiver, cache.valueType, size);
+                }
+                return true;
+            }
+        }
+
+        abstract static class AddAtIndexNode extends PolyglotListNode {
+
+            AddAtIndexNode(Cache cache) {
+                super(cache);
+            }
+
+            @Override
+            protected String getOperationName() {
+                return "add";
+            }
+
+            @Specialization(limit = "LIMIT")
+            @SuppressWarnings({"unused", "truffle-static-method"})
+            final Object doCached(PolyglotLanguageContext languageContext, Object receiver, Object[] args,
+                            @Bind Node node,
+                            @CachedLibrary("receiver") InteropLibrary interop,
+                            @Cached(inline = true) ToGuestValueNode toGuest,
+                            @Cached InlinedBranchProfile error) {
+                Object key = args[ARGUMENT_OFFSET];
+                assert key instanceof Integer;
+                int index = (int) key;
+
+                if (index < 0) {
+                    error.enter(node);
+                    throw PolyglotInteropErrors.invalidListIndex(languageContext, receiver, cache.valueType, index);
+                }
+                Object value = toGuest.execute(node, languageContext, args[ARGUMENT_OFFSET + 1]);
+                try {
+                    long size = interop.getArraySize(receiver);
+                    if (interop.isArrayElementInsertable(receiver, size)) {
+                        // shift elements to the right if any
+                        long cur = size;
+                        while (cur > index) {
+                            interop.writeArrayElement(receiver, cur, interop.readArrayElement(receiver, cur - 1));
+                            cur--;
+                            TruffleSafepoint.poll(interop);
+                        }
+                        // write new element to list
+                        interop.writeArrayElement(receiver, index, value);
+                    } else {
+                        error.enter(node);
+                        throw PolyglotInteropErrors.listUnsupported(languageContext, receiver, cache.valueType, "add");
+                    }
+                } catch (UnsupportedMessageException e) {
+                    error.enter(node);
+                    throw PolyglotInteropErrors.listUnsupported(languageContext, receiver, cache.valueType, "add");
+                } catch (UnsupportedTypeException e) {
+                    error.enter(node);
+                    throw PolyglotInteropErrors.invalidListValue(languageContext, receiver, cache.valueType, index, value);
+                } catch (InvalidArrayIndexException e) {
+                    error.enter(node);
+                    throw PolyglotInteropErrors.invalidListIndex(languageContext, receiver, cache.valueType, index);
+                }
+                return true;
+            }
+        }
+
+        abstract static class SetNode extends PolyglotListNode {
+
+            SetNode(Cache cache) {
                 super(cache);
             }
 
@@ -321,45 +429,37 @@ class PolyglotList<T> extends AbstractList<T> implements HostWrapper {
                 return "set";
             }
 
-            @Override
-            protected Object executeImpl(PolyglotLanguageContext languageContext, TruffleObject receiver, Object[] args) {
+            @Specialization(limit = "LIMIT")
+            @SuppressWarnings({"unused", "truffle-static-method"})
+            final Object doCached(PolyglotLanguageContext languageContext, Object receiver, Object[] args,
+                            @Bind Node node,
+                            @CachedLibrary("receiver") InteropLibrary interop,
+                            @Cached(inline = true) ToGuestValueNode toGuest,
+                            @Cached InlinedBranchProfile error) {
                 Object key = args[ARGUMENT_OFFSET];
-                Object result = null;
                 assert key instanceof Integer;
-                Object originalValue = args[ARGUMENT_OFFSET + 1];
-                Object value = toGuest.apply(languageContext, originalValue);
-                if (sendHasSize(hasSize, receiver)) {
-                    if (KeyInfo.isWritable(sendKeyInfo(keyInfo, receiver, key))) {
-                        try {
-                            sendWrite(write, receiver, key, value);
-                        } catch (UnknownIdentifierException e) {
-                            CompilerDirectives.transferToInterpreter();
-                            throw HostInteropErrors.invalidListIndex(languageContext, receiver, cache.valueType, (int) key);
-                        } catch (UnsupportedMessageException e) {
-                            CompilerDirectives.transferToInterpreter();
-                            throw HostInteropErrors.listUnsupported(languageContext, receiver, cache.valueType, "set");
-                        } catch (UnsupportedTypeException e) {
-                            CompilerDirectives.transferToInterpreter();
-                            throw HostInteropErrors.invalidListValue(languageContext, receiver, cache.valueType, (int) key, value);
-                        }
-                        return cache.valueClass.cast(result);
-                    } else {
-                        throw HostInteropErrors.listUnsupported(languageContext, receiver, cache.valueType, "set");
-                    }
+                int index = (int) key;
+                Object value = toGuest.execute(node, languageContext, args[ARGUMENT_OFFSET + 1]);
+                try {
+                    interop.writeArrayElement(receiver, index, value);
+                } catch (InvalidArrayIndexException e) {
+                    error.enter(node);
+                    throw PolyglotInteropErrors.invalidListIndex(languageContext, receiver, cache.valueType, index);
+                } catch (UnsupportedMessageException e) {
+                    error.enter(node);
+                    throw PolyglotInteropErrors.listUnsupported(languageContext, receiver, cache.valueType, "set");
+                } catch (UnsupportedTypeException e) {
+                    error.enter(node);
+                    throw PolyglotInteropErrors.invalidListValue(languageContext, receiver, cache.valueType, (int) key, value);
                 }
-                throw HostInteropErrors.listUnsupported(languageContext, receiver, cache.valueType, "set");
+                return null;
             }
+
         }
 
-        private static class Remove extends PolyglotListNode {
+        abstract static class RemoveNode extends PolyglotListNode {
 
-            @Child private Node keyInfo = Message.KEY_INFO.createNode();
-            @Child private Node read = Message.READ.createNode();
-            @Child private Node remove = Message.REMOVE.createNode();
-            @Child private ToHostNode toHost = ToHostNode.create();
-            @Child private Node hasSize = Message.HAS_SIZE.createNode();
-
-            Remove(Cache cache) {
+            RemoveNode(Cache cache) {
                 super(cache);
             }
 
@@ -368,39 +468,31 @@ class PolyglotList<T> extends AbstractList<T> implements HostWrapper {
                 return "remove";
             }
 
-            @Override
-            protected Object executeImpl(PolyglotLanguageContext languageContext, TruffleObject receiver, Object[] args) {
+            @Specialization(limit = "LIMIT")
+            @SuppressWarnings({"unused", "truffle-static-method"})
+            final Object doCached(PolyglotLanguageContext languageContext, Object receiver, Object[] args,
+                            @Bind Node node,
+                            @CachedLibrary("receiver") InteropLibrary interop,
+                            @Cached InlinedBranchProfile error) {
                 Object key = args[ARGUMENT_OFFSET];
-                Object result = null;
                 assert key instanceof Integer;
-                if (sendHasSize(hasSize, receiver)) {
-                    if (KeyInfo.isReadable(sendKeyInfo(keyInfo, receiver, key))) {
-                        try {
-                            result = toHost.execute(sendRead(read, receiver, key), cache.valueClass, cache.valueType, languageContext);
-                        } catch (UnknownIdentifierException e) {
-                        } catch (UnsupportedMessageException e) {
-                        }
-                    }
-                    try {
-                        sendRemove(remove, receiver, key);
-                    } catch (UnknownIdentifierException e) {
-                        CompilerDirectives.transferToInterpreter();
-                        throw HostInteropErrors.invalidListIndex(languageContext, receiver, cache.valueType, (int) key);
-                    } catch (UnsupportedMessageException e) {
-                        CompilerDirectives.transferToInterpreter();
-                        throw HostInteropErrors.listUnsupported(languageContext, receiver, cache.valueType, "remove");
-                    }
-                    return cache.valueClass.cast(result);
-                } else {
-                    CompilerDirectives.transferToInterpreter();
-                    throw HostInteropErrors.listUnsupported(languageContext, receiver, cache.valueType, "remove");
+                int index = (int) key;
+                try {
+                    interop.removeArrayElement(receiver, index);
+                } catch (InvalidArrayIndexException e) {
+                    error.enter(node);
+                    throw PolyglotInteropErrors.invalidListIndex(languageContext, receiver, cache.valueType, index);
+                } catch (UnsupportedMessageException e) {
+                    error.enter(node);
+                    throw PolyglotInteropErrors.listUnsupported(languageContext, receiver, cache.valueType, "remove");
                 }
+                return null;
             }
         }
 
         private static class Apply extends PolyglotListNode {
 
-            @Child private PolyglotExecuteNode apply = new PolyglotExecuteNode();
+            @Child private PolyglotExecuteNode apply = PolyglotExecuteNodeGen.create();
 
             Apply(Cache cache) {
                 super(cache);
@@ -412,8 +504,8 @@ class PolyglotList<T> extends AbstractList<T> implements HostWrapper {
             }
 
             @Override
-            protected Object executeImpl(PolyglotLanguageContext languageContext, TruffleObject function, Object[] args) {
-                return apply.execute(languageContext, function, args[ARGUMENT_OFFSET], Object.class, Object.class);
+            protected Object executeImpl(PolyglotLanguageContext languageContext, Object receiver, Object[] args) {
+                return apply.execute(languageContext, receiver, args[ARGUMENT_OFFSET]);
             }
         }
     }

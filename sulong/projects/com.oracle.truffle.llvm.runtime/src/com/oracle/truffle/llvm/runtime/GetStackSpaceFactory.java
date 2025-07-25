@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, Oracle and/or its affiliates.
+ * Copyright (c) 2018, 2021, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -35,14 +35,13 @@ import com.oracle.truffle.llvm.runtime.types.Type;
 
 public interface GetStackSpaceFactory {
 
-    LLVMExpressionNode createGetStackSpace(LLVMContext context, Type type);
+    LLVMExpressionNode createGetStackSpace(NodeFactory nodeFactory, Type type);
 
     static GetStackSpaceFactory createAllocaFactory() {
-        return (context, type) -> context.getNodeFactory().createAlloca(type);
+        return (nodeFactory, type) -> nodeFactory.createAlloca(type);
     }
 
     static GetStackSpaceFactory createGetUniqueStackSpaceFactory(UniquesRegion uniquesRegion) {
-        return (context, type) -> context.getNodeFactory().createGetUniqueStackSpace(type, uniquesRegion);
+        return (nodeFactory, type) -> nodeFactory.createGetUniqueStackSpace(type, uniquesRegion);
     }
-
 }

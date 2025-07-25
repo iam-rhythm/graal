@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2016, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -41,7 +41,6 @@
 package com.oracle.truffle.dsl.processor;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
@@ -53,6 +52,7 @@ import javax.annotation.processing.RoundEnvironment;
 import javax.annotation.processing.SupportedAnnotationTypes;
 import javax.lang.model.SourceVersion;
 import javax.lang.model.element.AnnotationMirror;
+import javax.lang.model.element.AnnotationValue;
 import javax.lang.model.element.Element;
 import javax.lang.model.element.ElementKind;
 import javax.lang.model.element.ExecutableElement;
@@ -68,36 +68,26 @@ import javax.lang.model.util.ElementFilter;
 import javax.lang.model.util.Types;
 import javax.tools.Diagnostic.Kind;
 
-import com.oracle.truffle.api.frame.VirtualFrame;
-import com.oracle.truffle.api.instrumentation.GenerateWrapper;
-import com.oracle.truffle.api.instrumentation.GenerateWrapper.IncomingConverter;
-import com.oracle.truffle.api.instrumentation.GenerateWrapper.OutgoingConverter;
-import com.oracle.truffle.api.instrumentation.InstrumentableNode;
-import com.oracle.truffle.api.instrumentation.ProbeNode;
-import com.oracle.truffle.api.nodes.Node;
-import com.oracle.truffle.api.nodes.Node.Child;
-import com.oracle.truffle.api.nodes.NodeCost;
-import com.oracle.truffle.api.nodes.UnexpectedResultException;
-import com.oracle.truffle.api.source.SourceSection;
 import com.oracle.truffle.dsl.processor.generator.GeneratorUtils;
 import com.oracle.truffle.dsl.processor.java.ElementUtils;
+import com.oracle.truffle.dsl.processor.java.compiler.CompilerFactory;
 import com.oracle.truffle.dsl.processor.java.model.CodeAnnotationMirror;
-import com.oracle.truffle.dsl.processor.java.model.CodeAnnotationValue;
 import com.oracle.truffle.dsl.processor.java.model.CodeExecutableElement;
 import com.oracle.truffle.dsl.processor.java.model.CodeTree;
 import com.oracle.truffle.dsl.processor.java.model.CodeTreeBuilder;
 import com.oracle.truffle.dsl.processor.java.model.CodeTypeElement;
-import com.oracle.truffle.dsl.processor.java.model.CodeTypeMirror;
 import com.oracle.truffle.dsl.processor.java.model.CodeVariableElement;
 import com.oracle.truffle.dsl.processor.java.transform.FixWarningsVisitor;
 import com.oracle.truffle.dsl.processor.java.transform.GenerateOverrideVisitor;
 
-@SupportedAnnotationTypes({"com.oracle.truffle.api.instrumentation.Instrumentable", "com.oracle.truffle.api.instrumentation.GenerateWrapper"})
+@SupportedAnnotationTypes({TruffleTypes.GenerateWrapper_Name})
 public final class InstrumentableProcessor extends AbstractProcessor {
 
     // configuration
     private static final String CLASS_SUFFIX = "Wrapper";
     private static final String EXECUTE_METHOD_PREFIX = "execute";
+    private static final String PARAM_YIELD_EXCEPTIONS = "yieldExceptions";
+    private static final String PARAM_RESUME_METHOD_PREFIX = "resumeMethodPrefix";
 
     // API name assumptions
     private static final String CONSTANT_REENTER = "ProbeNode.UNWIND_ACTION_REENTER";
@@ -105,6 +95,8 @@ public final class InstrumentableProcessor extends AbstractProcessor {
     private static final String METHOD_ON_RETURN_EXCEPTIONAL_OR_UNWIND = "onReturnExceptionalOrUnwind";
     private static final String METHOD_ON_RETURN_VALUE = "onReturnValue";
     private static final String METHOD_ON_ENTER = "onEnter";
+    private static final String METHOD_ON_YIELD = "onYield";
+    private static final String METHOD_ON_RESUME = "onResume";
     private static final String FIELD_DELEGATE = "delegateNode";
     private static final String FIELD_PROBE = "probeNode";
     private static final String VAR_RETURN_CALLED = "wasOnReturnExecuted";
@@ -119,32 +111,39 @@ public final class InstrumentableProcessor extends AbstractProcessor {
     @Override
     public boolean process(Set<? extends TypeElement> annotations, RoundEnvironment roundEnv) {
         if (roundEnv.processingOver()) {
-            return false;
+            return true;
         }
-        try {
-            ProcessorContext context = new ProcessorContext(processingEnv, null);
-            ProcessorContext.setThreadLocalInstance(context);
-
-            DeclaredType instrumentableNode = context.getDeclaredType(InstrumentableNode.class);
+        try (ProcessorContext context = ProcessorContext.enter(processingEnv)) {
+            TruffleTypes types = context.getTypes();
+            DeclaredType instrumentableNode = types.InstrumentableNode;
             ExecutableElement createWrapper = ElementUtils.findExecutableElement(instrumentableNode, CREATE_WRAPPER_NAME);
 
-            for (Element element : roundEnv.getElementsAnnotatedWith(GenerateWrapper.class)) {
+            elements: for (Element element : roundEnv.getElementsAnnotatedWith(ElementUtils.castTypeElement(types.GenerateWrapper))) {
                 if (!element.getKind().isClass() && !element.getKind().isInterface()) {
                     continue;
                 }
+                if (ElementUtils.packageEquals(element.asType(), types.GenerateWrapper)) {
+                    /*
+                     * Do not generate wrappers in the instrumentation package itself. For example
+                     * for snippet code the annotation processor should not generate code.
+                     */
+                    continue;
+                }
+
                 try {
                     if (element.getKind() != ElementKind.CLASS) {
-                        emitError(element, String.format("Only classes can be annotated with %s.", GenerateWrapper.class.getSimpleName()));
+                        emitError(element, String.format("Only classes can be annotated with %s.", types.GenerateWrapper.asElement().getSimpleName()));
                         continue;
                     }
 
                     if (createWrapper == null) {
-                        emitError(element, String.format("Fatal %s.%s not found.", InstrumentableNode.class.getSimpleName(), CREATE_WRAPPER_NAME));
+                        emitError(element, String.format("Fatal %s.%s not found.", types.InstrumentableNode.asElement().getSimpleName(), CREATE_WRAPPER_NAME));
                         continue;
                     }
 
                     if (!ElementUtils.isAssignable(element.asType(), instrumentableNode)) {
-                        emitError(element, String.format("Classes annotated with @%s must implement %s.", GenerateWrapper.class.getSimpleName(), InstrumentableNode.class.getSimpleName()));
+                        emitError(element, String.format("Classes annotated with @%s must implement %s.", types.GenerateWrapper.asElement().getSimpleName(),
+                                        types.InstrumentableNode.asElement().getSimpleName().toString()));
                         continue;
                     } else {
                         boolean createWrapperFound = false;
@@ -160,35 +159,61 @@ public final class InstrumentableProcessor extends AbstractProcessor {
                                             "  @Override public %s createWrapper(%s probeNode) {%n" +
                                             "    return new %s(this, probeNode);%n" +
                                             "  }",
-                                            GenerateWrapper.class.getSimpleName(),
-                                            InstrumentableNode.class.getSimpleName(),
+                                            types.GenerateWrapper.asElement().getSimpleName(),
+                                            types.InstrumentableNode.asElement().getSimpleName(),
                                             CREATE_WRAPPER_NAME,
                                             createWrapperClassName((TypeElement) element),
-                                            com.oracle.truffle.api.instrumentation.InstrumentableNode.WrapperNode.class.getSimpleName(),
-                                            ProbeNode.class.getSimpleName(),
+                                            types.InstrumentableNode_WrapperNode.asElement().getSimpleName(),
+                                            types.ProbeNode.asElement().getSimpleName(),
                                             createWrapperClassName((TypeElement) element)));
                             continue;
                         }
-                        if (!ElementUtils.isAssignable(element.asType(), context.getType(Node.class))) {
-                            emitError(element, String.format("Classes annotated with @%s must extend %s.", GenerateWrapper.class.getSimpleName(), Node.class.getSimpleName()));
+                        if (!ElementUtils.isAssignable(element.asType(), types.Node)) {
+                            emitError(element, String.format("Classes annotated with @%s must extend %s.", types.GenerateWrapper.asElement().getSimpleName(),
+                                            types.Node.asElement().getSimpleName()));
                             continue;
                         }
                     }
 
-                    AnnotationMirror generateWrapperMirror = ElementUtils.findAnnotationMirror(element.getAnnotationMirrors(), context.getType(GenerateWrapper.class));
+                    AnnotationMirror generateWrapperMirror = ElementUtils.findAnnotationMirror(element.getAnnotationMirrors(), types.GenerateWrapper);
                     if (generateWrapperMirror == null) {
                         continue;
                     }
 
-                    CodeTypeElement unit = generateWrapperOnly(context, element);
+                    List<TypeMirror> yieldExceptionMirrors = ElementUtils.getAnnotationValueList(TypeMirror.class, generateWrapperMirror, PARAM_YIELD_EXCEPTIONS);
+                    int numExc = yieldExceptionMirrors.size();
+                    List<CharSequence> yieldExceptions;
+                    if (numExc == 0) {
+                        yieldExceptions = Collections.emptyList();
+                    } else {
+                        yieldExceptions = new ArrayList<>(numExc);
+                        TypeMirror throwable = context.getType(Throwable.class);
+                        for (int i = 0; i < numExc; i++) {
+                            TypeMirror excMirror = yieldExceptionMirrors.get(i);
+                            Element excElement = context.getEnvironment().getTypeUtils().asElement(excMirror);
+                            if (!context.getEnvironment().getTypeUtils().isAssignable(excMirror, throwable)) {
+                                emitError(element, String.format("%s in `" + PARAM_YIELD_EXCEPTIONS + "` must extend %s.", excElement.getSimpleName(),
+                                                Throwable.class.getName()));
+                                continue elements;
+                            }
+                            if (!context.getEnvironment().getTypeUtils().isAssignable(excMirror, types.GenerateWrapper_YieldException)) {
+                                emitError(element, String.format("%s in `" + PARAM_YIELD_EXCEPTIONS + "` must implement %s.", excElement.getSimpleName(),
+                                                TruffleTypes.GenerateWrapper_YieldException_Name));
+                                continue elements;
+                            }
+                            yieldExceptions.add(((TypeElement) excElement).getQualifiedName());
+                        }
+                    }
+                    AnnotationValue resumeMethodPrefixValue = ElementUtils.getAnnotationValue(generateWrapperMirror, PARAM_RESUME_METHOD_PREFIX);
+                    String resumeMethodPrefix = (resumeMethodPrefixValue != null) ? (String) resumeMethodPrefixValue.getValue() : null;
+                    CodeTypeElement unit = generateWrapperOnly(context, element, yieldExceptionMirrors, resumeMethodPrefix);
 
                     if (unit == null) {
                         continue;
                     }
                     DeclaredType overrideType = (DeclaredType) context.getType(Override.class);
-                    DeclaredType unusedType = (DeclaredType) context.getType(SuppressWarnings.class);
                     unit.accept(new GenerateOverrideVisitor(overrideType), null);
-                    unit.accept(new FixWarningsVisitor(context.getEnvironment(), unusedType, overrideType), null);
+                    unit.accept(new FixWarningsVisitor(overrideType), null);
                     unit.accept(new CodeWriter(context.getEnvironment(), element), null);
                 } catch (Throwable e) {
                     // never throw annotation processor exceptions to the compiler
@@ -197,77 +222,7 @@ public final class InstrumentableProcessor extends AbstractProcessor {
                 }
             }
 
-            // remove with deprecations
-            processLegacyInstrumentable(roundEnv, context);
-
             return true;
-        } finally {
-            ProcessorContext.setThreadLocalInstance(null);
-        }
-    }
-
-    /*
-     * TO BE REMOVED WITH DEPRECATIONS
-     */
-    @SuppressWarnings("deprecation")
-    private void processLegacyInstrumentable(RoundEnvironment roundEnv, ProcessorContext context) {
-        for (Element element : roundEnv.getElementsAnnotatedWith(com.oracle.truffle.api.instrumentation.Instrumentable.class)) {
-            if (!element.getKind().isClass() && !element.getKind().isInterface()) {
-                continue;
-            }
-            try {
-                if (element.getKind() != ElementKind.CLASS) {
-                    emitError(element, String.format("Only classes can be annotated with %s.", com.oracle.truffle.api.instrumentation.Instrumentable.class.getSimpleName()));
-                    continue;
-                }
-
-                AnnotationMirror generateWrapperMirror = ElementUtils.findAnnotationMirror(element.getAnnotationMirrors(), context.getType(GenerateWrapper.class));
-                if (generateWrapperMirror != null) {
-                    continue;
-                }
-
-                TypeMirror instrumentableType = context.getType(com.oracle.truffle.api.instrumentation.Instrumentable.class);
-                AnnotationMirror instrumentable = ElementUtils.findAnnotationMirror(element.getAnnotationMirrors(), instrumentableType);
-                if (instrumentable == null) {
-                    continue;
-                } else {
-                    final boolean generateWrapper;
-                    TypeMirror factoryType = ElementUtils.getAnnotationValue(TypeMirror.class, instrumentable, "factory");
-
-                    if (factoryType == null || factoryType.getKind() == TypeKind.ERROR) {
-                        // factory type is erroneous or null (can mean error in javac)
-                        // generate it
-                        generateWrapper = true;
-                    } else {
-                        TypeElement type = ElementUtils.getTypeElement(context.getEnvironment(), "com.oracle.truffle.api.instrumentation.test.TestErrorFactory");
-
-                        if (type != null && ElementUtils.typeEquals(factoryType, type.asType())) {
-                            generateWrapper = true;
-                        } else {
-                            // factory is user defined or already generated
-                            generateWrapper = false;
-                        }
-                    }
-                    if (!generateWrapper) {
-                        continue;
-                    }
-                }
-
-                CodeTypeElement unit = generateWrapperAndFactory(context, element);
-
-                if (unit == null) {
-                    continue;
-                }
-                DeclaredType overrideType = (DeclaredType) context.getType(Override.class);
-                DeclaredType unusedType = (DeclaredType) context.getType(SuppressWarnings.class);
-                unit.accept(new GenerateOverrideVisitor(overrideType), null);
-                unit.accept(new FixWarningsVisitor(context.getEnvironment(), unusedType, overrideType), null);
-                unit.accept(new CodeWriter(context.getEnvironment(), element), null);
-            } catch (Throwable e) {
-                // never throw annotation processor exceptions to the compiler
-                // it might screw up its state.
-                handleThrowable(e, element);
-            }
         }
     }
 
@@ -276,8 +231,8 @@ public final class InstrumentableProcessor extends AbstractProcessor {
         ProcessorContext.getInstance().getEnvironment().getMessager().printMessage(Kind.ERROR, message + ": " + ElementUtils.printException(t), e);
     }
 
-    private CodeTypeElement generateWrapperOnly(ProcessorContext context, Element e) {
-        CodeTypeElement wrapper = generateWrapper(context, e, true);
+    private CodeTypeElement generateWrapperOnly(ProcessorContext context, Element e, List<TypeMirror> yieldExceptions, String resumeMethodPrefix) {
+        CodeTypeElement wrapper = generateWrapper(context, e, true, yieldExceptions, resumeMethodPrefix);
         if (wrapper == null) {
             return null;
         }
@@ -285,75 +240,22 @@ public final class InstrumentableProcessor extends AbstractProcessor {
         return wrapper;
     }
 
-    private CodeTypeElement generateWrapperAndFactory(ProcessorContext context, Element e) {
-        CodeTypeElement wrapper = generateWrapper(context, e, false);
-        if (wrapper == null) {
-            return null;
-        }
-        CodeTypeElement factory = generateFactory(context, e, wrapper);
-
-        // add @SuppressWarnings("deprecation")
-        DeclaredType suppressWarnings = context.getDeclaredType(SuppressWarnings.class);
-        CodeAnnotationMirror suppressWarningsAnnotation = new CodeAnnotationMirror(suppressWarnings);
-        suppressWarningsAnnotation.setElementValue(ElementUtils.findExecutableElement(suppressWarnings, "value"),
-                        new CodeAnnotationValue(Arrays.asList(new CodeAnnotationValue("deprecation"))));
-        factory.getAnnotationMirrors().add(suppressWarningsAnnotation);
-
-        wrapper.getModifiers().add(Modifier.STATIC);
-        factory.add(wrapper);
-        assertNoErrorExpected(e);
-        return factory;
-    }
-
-    @SuppressWarnings("deprecation")
-    private static CodeTypeElement generateFactory(ProcessorContext context, Element e, CodeTypeElement wrapper) {
-        TypeElement sourceType = (TypeElement) e;
-        PackageElement pack = context.getEnvironment().getElementUtils().getPackageOf(sourceType);
-        Set<Modifier> typeModifiers = ElementUtils.modifiers(Modifier.PUBLIC, Modifier.FINAL);
-        CodeTypeElement factory = new CodeTypeElement(typeModifiers, ElementKind.CLASS, pack, createWrapperClassName(sourceType));
-
-        TypeMirror factoryType = context.reloadType(context.getType(com.oracle.truffle.api.instrumentation.InstrumentableFactory.class));
-        factory.getImplements().add(new CodeTypeMirror.DeclaredCodeTypeMirror(ElementUtils.fromTypeMirror(factoryType), Arrays.asList(sourceType.asType())));
-
-        GeneratorUtils.addGeneratedBy(context, factory, sourceType);
-
-        TypeMirror returnType = context.getType(com.oracle.truffle.api.instrumentation.InstrumentableFactory.WrapperNode.class);
-        CodeExecutableElement createMethod = new CodeExecutableElement(ElementUtils.modifiers(Modifier.PUBLIC), returnType, "createWrapper");
-
-        createMethod.addParameter(new CodeVariableElement(sourceType.asType(), FIELD_DELEGATE));
-        createMethod.addParameter(new CodeVariableElement(context.getType(ProbeNode.class), FIELD_PROBE));
-
-        CodeTreeBuilder builder = createMethod.createBuilder();
-        ExecutableElement constructor = ElementFilter.constructorsIn(wrapper.getEnclosedElements()).iterator().next();
-
-        String firstParameterReference = null;
-        if (constructor.getParameters().size() > 2) {
-            TypeMirror firstParameter = constructor.getParameters().get(0).asType();
-            if (ElementUtils.typeEquals(firstParameter, sourceType.asType())) {
-                firstParameterReference = FIELD_DELEGATE;
-            } else if (ElementUtils.typeEquals(firstParameter, context.getType(SourceSection.class))) {
-                firstParameterReference = FIELD_DELEGATE + ".getSourceSection()";
-            }
-        }
-
-        builder.startReturn().startNew(wrapper.asType());
-        if (firstParameterReference != null) {
-            builder.string(firstParameterReference);
-        }
-        builder.string(FIELD_DELEGATE).string(FIELD_PROBE);
-        builder.end().end();
-
-        factory.add(createMethod);
-
-        return factory;
-    }
-
     private static String createWrapperClassName(TypeElement sourceType) {
         return sourceType.getSimpleName().toString() + CLASS_SUFFIX;
     }
 
+    private static boolean hasUnexpectedResult(ProcessorContext context, ExecutableElement element) {
+        TypeMirror unexpectedResult = context.getTypes().UnexpectedResultException;
+        for (TypeMirror thrownType : element.getThrownTypes()) {
+            if (ElementUtils.typeEquals(thrownType, unexpectedResult)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     @SuppressWarnings("deprecation")
-    private CodeTypeElement generateWrapper(ProcessorContext context, Element e, boolean topLevelClass) {
+    private CodeTypeElement generateWrapper(ProcessorContext context, Element e, boolean topLevelClass, List<TypeMirror> yieldExceptions, String resumeMethodPrefix) {
         if (!e.getKind().isClass()) {
             return null;
         }
@@ -371,6 +273,7 @@ public final class InstrumentableProcessor extends AbstractProcessor {
             emitError(e, "Inner class must be static to generate a wrapper.");
             return null;
         }
+        TruffleTypes types = context.getTypes();
 
         TypeElement sourceType = (TypeElement) e;
 
@@ -410,7 +313,7 @@ public final class InstrumentableProcessor extends AbstractProcessor {
         if (constructor == null) {
             for (ExecutableElement c : constructors) {
                 VariableElement firstParameter = c.getParameters().iterator().next();
-                if (ElementUtils.typeEquals(firstParameter.asType(), context.getType(SourceSection.class))) {
+                if (ElementUtils.typeEquals(firstParameter.asType(), types.SourceSection)) {
                     constructor = c;
                     break;
                 }
@@ -437,16 +340,12 @@ public final class InstrumentableProcessor extends AbstractProcessor {
         CodeTypeElement wrapperType = new CodeTypeElement(typeModifiers, ElementKind.CLASS, pack, wrapperClassName);
         TypeMirror resolvedSuperType = sourceType.asType();
         wrapperType.setSuperClass(resolvedSuperType);
-        if (topLevelClass) {
-            wrapperType.getImplements().add(context.getType(InstrumentableNode.WrapperNode.class));
-        } else {
-            wrapperType.getImplements().add(context.getType(com.oracle.truffle.api.instrumentation.InstrumentableFactory.WrapperNode.class));
-        }
+        wrapperType.getImplements().add(types.InstrumentableNode_WrapperNode);
 
         GeneratorUtils.addGeneratedBy(context, wrapperType, sourceType);
 
         wrapperType.add(createNodeChild(context, sourceType.asType(), FIELD_DELEGATE));
-        wrapperType.add(createNodeChild(context, context.getType(ProbeNode.class), FIELD_PROBE));
+        wrapperType.add(createNodeChild(context, types.ProbeNode, FIELD_PROBE));
 
         Set<Modifier> constructorModifiers;
         if (topLevelClass) {
@@ -467,42 +366,37 @@ public final class InstrumentableProcessor extends AbstractProcessor {
             wrapperType.add(getter);
         }
 
-        if (isOverrideableOrUndeclared(sourceType, METHOD_GET_NODE_COST)) {
-            TypeMirror returnType = context.getType(NodeCost.class);
-            CodeExecutableElement getInstrumentationTags = new CodeExecutableElement(ElementUtils.modifiers(Modifier.PUBLIC), returnType, METHOD_GET_NODE_COST);
-            getInstrumentationTags.createBuilder().startReturn().staticReference(returnType, "NONE").end();
-            wrapperType.add(getInstrumentationTags);
-        }
-
+        boolean isResume = resumeMethodPrefix != null && !resumeMethodPrefix.isEmpty();
         List<ExecutableElement> wrappedMethods = new ArrayList<>();
         List<ExecutableElement> wrappedExecuteMethods = new ArrayList<>();
-        List<? extends Element> elementList = context.getEnvironment().getElementUtils().getAllMembers(sourceType);
+        List<ExecutableElement> wrappedResumeMethods = isResume ? new ArrayList<>() : Collections.emptyList();
+        List<? extends Element> elementList = CompilerFactory.getCompiler(sourceType).getAllMembersInDeclarationOrder(context.getEnvironment(), sourceType);
 
         ExecutableElement genericExecuteDelegate = null;
+        ExecutableElement genericResumeDelegate = null;
         for (ExecutableElement method : ElementFilter.methodsIn(elementList)) {
-            if (isExecuteMethod(method) && isOverridable(method)) {
-                VariableElement firstParam = method.getParameters().isEmpty() ? null : method.getParameters().get(0);
-                if (topLevelClass && (firstParam == null || !ElementUtils.isAssignable(firstParam.asType(), context.getType(VirtualFrame.class)))) {
-                    emitError(e, String.format("Wrapped execute method %s must have VirtualFrame as first parameter.", method.getSimpleName().toString()));
+            if (!isOverridable(method)) {
+                continue;
+            }
+            if (isResume && hasMethodPrefix(method, types, resumeMethodPrefix)) {
+                if (topLevelClass && !testFirstParamIsVirtualFrame(e, types, method)) {
+                    return null;
+                }
+                if (ElementUtils.isObject(method.getReturnType()) && method.getParameters().size() == 1 && genericResumeDelegate == null) {
+                    genericResumeDelegate = method;
+                }
+                wrappedResumeMethods.add(method);
+            } else if (hasMethodPrefix(method, types, EXECUTE_METHOD_PREFIX)) {
+                if (topLevelClass && !testFirstParamIsVirtualFrame(e, types, method)) {
                     return null;
                 }
                 if (ElementUtils.isObject(method.getReturnType()) && method.getParameters().size() == 1 && genericExecuteDelegate == null) {
                     genericExecuteDelegate = method;
                 }
-            }
-        }
-
-        for (ExecutableElement method : ElementFilter.methodsIn(elementList)) {
-            if (!isOverridable(method)) {
-                continue;
-            }
-
-            String methodName = method.getSimpleName().toString();
-            if (methodName.startsWith(EXECUTE_METHOD_PREFIX)) {
                 wrappedExecuteMethods.add(method);
             } else {
-                if (method.getModifiers().contains(Modifier.ABSTRACT) && !methodName.equals("getSourceSection") //
-                                && !methodName.equals(METHOD_GET_NODE_COST) && !method.getThrownTypes().contains(context.getType(UnexpectedResultException.class))) {
+                String methodName = method.getSimpleName().toString();
+                if (method.getModifiers().contains(Modifier.ABSTRACT) && !methodName.equals(METHOD_GET_NODE_COST) && !hasUnexpectedResult(context, method)) {
                     wrappedMethods.add(method);
                 }
             }
@@ -512,15 +406,15 @@ public final class InstrumentableProcessor extends AbstractProcessor {
         ExecutableElement outgoingConverterMethod = null;
 
         for (ExecutableElement method : ElementFilter.methodsIn(elementList)) {
-            IncomingConverter incomingConverter = method.getAnnotation(IncomingConverter.class);
-            OutgoingConverter outgoingConverter = method.getAnnotation(OutgoingConverter.class);
+            AnnotationMirror incomingConverter = ElementUtils.findAnnotationMirror(method, types.GenerateWrapper_IncomingConverter);
+            AnnotationMirror outgoingConverter = ElementUtils.findAnnotationMirror(method, types.GenerateWrapper_OutgoingConverter);
 
             if (incomingConverter != null) {
                 if (incomingConverterMethod != null) {
-                    emitError(sourceType, String.format("Only one @%s method allowed, found multiple.", IncomingConverter.class.getSimpleName()));
+                    emitError(sourceType, String.format("Only one @%s method allowed, found multiple.", types.GenerateWrapper_IncomingConverter.asElement().getSimpleName()));
                     return null;
                 }
-                if (!verifyConverter(method, IncomingConverter.class)) {
+                if (!verifyConverter(method, types.GenerateWrapper_IncomingConverter)) {
                     continue;
                 }
                 incomingConverterMethod = method;
@@ -528,174 +422,47 @@ public final class InstrumentableProcessor extends AbstractProcessor {
 
             if (outgoingConverter != null) {
                 if (outgoingConverterMethod != null) {
-                    emitError(sourceType, String.format("Only one @%s method allowed, found multiple.", OutgoingConverter.class.getSimpleName()));
+                    emitError(sourceType, String.format("Only one @%s method allowed, found multiple.", types.GenerateWrapper_OutgoingConverter.asElement().getSimpleName()));
                     return null;
                 }
-                if (!verifyConverter(method, OutgoingConverter.class)) {
+                if (!verifyConverter(method, types.GenerateWrapper_OutgoingConverter)) {
                     continue;
                 }
                 outgoingConverterMethod = method;
             }
         }
 
-        if (wrappedExecuteMethods.isEmpty()) {
-            emitError(sourceType, String.format("No methods starting with name execute found to wrap."));
+        if (wrappedExecuteMethods.isEmpty() && wrappedResumeMethods.isEmpty()) {
+            if (isResume) {
+                emitError(sourceType, String.format("No methods starting with name %s or %s found to wrap.", EXECUTE_METHOD_PREFIX, resumeMethodPrefix));
+            } else {
+                emitError(sourceType, String.format("No methods starting with name %s found to wrap.", EXECUTE_METHOD_PREFIX));
+            }
             return null;
         }
 
-        Collections.sort(wrappedExecuteMethods, new Comparator<ExecutableElement>() {
+        Comparator<ExecutableElement> methodComparator = new Comparator<>() {
             public int compare(ExecutableElement o1, ExecutableElement o2) {
                 return ElementUtils.compareMethod(o1, o2);
             }
-        });
-
+        };
+        Collections.sort(wrappedExecuteMethods, methodComparator);
         for (ExecutableElement method : wrappedExecuteMethods) {
-            ExecutableElement executeMethod = method;
-            CodeExecutableElement wrappedExecute = CodeExecutableElement.clone(processingEnv, executeMethod);
-            wrappedExecute.getModifiers().remove(Modifier.ABSTRACT);
-            wrappedExecute.getAnnotationMirrors().clear();
+            CodeExecutableElement wrappedExecute = wrapExecutable(method, false, genericExecuteDelegate, context, yieldExceptions, incomingConverterMethod, outgoingConverterMethod);
+            wrapperType.add(wrappedExecute);
+        }
 
-            String frameParameterName = "null";
-            for (VariableElement parameter : wrappedExecute.getParameters()) {
-                if (ElementUtils.typeEquals(context.getType(VirtualFrame.class), parameter.asType())) {
-                    frameParameterName = parameter.getSimpleName().toString();
-                    break;
-                }
-            }
-
-            CodeTreeBuilder builder = wrappedExecute.createBuilder();
-            TypeMirror returnTypeMirror = executeMethod.getReturnType();
-            boolean executeReturnsVoid = ElementUtils.isVoid(returnTypeMirror);
-            if (executeReturnsVoid && genericExecuteDelegate != null && executeMethod.getParameters().size() == genericExecuteDelegate.getParameters().size()) {
-                executeMethod = genericExecuteDelegate;
-                returnTypeMirror = genericExecuteDelegate.getReturnType();
-                executeReturnsVoid = false;
-            }
-
-            String returnName;
-            if (!executeReturnsVoid) {
-                returnName = "returnValue";
-                builder.declaration(returnTypeMirror, returnName, (CodeTree) null);
-            } else {
-                returnName = "null";
-            }
-            builder.startFor().startGroup().string(";;").end().end().startBlock();
-            builder.declaration("boolean", VAR_RETURN_CALLED, "false");
-            builder.startTryBlock();
-            if (wrappedExecute.getThrownTypes().contains(context.getType(UnexpectedResultException.class))) {
-                builder.startTryBlock();
-            }
-
-            builder.startStatement().startCall(FIELD_PROBE, METHOD_ON_ENTER).string(frameParameterName).end().end();
-
-            CodeTreeBuilder callDelegate = builder.create();
-            callDelegate.startCall(FIELD_DELEGATE, executeMethod.getSimpleName().toString());
-            for (VariableElement parameter : wrappedExecute.getParameters()) {
-                callDelegate.string(parameter.getSimpleName().toString());
-            }
-            callDelegate.end();
-            if (executeReturnsVoid) {
-                builder.statement(callDelegate.build());
-            } else {
-                builder.startStatement().string(returnName).string(" = ").tree(callDelegate.build()).end();
-            }
-
-            builder.startStatement().string(VAR_RETURN_CALLED).string(" = true").end();
-
-            builder.startStatement().startCall(FIELD_PROBE, METHOD_ON_RETURN_VALUE).string(frameParameterName);
-            if (outgoingConverterMethod == null || executeReturnsVoid) {
-                builder.string(returnName);
-            } else {
-                builder.tree(createCallConverter(outgoingConverterMethod, frameParameterName, CodeTreeBuilder.singleString(returnName)));
-            }
-            builder.end().end();
-
-            builder.statement("break");
-            if (wrappedExecute.getThrownTypes().contains(context.getType(UnexpectedResultException.class))) {
-                builder.end().startCatchBlock(context.getType(UnexpectedResultException.class), "e");
-                builder.startStatement().string(VAR_RETURN_CALLED).string(" = true").end();
-                builder.startStatement().startCall(FIELD_PROBE, METHOD_ON_RETURN_VALUE).string(frameParameterName);
-                if (outgoingConverterMethod == null || executeReturnsVoid) {
-                    builder.string("e.getResult()");
-                } else {
-                    builder.tree(createCallConverter(outgoingConverterMethod, frameParameterName, CodeTreeBuilder.singleString("e.getResult()")));
-                }
-                builder.end().end();
-                builder.startThrow().string("e").end().end();
-            }
-            builder.end().startCatchBlock(context.getType(Throwable.class), "t");
-            CodeTreeBuilder callExOrUnwind = builder.create();
-            callExOrUnwind.startCall(FIELD_PROBE, METHOD_ON_RETURN_EXCEPTIONAL_OR_UNWIND).string(frameParameterName).string("t").string(VAR_RETURN_CALLED).end();
-            builder.declaration("Object", "result", callExOrUnwind.build());
-            builder.startIf().string("result == ").string(CONSTANT_REENTER).end();
-            builder.startBlock();
-            builder.statement("continue");
-            if (ElementUtils.isVoid(wrappedExecute.getReturnType())) {
-                builder.end().startElseIf();
-                builder.string("result != null").end();
-                builder.startBlock();
-                builder.statement("break");
-            } else {
-                boolean objectReturnType = "java.lang.Object".equals(ElementUtils.getQualifiedName(returnTypeMirror)) && returnTypeMirror.getKind() != TypeKind.ARRAY;
-                boolean throwsUnexpectedResult = wrappedExecute.getThrownTypes().contains(context.getType(UnexpectedResultException.class));
-                if (objectReturnType || !throwsUnexpectedResult) {
-                    builder.end().startElseIf();
-                    builder.string("result != null").end();
-                    builder.startBlock();
-                    builder.startStatement().string(returnName).string(" = ");
-                    if (!objectReturnType) {
-                        builder.string("(").string(ElementUtils.getSimpleName(returnTypeMirror)).string(") ");
-                    }
-                    if (incomingConverterMethod == null) {
-                        builder.string("result");
-                    } else {
-                        builder.tree(createCallConverter(incomingConverterMethod, frameParameterName, CodeTreeBuilder.singleString("result")));
-                    }
-                    builder.end();
-                    builder.statement("break");
-                } else { // can throw UnexpectedResultException
-                    builder.end();
-
-                    if (incomingConverterMethod != null) {
-                        builder.startIf().string("result != null").end().startBlock();
-                        builder.startStatement();
-                        builder.string("result = ");
-                        builder.tree(createCallConverter(incomingConverterMethod, frameParameterName, CodeTreeBuilder.singleString("result")));
-                        builder.end();
-                        builder.end();
-                    }
-
-                    builder.startIf();
-                    builder.string("result").instanceOf(boxed(returnTypeMirror, context.getEnvironment().getTypeUtils())).end();
-                    builder.startBlock();
-
-                    builder.startStatement().string(returnName).string(" = ");
-                    builder.string("(").string(ElementUtils.getSimpleName(returnTypeMirror)).string(") ");
-                    builder.string("result");
-                    builder.end();
-                    builder.statement("break");
-                    builder.end();
-                    builder.startElseIf().string("result != null").end();
-                    builder.startBlock();
-                    builder.startThrow().startNew(context.getType(UnexpectedResultException.class));
-                    builder.string("result");
-                    builder.end().end(); // new, throw
-                }
-            }
-            builder.end();
-            builder.startThrow().string("t").end();
-            builder.end(2);
-            if (!ElementUtils.isVoid(wrappedExecute.getReturnType())) {
-                builder.startReturn().string(returnName).end();
-            }
-
+        Collections.sort(wrappedResumeMethods, methodComparator);
+        for (ExecutableElement method : wrappedResumeMethods) {
+            CodeExecutableElement wrappedExecute = wrapExecutable(method, true, genericResumeDelegate, context, yieldExceptions, incomingConverterMethod, outgoingConverterMethod);
             wrapperType.add(wrappedExecute);
         }
 
         for (ExecutableElement delegateMethod : wrappedMethods) {
-            CodeExecutableElement generatedMethod = CodeExecutableElement.clone(processingEnv, delegateMethod);
+            CodeExecutableElement generatedMethod = CodeExecutableElement.clone(delegateMethod);
 
             generatedMethod.getModifiers().remove(Modifier.ABSTRACT);
+            generatedMethod.getModifiers().remove(Modifier.DEFAULT);
 
             CodeTreeBuilder callDelegate = generatedMethod.createBuilder();
             if (ElementUtils.isVoid(delegateMethod.getReturnType())) {
@@ -714,12 +481,181 @@ public final class InstrumentableProcessor extends AbstractProcessor {
         return wrapperType;
     }
 
-    private static boolean isExecuteMethod(ExecutableElement method) {
-        String methodName = method.getSimpleName().toString();
-        if (!methodName.startsWith(EXECUTE_METHOD_PREFIX)) {
+    private boolean testFirstParamIsVirtualFrame(Element e, TruffleTypes types, ExecutableElement method) {
+        VariableElement firstParam = method.getParameters().isEmpty() ? null : method.getParameters().get(0);
+        if ((firstParam == null || !ElementUtils.isAssignable(firstParam.asType(), types.VirtualFrame))) {
+            emitError(e, String.format("Wrapped method %s must have VirtualFrame as first parameter.", method.getSimpleName()));
             return false;
+        } else {
+            return true;
         }
-        return true;
+    }
+
+    private static CodeExecutableElement wrapExecutable(ExecutableElement method, boolean isResume, ExecutableElement genericExecuteDelegate, ProcessorContext context,
+                    List<TypeMirror> yieldExceptions,
+                    ExecutableElement incomingConverterMethod, ExecutableElement outgoingConverterMethod) {
+        ExecutableElement executeMethod = method;
+        CodeExecutableElement wrappedExecute = CodeExecutableElement.clone(executeMethod);
+        wrappedExecute.getModifiers().remove(Modifier.ABSTRACT);
+        wrappedExecute.getModifiers().remove(Modifier.DEFAULT);
+        wrappedExecute.getAnnotationMirrors().clear();
+
+        TruffleTypes types = context.getTypes();
+        String frameParameterName = "null";
+        for (VariableElement parameter : wrappedExecute.getParameters()) {
+            if (ElementUtils.typeEquals(types.VirtualFrame, parameter.asType())) {
+                frameParameterName = parameter.getSimpleName().toString();
+                break;
+            }
+        }
+
+        CodeTreeBuilder builder = wrappedExecute.createBuilder();
+        TypeMirror returnTypeMirror = executeMethod.getReturnType();
+        boolean executeReturnsVoid = ElementUtils.isVoid(returnTypeMirror);
+        if (executeReturnsVoid && genericExecuteDelegate != null && executeMethod.getParameters().size() == genericExecuteDelegate.getParameters().size()) {
+            executeMethod = genericExecuteDelegate;
+            returnTypeMirror = genericExecuteDelegate.getReturnType();
+            executeReturnsVoid = false;
+        }
+
+        String returnName;
+        if (!executeReturnsVoid) {
+            returnName = "returnValue";
+            builder.declaration(returnTypeMirror, returnName, (CodeTree) null);
+        } else {
+            returnName = "null";
+        }
+        builder.startFor().startGroup().string(";;").end().end().startBlock();
+        builder.declaration("boolean", VAR_RETURN_CALLED, "false");
+        builder.startTryBlock();
+        boolean hasUnexpectedResult = hasUnexpectedResult(context, wrappedExecute);
+        if (hasUnexpectedResult) {
+            builder.startTryBlock();
+        }
+
+        if (isResume) {
+            builder.startStatement().startCall(FIELD_PROBE, METHOD_ON_RESUME).string(frameParameterName).end().end();
+        } else {
+            builder.startStatement().startCall(FIELD_PROBE, METHOD_ON_ENTER).string(frameParameterName).end().end();
+        }
+
+        CodeTreeBuilder callDelegate = builder.create();
+        callDelegate.startCall(FIELD_DELEGATE, executeMethod.getSimpleName().toString());
+        for (VariableElement parameter : wrappedExecute.getParameters()) {
+            callDelegate.string(parameter.getSimpleName().toString());
+        }
+        callDelegate.end();
+        if (executeReturnsVoid) {
+            builder.statement(callDelegate.build());
+        } else {
+            builder.startStatement().string(returnName).string(" = ").tree(callDelegate.build()).end();
+        }
+
+        builder.startStatement().string(VAR_RETURN_CALLED).string(" = true").end();
+
+        builder.startStatement().startCall(FIELD_PROBE, METHOD_ON_RETURN_VALUE).string(frameParameterName);
+        if (outgoingConverterMethod == null || executeReturnsVoid) {
+            builder.string(returnName);
+        } else {
+            builder.tree(createCallConverter(outgoingConverterMethod, frameParameterName, CodeTreeBuilder.singleString(returnName)));
+        }
+        builder.end().end();
+
+        builder.statement("break");
+        if (hasUnexpectedResult) {
+            builder.end().startCatchBlock(types.UnexpectedResultException, "e");
+            builder.startStatement().string(VAR_RETURN_CALLED).string(" = true").end();
+            builder.startStatement().startCall(FIELD_PROBE, METHOD_ON_RETURN_VALUE).string(frameParameterName);
+            if (outgoingConverterMethod == null || executeReturnsVoid) {
+                builder.string("e.getResult()");
+            } else {
+                builder.tree(createCallConverter(outgoingConverterMethod, frameParameterName, CodeTreeBuilder.singleString("e.getResult()")));
+            }
+            builder.end().end();
+            builder.startThrow().string("e").end().end();
+        }
+        for (TypeMirror yieldException : yieldExceptions) {
+            builder.end().startCatchBlock(yieldException, "e");
+            builder.startStatement().startCall(FIELD_PROBE, METHOD_ON_YIELD).string(frameParameterName).string("e.getYieldValue()");
+            builder.end().end();
+            builder.startThrow().string("e").end();
+        }
+        builder.end().startCatchBlock(context.getType(Throwable.class), "t");
+        CodeTreeBuilder callExOrUnwind = builder.create();
+        callExOrUnwind.startCall(FIELD_PROBE, METHOD_ON_RETURN_EXCEPTIONAL_OR_UNWIND).string(frameParameterName).string("t").string(VAR_RETURN_CALLED).end();
+        builder.declaration("Object", "result", callExOrUnwind.build());
+        builder.startIf().string("result == ").string(CONSTANT_REENTER).end();
+        builder.startBlock();
+        builder.statement("continue");
+        if (ElementUtils.isVoid(wrappedExecute.getReturnType())) {
+            builder.end().startElseIf();
+            builder.string("result != null").end();
+            builder.startBlock();
+            builder.statement("break");
+        } else {
+            boolean objectReturnType = "java.lang.Object".equals(ElementUtils.getQualifiedName(returnTypeMirror)) && returnTypeMirror.getKind() != TypeKind.ARRAY;
+            boolean throwsUnexpectedResult = hasUnexpectedResult(context, wrappedExecute);
+            if (objectReturnType || !throwsUnexpectedResult) {
+                builder.end().startElseIf();
+                builder.string("result != null").end();
+                builder.startBlock();
+                builder.startStatement().string(returnName).string(" = ");
+                if (!objectReturnType) {
+                    builder.string("(").string(ElementUtils.getSimpleName(returnTypeMirror)).string(") ");
+                }
+                if (incomingConverterMethod == null) {
+                    builder.string("result");
+                } else {
+                    builder.tree(createCallConverter(incomingConverterMethod, frameParameterName, CodeTreeBuilder.singleString("result")));
+                }
+                builder.end();
+                builder.statement("break");
+            } else { // can throw UnexpectedResultException
+                builder.end();
+
+                if (incomingConverterMethod != null) {
+                    builder.startIf().string("result != null").end().startBlock();
+                    builder.startStatement();
+                    builder.string("result = ");
+                    builder.tree(createCallConverter(incomingConverterMethod, frameParameterName, CodeTreeBuilder.singleString("result")));
+                    builder.end();
+                    builder.end();
+                }
+
+                builder.startIf();
+                builder.string("result").instanceOf(boxed(returnTypeMirror, context.getEnvironment().getTypeUtils())).end();
+                builder.startBlock();
+
+                builder.startStatement().string(returnName).string(" = ");
+                builder.string("(").string(ElementUtils.getSimpleName(returnTypeMirror)).string(") ");
+                builder.string("result");
+                builder.end();
+                builder.statement("break");
+                builder.end();
+                builder.startElseIf().string("result != null").end();
+                builder.startBlock();
+                builder.startThrow().startNew(types.UnexpectedResultException);
+                builder.string("result");
+                builder.end().end(); // new, throw
+            }
+        }
+        builder.end();
+        builder.startThrow().string("t").end();
+        builder.end(2);
+        if (!ElementUtils.isVoid(wrappedExecute.getReturnType())) {
+            builder.startReturn().string(returnName).end();
+        }
+
+        return wrappedExecute;
+    }
+
+    private static boolean hasMethodPrefix(ExecutableElement method, TruffleTypes types, String prefix) {
+        String methodName = method.getSimpleName().toString();
+        return methodName.startsWith(prefix) && !isIgnored(method, types);
+    }
+
+    private static boolean isIgnored(ExecutableElement method, TruffleTypes types) {
+        return ElementUtils.findAnnotationMirror(method, types.GenerateWrapper_Ignore) != null;
     }
 
     private static boolean isOverridable(ExecutableElement method) {
@@ -757,19 +693,20 @@ public final class InstrumentableProcessor extends AbstractProcessor {
         return builder.build();
     }
 
-    private boolean verifyConverter(ExecutableElement method, Class<?> annotationClass) {
+    private boolean verifyConverter(ExecutableElement method, DeclaredType annotationClass) {
         if (method.getModifiers().contains(Modifier.PRIVATE)) {
-            emitError(method, String.format("Method annotated with @%s must not be private.", annotationClass.getSimpleName()));
+            emitError(method, String.format("Method annotated with @%s must not be private.", ElementUtils.getSimpleName(annotationClass)));
             return false;
         }
 
         if (method.getModifiers().contains(Modifier.ABSTRACT)) {
-            emitError(method, String.format("Method annotated with @%s must not be abstract.", annotationClass.getSimpleName()));
+            emitError(method, String.format("Method annotated with @%s must not be abstract.", ElementUtils.getSimpleName(annotationClass)));
             return false;
         }
+        ProcessorContext context = ProcessorContext.getInstance();
 
-        TypeMirror frameClass = ProcessorContext.getInstance().getDeclaredType(VirtualFrame.class);
-        TypeMirror objectClass = ProcessorContext.getInstance().getDeclaredType(Object.class);
+        TypeMirror frameClass = context.getTypes().VirtualFrame;
+        TypeMirror objectClass = context.getDeclaredType(Object.class);
 
         boolean valid = true;
         if (method.getParameters().size() == 1) {
@@ -796,7 +733,8 @@ public final class InstrumentableProcessor extends AbstractProcessor {
 
         if (!valid) {
             emitError(method, String.format("Invalid @%s method signature. Must be either " +
-                            "Object converter(Object) or Object converter(%s, Object)", annotationClass.getSimpleName(), VirtualFrame.class.getSimpleName()));
+                            "Object converter(Object) or Object converter(%s, Object)", ElementUtils.getSimpleName(annotationClass),
+                            context.getTypes().VirtualFrame.asElement().getSimpleName()));
             return false;
         }
 
@@ -811,30 +749,25 @@ public final class InstrumentableProcessor extends AbstractProcessor {
         }
     }
 
-    private static boolean isOverrideableOrUndeclared(TypeElement sourceType, String methodName) {
-        List<ExecutableElement> elements = ElementUtils.getDeclaredMethodsInSuperTypes(sourceType, methodName);
-        return elements.isEmpty() || !elements.iterator().next().getModifiers().contains(Modifier.FINAL);
-    }
-
     private static CodeVariableElement createNodeChild(ProcessorContext context, TypeMirror type, String name) {
         CodeVariableElement var = new CodeVariableElement(ElementUtils.modifiers(Modifier.PRIVATE), type, name);
-        var.addAnnotationMirror(new CodeAnnotationMirror((DeclaredType) context.getType(Child.class)));
+        var.addAnnotationMirror(new CodeAnnotationMirror(context.getTypes().Node_Child));
         return var;
     }
 
-    void assertNoErrorExpected(Element e) {
-        ExpectError.assertNoErrorExpected(processingEnv, e);
+    static void assertNoErrorExpected(Element e) {
+        ExpectError.assertNoErrorExpected(e);
     }
 
     void emitError(Element e, String msg) {
-        if (ExpectError.isExpectedError(processingEnv, e, msg)) {
+        if (ExpectError.isExpectedError(e, msg)) {
             return;
         }
         processingEnv.getMessager().printMessage(Kind.ERROR, msg, e);
     }
 
     void emitError(Element e, AnnotationMirror annotation, String msg) {
-        if (ExpectError.isExpectedError(processingEnv, e, msg)) {
+        if (ExpectError.isExpectedError(e, msg)) {
             return;
         }
         processingEnv.getMessager().printMessage(Kind.ERROR, msg, e, annotation);

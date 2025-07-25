@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -47,6 +47,7 @@ import java.lang.reflect.Array;
 import java.util.ArrayList;
 import java.util.Collection;
 
+import org.hamcrest.MatcherAssert;
 import org.junit.Assert;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -58,12 +59,9 @@ import com.oracle.truffle.api.CallTarget;
 import com.oracle.truffle.api.CompilerDirectives;
 import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
 import com.oracle.truffle.api.frame.VirtualFrame;
-import com.oracle.truffle.api.interop.ForeignAccess;
 import com.oracle.truffle.api.interop.InteropException;
-import com.oracle.truffle.api.interop.Message;
-import com.oracle.truffle.api.interop.TruffleObject;
-import com.oracle.truffle.api.nodes.Node;
-import com.oracle.truffle.nfi.types.NativeSimpleType;
+import com.oracle.truffle.nfi.api.SignatureLibrary;
+import com.oracle.truffle.nfi.backend.spi.types.NativeSimpleType;
 import com.oracle.truffle.tck.TruffleRunner;
 import com.oracle.truffle.tck.TruffleRunner.Inject;
 
@@ -96,18 +94,28 @@ public class ArrayNFITest extends NFITest {
 
     public class CreateAndSumArray extends NFITestRootNode {
 
-        private final Class<?> finalJavaType;
+        private final Object store;
+        private final Object storeSignature;
 
-        private final TruffleObject store;
-        private final TruffleObject sum;
+        private final Object sum;
+        private final Object sumSignature;
 
-        @Child Node executeStore = Message.EXECUTE.createNode();
-        @Child Node executeSum = Message.EXECUTE.createNode();
+        @Child SignatureLibrary storeSignatureLibrary;
+        @Child SignatureLibrary sumSignatureLibrary;
 
         public CreateAndSumArray() {
-            this.finalJavaType = javaType;
-            this.store = lookupAndBind("store_" + nativeType, String.format("([%s], uint32, %s) : void", nativeType, nativeType));
-            this.sum = lookupAndBind("sum_" + nativeType, String.format("([%s], uint32) : %s", nativeType, nativeType));
+            try {
+                this.store = UNCACHED_INTEROP.readMember(testLibrary, "store_" + nativeType);
+                this.storeSignature = parseSignature(String.format("([%s], uint32, %s) : void", nativeType, nativeType));
+
+                this.sum = UNCACHED_INTEROP.readMember(testLibrary, "sum_" + nativeType);
+                this.sumSignature = parseSignature(String.format("([%s], uint32) : %s", nativeType, nativeType));
+
+                this.storeSignatureLibrary = SignatureLibrary.getFactory().create(this.storeSignature);
+                this.sumSignatureLibrary = SignatureLibrary.getFactory().create(this.sumSignature);
+            } catch (InteropException ex) {
+                throw new AssertionError(ex);
+            }
         }
 
         @TruffleBoundary
@@ -115,7 +123,7 @@ public class ArrayNFITest extends NFITest {
             int length = Array.getLength(array);
             for (int i = 0; i < length; i++) {
                 Object elem = Array.get(array, i);
-                Assert.assertThat("array element", elem, is(instanceOf(finalJavaType)));
+                MatcherAssert.assertThat("array element", elem, is(instanceOf(javaType)));
                 long actual = 0;
                 long expected = i + 1;
                 if (elem instanceof Number) {
@@ -135,17 +143,16 @@ public class ArrayNFITest extends NFITest {
 
         @Override
         public Object executeTest(VirtualFrame frame) {
-            int arrayLength = (Integer) frame.getArguments()[0];
-
-            Object array = Array.newInstance(finalJavaType, arrayLength);
-            Object wrappedArray = runWithPolyglot.getTruffleTestEnv().asGuestValue(array);
+            Object array = frame.getArguments()[0];
+            Object wrappedArray = frame.getArguments()[1];
+            int arrayLength = Array.getLength(array);
 
             try {
                 for (int i = 0; i < arrayLength; i++) {
-                    ForeignAccess.sendExecute(executeStore, store, wrappedArray, i, i + 1);
+                    storeSignatureLibrary.call(storeSignature, store, wrappedArray, i, i + 1);
                 }
                 verifyArray(array);
-                return ForeignAccess.sendExecute(executeSum, sum, wrappedArray, arrayLength);
+                return sumSignatureLibrary.call(sumSignature, sum, wrappedArray, arrayLength);
             } catch (InteropException ex) {
                 CompilerDirectives.transferToInterpreter();
                 throw new AssertionError(ex);
@@ -153,11 +160,23 @@ public class ArrayNFITest extends NFITest {
         }
     }
 
-    @Test
-    public void testSumArray(@Inject(CreateAndSumArray.class) CallTarget callTarget) {
-        int arrayLength = 5;
-        Object ret = callTarget.call(arrayLength);
-        Assert.assertThat("return value", ret, is(instanceOf(Number.class)));
+    private static void testSumArray(CallTarget callTarget, Object array, Object wrappedArray) {
+        int arrayLength = Array.getLength(array);
+        Object ret = callTarget.call(array, wrappedArray);
+        MatcherAssert.assertThat("return value", ret, is(instanceOf(Number.class)));
         Assert.assertEquals("return value", arrayLength * (arrayLength + 1) / 2, ((Number) ret).intValue());
+    }
+
+    @Test
+    public void testSumArrayDirect(@Inject(CreateAndSumArray.class) CallTarget callTarget) {
+        Object array = Array.newInstance(javaType, 5);
+        testSumArray(callTarget, array, array);
+    }
+
+    @Test
+    public void testSumArrayWrapped(@Inject(CreateAndSumArray.class) CallTarget callTarget) {
+        Object array = Array.newInstance(javaType, 5);
+        Object wrappedArray = runWithPolyglot.getTruffleTestEnv().asGuestValue(array);
+        testSumArray(callTarget, array, wrappedArray);
     }
 }

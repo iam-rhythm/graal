@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2014, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -59,8 +59,8 @@ import org.graalvm.word.Pointer;
  * {@link LocationIdentity}. If you need a field access with a particular {@link LocationIdentity},
  * do not use this annotation. Instead, add a {@link LocationIdentity} as the last parameter to the
  * accessor methods.
- * 
- * @since 1.0
+ *
+ * @since 19.0
  */
 @Retention(RetentionPolicy.RUNTIME)
 @Target({ElementType.METHOD})

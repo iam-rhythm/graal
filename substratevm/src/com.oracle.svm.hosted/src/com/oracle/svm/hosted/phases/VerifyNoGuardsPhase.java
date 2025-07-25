@@ -28,20 +28,20 @@ import static com.oracle.svm.core.util.VMError.shouldNotReachHere;
 
 import java.util.List;
 
-import org.graalvm.compiler.nodes.FixedGuardNode;
-import org.graalvm.compiler.nodes.GuardNode;
-import org.graalvm.compiler.nodes.StructuredGraph;
-import org.graalvm.compiler.phases.Phase;
+import jdk.graal.compiler.nodes.FixedGuardNode;
+import jdk.graal.compiler.nodes.GuardNode;
+import jdk.graal.compiler.nodes.StructuredGraph;
+import jdk.graal.compiler.phases.Phase;
 
 public class VerifyNoGuardsPhase extends Phase {
 
     @Override
     protected void run(StructuredGraph graph) {
-        List<GuardNode> guards = graph.getNodes().filter(GuardNode.class).snapshot();
+        List<GuardNode> guards = graph.getNodes(GuardNode.TYPE).snapshot();
         if (guards.size() > 0) {
             throw shouldNotReachHere("Graph contains GuardNode: method " + graph.method() + ", guards " + guards.toString());
         }
-        List<FixedGuardNode> fixedGuards = graph.getNodes().filter(FixedGuardNode.class).snapshot();
+        List<FixedGuardNode> fixedGuards = graph.getNodes(FixedGuardNode.TYPE).snapshot();
         if (fixedGuards.size() > 0) {
             throw shouldNotReachHere("Graph contains FixedGuardNode: method " + graph.method() + ", guards " + fixedGuards.toString());
         }

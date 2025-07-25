@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,22 +24,24 @@
  */
 package com.oracle.svm.core.code;
 
+import static com.oracle.svm.core.deopt.Deoptimizer.Options.LazyDeoptimization;
+
 import org.graalvm.nativeimage.c.function.CodePointer;
 
-import com.oracle.svm.core.heap.ReferenceMapDecoder;
-import com.oracle.svm.core.heap.ReferenceMapEncoder;
-import com.oracle.svm.core.util.VMError;
+import com.oracle.svm.core.Uninterruptible;
+import com.oracle.svm.core.deopt.Deoptimizer.Options;
+import com.oracle.svm.core.heap.CodeReferenceMapDecoder;
+import com.oracle.svm.core.heap.CodeReferenceMapEncoder;
 
 /**
  * Information about an instruction pointer (IP), created and returned by methods in
- * {@link CodeInfoTable}.
+ * {@link CodeInfoTable}. In situations where we can't allocate any Java heap memory, we use the
+ * structure {@link SimpleCodeInfoQueryResult} instead.
+ *
+ * During a stack walk, this class holds information about a physical Java frame (see
+ * {@link FrameInfoQueryResult} for the virtual Java frames).
  */
 public class CodeInfoQueryResult {
-
-    /**
-     * Marker value for the frame size of entry points that is used by {@link #isEntryPoint()}.
-     */
-    public static final int ENTRY_POINT_FRAME_SIZE = 1;
 
     /**
      * Marker value returned by {@link #getExceptionOffset()} when no exception handler is
@@ -48,30 +50,19 @@ public class CodeInfoQueryResult {
     public static final int NO_EXCEPTION_OFFSET = 0;
 
     /**
-     * Marker value returned by {@link #getReferenceMapIndex()} when no reference map is registered
-     * for the {@link #getIP() IP}.
-     */
-
-    public static final int NO_REFERENCE_MAP = -1;
-
-    /**
-     * Marker value returned by {@link #getReferenceMapIndex()} when the reference map is empty for
-     * the {@link #getIP() IP}.
-     */
-    public static final int EMPTY_REFERENCE_MAP = 0;
-
-    /**
      * Marker value of {@link #getFrameInfo()} when no frame information is available for the
      * {@link #getIP() IP}.
      */
     protected static final FrameInfoQueryResult NO_FRAME_INFO = null;
 
-    protected AbstractCodeInfo data;
     protected CodePointer ip;
-    protected long totalFrameSize;
+    protected long encodedFrameSize;
     protected long exceptionOffset;
-    protected byte[] referenceMapEncoding;
     protected long referenceMapIndex;
+    /**
+     * Only set for deopt entry points and only if {@link Options#LazyDeoptimization} is enabled.
+     */
+    protected boolean deoptReturnValueIsObject;
     protected FrameInfoQueryResult frameInfo;
 
     /**
@@ -81,19 +72,44 @@ public class CodeInfoQueryResult {
         return ip;
     }
 
-    /**
-     * Indicates if the method containing the IP is an entry point method.
-     */
-    public boolean isEntryPoint() {
-        return totalFrameSize == ENTRY_POINT_FRAME_SIZE;
+    public long getEncodedFrameSize() {
+        return encodedFrameSize;
     }
 
     /**
      * Returns the frame size of the method containing the IP.
      */
     public long getTotalFrameSize() {
-        VMError.guarantee(totalFrameSize != ENTRY_POINT_FRAME_SIZE, "Entry point method: no valid frame size");
-        return totalFrameSize;
+        return getTotalFrameSize(encodedFrameSize);
+    }
+
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public static long getTotalFrameSize(long encodedFrameSize) {
+        return CodeInfoDecoder.decodeTotalFrameSize(encodedFrameSize);
+    }
+
+    /**
+     * Returns true if the method containing the IP is an entry point method.
+     */
+    public boolean isEntryPoint() {
+        return isEntryPoint(encodedFrameSize);
+    }
+
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public static boolean isEntryPoint(long encodedFrameSize) {
+        return CodeInfoDecoder.decodeIsEntryPoint(encodedFrameSize);
+    }
+
+    /**
+     * Returns true if the method containing the IP has callee-saved registers.
+     */
+    public boolean hasCalleeSavedRegisters() {
+        return hasCalleeSavedRegisters(encodedFrameSize);
+    }
+
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public static boolean hasCalleeSavedRegisters(long encodedFrameSize) {
+        return CodeInfoDecoder.decodeHasCalleeSavedRegisters(encodedFrameSize);
     }
 
     /**
@@ -105,25 +121,24 @@ public class CodeInfoQueryResult {
     }
 
     /**
-     * Returns the encoded reference map information, to be used together with
-     * {@link #getReferenceMapIndex()}. Encoding is handled by {@link ReferenceMapEncoder}, decoding
-     * is handled by {@link ReferenceMapDecoder}.
-     */
-    public byte[] getReferenceMapEncoding() {
-        return referenceMapEncoding;
-    }
-
-    /**
-     * Index into the {@link #getReferenceMapEncoding() encoded reference map} for the IP.
+     * Index into the {@link CodeInfoAccess#getStackReferenceMapEncoding(CodeInfo)} encoded
+     * reference map} for the code. Encoding is handled by {@link CodeReferenceMapEncoder}, decoding
+     * is handled by {@link CodeReferenceMapDecoder}.
      */
     public long getReferenceMapIndex() {
         return referenceMapIndex;
+    }
+
+    public boolean getDeoptReturnValueIsObject() {
+        assert LazyDeoptimization.getValue();
+        return deoptReturnValueIsObject;
     }
 
     /**
      * Stack frame information used, e.g., for deoptimization and printing of stack frames in debug
      * builds.
      */
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     public FrameInfoQueryResult getFrameInfo() {
         return frameInfo;
     }

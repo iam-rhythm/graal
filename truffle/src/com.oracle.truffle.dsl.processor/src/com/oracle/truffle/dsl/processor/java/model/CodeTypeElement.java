@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -41,7 +41,7 @@
 package com.oracle.truffle.dsl.processor.java.model;
 
 import java.util.ArrayList;
-import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
@@ -59,20 +59,25 @@ import javax.lang.model.element.VariableElement;
 import javax.lang.model.type.TypeMirror;
 import javax.lang.model.util.ElementFilter;
 
+import com.oracle.truffle.dsl.processor.java.ElementUtils;
+import com.oracle.truffle.dsl.processor.java.compiler.CompilerFactory;
 import com.oracle.truffle.dsl.processor.java.model.CodeTypeMirror.DeclaredCodeTypeMirror;
 
+@SuppressWarnings("this-escape")
 public class CodeTypeElement extends CodeElement<Element> implements TypeElement {
 
     private final List<? extends CodeImport> imports = parentableList(this, new ArrayList<CodeImport>());
 
     private final PackageElement packageElement;
 
-    private final Name simpleName;
+    private Name simpleName;
     private final Name packageName;
     private Name qualifiedName;
 
     private final List<TypeMirror> implementsInterfaces = new ArrayList<>();
-    private final ElementKind kind;
+    private final List<TypeMirror> permittedSubclasses = new ArrayList<>();
+    private final List<TypeParameterElement> typeParameters = parentableList(this, new ArrayList<>());
+    private ElementKind kind;
     private TypeMirror superClass;
 
     private final DeclaredCodeTypeMirror mirror = new DeclaredCodeTypeMirror(this);
@@ -90,9 +95,22 @@ public class CodeTypeElement extends CodeElement<Element> implements TypeElement
         this.qualifiedName = createQualifiedName();
     }
 
+    public void setSimpleName(Name simpleName) {
+        this.simpleName = simpleName;
+        this.qualifiedName = createQualifiedName();
+    }
+
     @Override
     public TypeMirror asType() {
         return mirror;
+    }
+
+    public void setKind(ElementKind kind) {
+        this.kind = kind;
+    }
+
+    public List<TypeMirror> getPermittedSubclasses() {
+        return permittedSubclasses;
     }
 
     @Override
@@ -101,12 +119,16 @@ public class CodeTypeElement extends CodeElement<Element> implements TypeElement
     }
 
     public boolean containsField(String name) {
+        return findField(name) != null;
+    }
+
+    public VariableElement findField(String name) {
         for (VariableElement field : getFields()) {
             if (field.getSimpleName().toString().equals(name)) {
-                return true;
+                return field;
             }
         }
-        return false;
+        return null;
     }
 
     @Override
@@ -134,8 +156,8 @@ public class CodeTypeElement extends CodeElement<Element> implements TypeElement
     }
 
     @Override
-    public List<? extends TypeParameterElement> getTypeParameters() {
-        return Collections.emptyList();
+    public List<TypeParameterElement> getTypeParameters() {
+        return typeParameters;
     }
 
     public boolean isTopLevelClass() {
@@ -220,13 +242,21 @@ public class CodeTypeElement extends CodeElement<Element> implements TypeElement
     }
 
     @Override
-    public String toString() {
-        return getQualifiedName().toString();
-    }
-
-    @Override
     public <R, P> R accept(ElementVisitor<R, P> v, P p) {
         return v.visitType(this, p);
+    }
+
+    public static CodeTypeElement cloneShallow(TypeElement typeElement) {
+        CodeTypeElement copy = new CodeTypeElement(new HashSet<>(typeElement.getModifiers()), typeElement.getKind(), ElementUtils.findPackageElement(typeElement),
+                        typeElement.getSimpleName().toString());
+        copy.setEnclosingElement(typeElement.getEnclosingElement());
+        copy.setSuperClass(typeElement.getSuperclass());
+        copy.getTypeParameters().addAll(typeElement.getTypeParameters());
+        copy.getImplements().addAll(typeElement.getInterfaces());
+        copy.getAnnotationMirrors().addAll(typeElement.getAnnotationMirrors());
+        copy.getPermittedSubclasses().addAll(typeElement.getPermittedSubclasses());
+        copy.getEnclosedElements().addAll(CompilerFactory.getCompiler(typeElement).getEnclosedElementsInDeclarationOrder(typeElement));
+        return copy;
     }
 
 }

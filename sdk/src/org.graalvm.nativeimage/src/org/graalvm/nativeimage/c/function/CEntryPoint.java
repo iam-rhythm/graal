@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2009, 2023, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -44,6 +44,7 @@ import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
+import java.util.function.BooleanSupplier;
 
 import org.graalvm.nativeimage.CurrentIsolate;
 import org.graalvm.nativeimage.Isolate;
@@ -59,12 +60,10 @@ import org.graalvm.word.WordFactory;
  * Annotates a method that is a VM entry point. Such a method must be declared <i>static</i>, and is
  * made accessible so that it can be called as a C function using the native ABI.
  * <p>
- * An execution context must be passed as a parameter and can be either an {@link IsolateThread}
- * that is specific to the current thread, or an {@link Isolate} for an isolate in which the current
- * thread is attached. These pointers can be obtained via the methods of {@link CurrentIsolate}.
- * When there is more than one parameter of these types, exactly one of the parameters must be
- * annotated with {@link IsolateThreadContext} for {@link IsolateThread}, or {@link IsolateContext}
- * for {@link Isolate}.
+ * An execution context must be passed as an {@link IsolateThread} that is specific to the current
+ * thread. This pointer can be obtained via {@link CurrentIsolate#getCurrentThread()}. When there is
+ * more than one parameter of {@link IsolateThread}, exactly one of the parameters must be annotated
+ * with {@link IsolateThreadContext}.
  * <p>
  * Exceptions cannot be thrown to the caller and must be explicitly caught in the entry point
  * method. Any uncaught exception causes the termination of the process after it is printed.
@@ -76,7 +75,7 @@ import org.graalvm.word.WordFactory;
  * method with a {@link CEnumLookup} annotation. For enum return types, the enum class must have a
  * method that is annotated with {@link CEnumValue}.
  *
- * @since 1.0
+ * @since 19.0
  */
 @Retention(RetentionPolicy.RUNTIME)
 @Target(ElementType.METHOD)
@@ -85,14 +84,14 @@ public @interface CEntryPoint {
     /**
      * The symbol name to use for this entry point.
      *
-     * @since 1.0
+     * @since 19.0
      */
     String name() default "";
 
     /**
      * Method documentation to be included in the header file, as an array of lines.
      *
-     * @since 1.0
+     * @since 19.0
      */
     String[] documentation() default "";
 
@@ -108,17 +107,17 @@ public @interface CEntryPoint {
      * and the exception is passed as the argument. The return value of the exception handler method
      * is then the return value of the entry point, i.e., passed back to the C code.
      *
-     * @since 1.0
+     * @since 19.0
      */
-    Class<?> exceptionHandler() default FatalExceptionHandler.class;
+    Class<? extends ExceptionHandler> exceptionHandler() default FatalExceptionHandler.class;
 
     /**
      * Special placeholder value for {@link #exceptionHandler()} to print the caught exception and
      * treat it as a {@link LogHandler#fatalError() fatal error}.
      *
-     * @since 1.0
+     * @since 19.0
      */
-    final class FatalExceptionHandler {
+    final class FatalExceptionHandler implements ExceptionHandler {
         private FatalExceptionHandler() {
         }
     }
@@ -131,20 +130,100 @@ public @interface CEntryPoint {
      * descriptions of the built-ins, and to the {@linkplain Builtin individual built-ins} for their
      * requirements to the annotated method's signature.
      *
-     * @since 1.0
+     * @since 19.0
      */
     Builtin builtin() default Builtin.NO_BUILTIN;
 
     /**
+     * If the supplier returns {@code true}, this entry point is added automatically when building a
+     * shared library. This means the method is a root method for compilation, and everything
+     * reachable from it is compiled too.
+     *
+     * The provided class must have a nullary constructor, which is used to instantiate the class.
+     * Then the supplier function is called on the newly instantiated instance.
+     *
+     * @since 22.0
+     */
+    Class<? extends BooleanSupplier> include() default AlwaysIncluded.class;
+
+    /**
+     * A {@link BooleanSupplier} that always returns {@code true}.
+     *
+     * @since 22.0
+     */
+    final class AlwaysIncluded implements BooleanSupplier {
+
+        private AlwaysIncluded() {
+        }
+
+        /**
+         * Returns {@code true}.
+         *
+         * @since 22.0
+         */
+        @Override
+        public boolean getAsBoolean() {
+            return true;
+        }
+    }
+
+    /**
+     * A {@link BooleanSupplier} that always returns {@code false}.
+     *
+     * @since 22.0
+     */
+    final class NotIncludedAutomatically implements BooleanSupplier {
+
+        private NotIncludedAutomatically() {
+        }
+
+        /**
+         * Returns {@code false}.
+         *
+         * @since 22.0
+         */
+        @Override
+        public boolean getAsBoolean() {
+            return false;
+        }
+    }
+
+    /**
+     * @since 22.0
+     */
+    enum Publish {
+        /**
+         * Do not publish the entry point method.
+         */
+        NotPublished,
+        /**
+         * Create a symbol for the entry point method in the native image.
+         */
+        SymbolOnly,
+        /**
+         * Create a symbol for the entry point method in the native image, and if building a shared
+         * library image, also include a C declaration in the generated C header file.
+         */
+        SymbolAndHeader,
+    }
+
+    /**
+     * Whether the entry point is part of the symbols and header files produced by Native Image.
+     *
+     * @since 22.0
+     */
+    Publish publishAs() default Publish.SymbolAndHeader;
+
+    /**
      * The built-in methods which can be {@linkplain #builtin() aliased}.
      *
-     * @since 1.0
+     * @since 19.0
      */
     enum Builtin {
         /**
          * The annotated method is not an alias for a built-in method.
          *
-         * @since 1.0
+         * @since 19.0
          */
         NO_BUILTIN,
 
@@ -153,7 +232,7 @@ public @interface CEntryPoint {
          * arguments, and must have a return type of {@link IsolateThread}. In case of an error,
          * {@link WordFactory#nullPointer() NULL} is returned.
          *
-         * @since 1.0
+         * @since 19.0
          */
         CREATE_ISOLATE,
 
@@ -163,17 +242,18 @@ public @interface CEntryPoint {
          * {@link IsolateThread}. In case of an error, {@link WordFactory#nullPointer() NULL} is
          * returned.
          *
-         * @since 1.0
+         * @since 19.0
          */
         ATTACH_THREAD,
 
         /**
          * The annotated method returns the {@link IsolateThread} of the current thread in a
          * specified {@link Isolate}. It requires a parameter of type {@link Isolate} for the
-         * isolate in question, and a return type of {@link IsolateThread}. In case of an error,
+         * isolate in question, and a return type of {@link IsolateThread}. In case of an error or
+         * if the current thread is not attached to the specified isolate,
          * {@link WordFactory#nullPointer() NULL} is returned.
          *
-         * @since 1.0
+         * @since 19.0
          */
         GET_CURRENT_THREAD,
 
@@ -182,7 +262,7 @@ public @interface CEntryPoint {
          * requires a parameter of type {@link IsolateThread}, and a return type of {@link Isolate}.
          * In case of an error, {@link WordFactory#nullPointer() NULL} is returned.
          *
-         * @since 1.0
+         * @since 19.0
          */
         GET_ISOLATE,
 
@@ -192,7 +272,7 @@ public @interface CEntryPoint {
          * {@code int} or {@code void}. With an {@code int} return type, zero is returned when
          * successful, or non-zero in case of an error.
          *
-         * @since 1.0
+         * @since 19.0
          */
         DETACH_THREAD,
 
@@ -202,7 +282,7 @@ public @interface CEntryPoint {
          * {@code int} return type, zero is returned when successful, or non-zero in case of an
          * error.
          *
-         * @since 1.0
+         * @since 19.0
          */
         TEAR_DOWN_ISOLATE,
     }
@@ -211,7 +291,7 @@ public @interface CEntryPoint {
      * Designates an {@link IsolateThread} parameter to use as the execution context. At most one
      * parameter can be annotated with this annotation or {@link IsolateContext}.
      *
-     * @since 1.0
+     * @since 19.0
      */
     @Retention(RetentionPolicy.RUNTIME)
     @Target(ElementType.PARAMETER)
@@ -222,10 +302,18 @@ public @interface CEntryPoint {
      * Designates an {@link Isolate} parameter to use as the execution context. At most one
      * parameter can be annotated with this annotation or {@link IsolateThreadContext}.
      *
-     * @since 1.0
+     * @since 19.0
      */
     @Retention(RetentionPolicy.RUNTIME)
     @Target(ElementType.PARAMETER)
     @interface IsolateContext {
+    }
+
+    /**
+     * Marker interface for all {@link CEntryPoint#exceptionHandler() exception handler} classes.
+     *
+     * @since 22.0
+     */
+    interface ExceptionHandler {
     }
 }

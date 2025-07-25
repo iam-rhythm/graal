@@ -28,14 +28,12 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
+
+import org.graalvm.shadowed.org.json.JSONObject;
 import org.junit.After;
 import org.junit.Test;
 
-import com.oracle.truffle.tools.utils.json.JSONObject;
-
 import org.graalvm.polyglot.Source;
-
-import com.oracle.truffle.tools.chromeinspector.ScriptsHandler;
 
 public class SLInspectProfileTest {
 
@@ -90,6 +88,9 @@ public class SLInspectProfileTest {
         tester.sendMessage("{\"id\":4,\"method\":\"Profiler.start\"}");
         assertEquals("{\"result\":{},\"id\":4}", tester.getMessages(true).trim());
         assertTrue(tester.shouldWaitForClose());
+        tester.sendMessage("{\"id\":10,\"method\":\"Runtime.runIfWaitingForDebugger\"}");
+        assertTrue(tester.compareReceivedMessages("{\"result\":{},\"id\":10}\n" +
+                        "{\"method\":\"Runtime.executionContextCreated\",\"params\":{\"context\":{\"origin\":\"\",\"name\":\"test\",\"id\":1}}}\n"));
         tester.eval(source).get();
         tester.sendMessage("{\"id\":5,\"method\":\"Profiler.stop\"}");
         JSONObject json = new JSONObject(tester.getMessages(true).trim());
@@ -109,7 +110,7 @@ public class SLInspectProfileTest {
     public void testCodeCoverage() throws Exception {
         tester = InspectorTester.start(false);
         Source source = Source.newBuilder("sl", CODE2, "SLTest.sl").build();
-        String slTestURI = ScriptsHandler.getNiceStringFromURI(source.getURI());
+        String slTestURI = InspectorTester.getStringURI(source.getURI());
         tester.sendMessage("{\"id\":1,\"method\":\"Runtime.enable\"}");
         assertEquals("{\"result\":{},\"id\":1}", tester.getMessages(true).trim());
         tester.sendMessage("{\"id\":2,\"method\":\"Profiler.enable\"}");
@@ -120,6 +121,9 @@ public class SLInspectProfileTest {
         assertTrue(tester.shouldWaitForClose());
         tester.sendMessage("{\"id\":4,\"method\":\"Profiler.takePreciseCoverage\"}");
         assertEquals("{\"result\":{\"result\":[]},\"id\":4}", tester.getMessages(true).trim());
+        tester.sendMessage("{\"id\":10,\"method\":\"Runtime.runIfWaitingForDebugger\"}");
+        assertTrue(tester.compareReceivedMessages("{\"result\":{},\"id\":10}\n" +
+                        "{\"method\":\"Runtime.executionContextCreated\",\"params\":{\"context\":{\"origin\":\"\",\"name\":\"test\",\"id\":1}}}\n"));
         tester.eval(source).get();
         tester.sendMessage("{\"id\":5,\"method\":\"Profiler.takePreciseCoverage\"}");
         assertEquals("{\"result\":{\"result\":[{\"scriptId\":\"1\",\"functions\":["
@@ -140,7 +144,7 @@ public class SLInspectProfileTest {
     public void testDetailedCodeCoverage() throws Exception {
         tester = InspectorTester.start(false);
         Source source = Source.newBuilder("sl", CODE2, "SLTest.sl").build();
-        String slTestURI = ScriptsHandler.getNiceStringFromURI(source.getURI());
+        String slTestURI = InspectorTester.getStringURI(source.getURI());
         tester.sendMessage("{\"id\":1,\"method\":\"Runtime.enable\"}");
         assertEquals("{\"result\":{},\"id\":1}", tester.getMessages(true).trim());
         tester.sendMessage("{\"id\":2,\"method\":\"Profiler.enable\"}");
@@ -151,11 +155,17 @@ public class SLInspectProfileTest {
         assertTrue(tester.shouldWaitForClose());
         tester.sendMessage("{\"id\":4,\"method\":\"Profiler.takePreciseCoverage\"}");
         assertEquals("{\"result\":{\"result\":[]},\"id\":4}", tester.getMessages(true).trim());
+        tester.sendMessage("{\"id\":10,\"method\":\"Runtime.runIfWaitingForDebugger\"}");
+        assertTrue(tester.compareReceivedMessages("{\"result\":{},\"id\":10}\n" +
+                        "{\"method\":\"Runtime.executionContextCreated\",\"params\":{\"context\":{\"origin\":\"\",\"name\":\"test\",\"id\":1}}}\n"));
         tester.eval(source).get();
         tester.sendMessage("{\"id\":5,\"method\":\"Profiler.takePreciseCoverage\"}");
         assertEquals("{\"result\":{\"result\":[{\"scriptId\":\"1\",\"functions\":["
                 + "{\"ranges\":[{\"endOffset\":34,\"startOffset\":22,\"count\":2}],\"functionName\":\"add\",\"isBlockCoverage\":true},"
-                + "{\"ranges\":[{\"endOffset\":66,\"startOffset\":57,\"count\":1},{\"endOffset\":90,\"startOffset\":69,\"count\":1}],\"functionName\":\"main\",\"isBlockCoverage\":true}],"
+                + "{\"ranges\":["
+                + "{\"endOffset\":66,\"startOffset\":57,\"count\":1},"
+                + "{\"endOffset\":90,\"startOffset\":69,\"count\":1}],"
+                + "\"functionName\":\"main\",\"isBlockCoverage\":true}],"
                 + "\"url\":\"" + slTestURI + "\"}]},\"id\":5}", tester.getMessages(true).trim());
         tester.sendMessage("{\"id\":6,\"method\":\"Profiler.takePreciseCoverage\"}");
         assertEquals("{\"result\":{\"result\":[]},\"id\":6}", tester.getMessages(true).trim());
@@ -171,7 +181,7 @@ public class SLInspectProfileTest {
     public void testTypeProfile() throws Exception {
         tester = InspectorTester.start(false);
         Source source = Source.newBuilder("sl", CODE2, "SLTest.sl").build();
-        String slTestURI = ScriptsHandler.getNiceStringFromURI(source.getURI());
+        String slTestURI = InspectorTester.getStringURI(source.getURI());
         tester.sendMessage("{\"id\":1,\"method\":\"Runtime.enable\"}");
         assertEquals("{\"result\":{},\"id\":1}", tester.getMessages(true).trim());
         tester.sendMessage("{\"id\":2,\"method\":\"Profiler.enable\"}");
@@ -182,13 +192,16 @@ public class SLInspectProfileTest {
         assertTrue(tester.shouldWaitForClose());
         tester.sendMessage("{\"id\":4,\"method\":\"Profiler.takeTypeProfile\"}");
         assertEquals("{\"result\":{\"result\":[]},\"id\":4}", tester.getMessages(true).trim());
+        tester.sendMessage("{\"id\":10,\"method\":\"Runtime.runIfWaitingForDebugger\"}");
+        assertTrue(tester.compareReceivedMessages("{\"result\":{},\"id\":10}\n" +
+                        "{\"method\":\"Runtime.executionContextCreated\",\"params\":{\"context\":{\"origin\":\"\",\"name\":\"test\",\"id\":1}}}\n"));
         tester.eval(source).get();
         tester.sendMessage("{\"id\":5,\"method\":\"Profiler.takeTypeProfile\"}");
         assertEquals("{\"result\":{\"result\":[{\"scriptId\":\"1\",\"entries\":["
                 + "{\"types\":[{\"name\":\"Number\"}],\"offset\":14},"
                 + "{\"types\":[{\"name\":\"Number\"},{\"name\":\"String\"}],\"offset\":17},"
                 + "{\"types\":[{\"name\":\"Number\"},{\"name\":\"String\"}],\"offset\":37},"
-                + "{\"types\":[{\"name\":\"Null\"}],\"offset\":93}],"
+                + "{\"types\":[{\"name\":\"NULL\"}],\"offset\":93}],"
                 + "\"url\":\"" + slTestURI + "\"}]},\"id\":5}", tester.getMessages(true).trim());
         tester.sendMessage("{\"id\":6,\"method\":\"Profiler.takeTypeProfile\"}");
         assertEquals("{\"result\":{\"result\":[]},\"id\":6}", tester.getMessages(true).trim());

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -50,7 +50,7 @@ import org.graalvm.word.WordBase;
  * A untyped C pointer to any machine-word-sized value, e.g., a pointer to another pointer or a
  * pointer to a {@link UnsignedWord} or {@link SignedWord} value.
  *
- * @since 1.0
+ * @since 19.0
  */
 @CPointerTo(nameOfCType = "void*")
 public interface WordPointer extends PointerBase {
@@ -58,7 +58,7 @@ public interface WordPointer extends PointerBase {
     /**
      * Reads the value at the pointer address.
      *
-     * @since 1.0
+     * @since 19.0
      */
     <T extends WordBase> T read();
 
@@ -66,7 +66,7 @@ public interface WordPointer extends PointerBase {
      * Reads the value of the array element with the specified index, treating the pointer as an
      * array of the C type.
      *
-     * @since 1.0
+     * @since 19.0
      */
     <T extends WordBase> T read(int index);
 
@@ -74,14 +74,14 @@ public interface WordPointer extends PointerBase {
      * Reads the value of the array element with the specified index, treating the pointer as an
      * array of the C type.
      *
-     * @since 1.0
+     * @since 19.0
      */
     <T extends WordBase> T read(SignedWord index);
 
     /**
      * Writes the value at the pointer address.
      *
-     * @since 1.0
+     * @since 19.0
      */
     void write(WordBase value);
 
@@ -89,7 +89,7 @@ public interface WordPointer extends PointerBase {
      * Writes the value of the array element with the specified index, treating the pointer as an
      * array of the C type.
      *
-     * @since 1.0
+     * @since 19.0
      */
     void write(int index, WordBase value);
 
@@ -97,7 +97,7 @@ public interface WordPointer extends PointerBase {
      * Writes the value of the array element with the specified index, treating the pointer as an
      * array of the C type.
      *
-     * @since 1.0
+     * @since 19.0
      */
     void write(SignedWord index, WordBase value);
 
@@ -105,7 +105,7 @@ public interface WordPointer extends PointerBase {
      * Computes the address of the array element with the specified index, treating the pointer as
      * an array of the C type.
      *
-     * @since 1.0
+     * @since 19.0
      */
     WordPointer addressOf(int index);
 
@@ -113,7 +113,7 @@ public interface WordPointer extends PointerBase {
      * Computes the address of the array element with the specified index, treating the pointer as
      * an array of the C type.
      *
-     * @since 1.0
+     * @since 19.0
      */
     WordPointer addressOf(SignedWord index);
 }

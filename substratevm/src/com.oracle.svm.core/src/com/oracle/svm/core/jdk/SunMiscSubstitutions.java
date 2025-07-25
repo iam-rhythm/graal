@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2025, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,156 +24,71 @@
  */
 package com.oracle.svm.core.jdk;
 
-// Checkstyle: allow reflection
+import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.security.ProtectionDomain;
 
-import java.lang.ref.ReferenceQueue;
-import java.util.function.Function;
+import org.graalvm.nativeimage.ImageSingletons;
+import org.graalvm.nativeimage.impl.UnsafeMemorySupport;
 
-import org.graalvm.compiler.nodes.extended.MembarNode;
-import org.graalvm.compiler.serviceprovider.JavaVersionUtil;
-import org.graalvm.compiler.word.Word;
-import org.graalvm.nativeimage.Platform;
-import org.graalvm.nativeimage.Platforms;
-import org.graalvm.nativeimage.UnmanagedMemory;
-import org.graalvm.word.Pointer;
-import org.graalvm.word.WordFactory;
-
-import com.oracle.svm.core.MemoryUtil;
+import com.oracle.svm.core.Uninterruptible;
 import com.oracle.svm.core.annotate.Alias;
 import com.oracle.svm.core.annotate.Delete;
 import com.oracle.svm.core.annotate.RecomputeFieldValue;
 import com.oracle.svm.core.annotate.Substitute;
 import com.oracle.svm.core.annotate.TargetClass;
 import com.oracle.svm.core.annotate.TargetElement;
-import com.oracle.svm.core.annotate.Uninterruptible;
+import com.oracle.svm.core.config.ConfigurationValues;
+import com.oracle.svm.core.heap.ReferenceAccess;
 import com.oracle.svm.core.hub.DynamicHub;
 import com.oracle.svm.core.hub.LayoutEncoding;
-import com.oracle.svm.core.log.Log;
+import com.oracle.svm.core.hub.RuntimeClassLoading;
+import com.oracle.svm.core.memory.NativeMemory;
+import com.oracle.svm.core.nmt.NmtCategory;
 import com.oracle.svm.core.os.VirtualMemoryProvider;
-import com.oracle.svm.core.snippets.KnownIntrinsics;
+import com.oracle.svm.core.util.BasedOnJDKFile;
 
-import jdk.vm.ci.code.MemoryBarriers;
-import sun.misc.Unsafe;
+import jdk.graal.compiler.nodes.extended.MembarNode;
+import jdk.graal.compiler.word.Word;
 
-@TargetClass(classNameProvider = Package_jdk_internal_misc.class, className = "Unsafe")
-@SuppressWarnings({"static-method"})
-final class Target_Unsafe_Core {
+@TargetClass(className = "jdk.internal.misc.Unsafe")
+@SuppressWarnings({"static-method", "unused"})
+final class Target_jdk_internal_misc_Unsafe_Core {
 
-    @TargetElement(onlyWith = JDK8OrEarlier.class)
-    @Substitute
-    private long allocateMemory(long bytes) {
-        if (bytes < 0L || (Unsafe.ADDRESS_SIZE == 4 && bytes > Integer.MAX_VALUE)) {
-            throw new IllegalArgumentException();
-        }
-        Pointer result = UnmanagedMemory.malloc(WordFactory.unsigned(bytes));
-        if (result.equal(0)) {
-            throw new OutOfMemoryError();
-        }
-        return result.rawValue();
-    }
-
-    @TargetElement(onlyWith = JDK9OrLater.class)
     @Substitute
     private long allocateMemory0(long bytes) {
-        return UnmanagedMemory.malloc(WordFactory.unsigned(bytes)).rawValue();
+        return NativeMemory.malloc(Word.unsigned(bytes), NmtCategory.Unsafe).rawValue();
     }
 
-    @TargetElement(onlyWith = JDK8OrEarlier.class)
-    @Substitute
-    private long reallocateMemory(long address, long bytes) {
-        if (bytes == 0) {
-            return 0L;
-        } else if (bytes < 0L || (Unsafe.ADDRESS_SIZE == 4 && bytes > Integer.MAX_VALUE)) {
-            throw new IllegalArgumentException();
-        }
-        Pointer result;
-        if (address != 0L) {
-            result = UnmanagedMemory.realloc(WordFactory.unsigned(address), WordFactory.unsigned(bytes));
-        } else {
-            result = UnmanagedMemory.malloc(WordFactory.unsigned(bytes));
-        }
-        if (result.equal(0)) {
-            throw new OutOfMemoryError();
-        }
-        return result.rawValue();
-    }
-
-    @TargetElement(onlyWith = JDK9OrLater.class)
     @Substitute
     private long reallocateMemory0(long address, long bytes) {
-        return UnmanagedMemory.realloc(WordFactory.unsigned(address), WordFactory.unsigned(bytes)).rawValue();
+        return NativeMemory.realloc(Word.unsigned(address), Word.unsigned(bytes), NmtCategory.Unsafe).rawValue();
     }
 
-    @TargetElement(onlyWith = JDK8OrEarlier.class)
-    @Substitute
-    private void freeMemory(long address) {
-        if (address != 0L) {
-            UnmanagedMemory.free(WordFactory.unsigned(address));
-        }
-    }
-
-    @TargetElement(onlyWith = JDK9OrLater.class)
     @Substitute
     private void freeMemory0(long address) {
-        UnmanagedMemory.free(WordFactory.unsigned(address));
+        NativeMemory.free(Word.unsigned(address));
     }
 
-    @TargetElement(onlyWith = JDK8OrEarlier.class)
     @Substitute
-    @Uninterruptible(reason = "Converts Object to Pointer.")
-    private void copyMemory(Object srcBase, long srcOffset, Object destBase, long destOffset, long bytes) {
-        MemoryUtil.copyConjointMemoryAtomic(
-                        Word.objectToUntrackedPointer(srcBase).add(WordFactory.unsigned(srcOffset)),
-                        Word.objectToUntrackedPointer(destBase).add(WordFactory.unsigned(destOffset)),
-                        WordFactory.unsigned(bytes));
-    }
-
-    @TargetElement(onlyWith = JDK9OrLater.class)
-    @Substitute
-    @Uninterruptible(reason = "Converts Object to Pointer.")
     private void copyMemory0(Object srcBase, long srcOffset, Object destBase, long destOffset, long bytes) {
-        MemoryUtil.copyConjointMemoryAtomic(
-                        Word.objectToUntrackedPointer(srcBase).add(WordFactory.unsigned(srcOffset)),
-                        Word.objectToUntrackedPointer(destBase).add(WordFactory.unsigned(destOffset)),
-                        WordFactory.unsigned(bytes));
+        UnsafeMemorySupport.get().unsafeCopyMemory(srcBase, srcOffset, destBase, destOffset, bytes);
     }
 
-    @TargetElement(onlyWith = JDK9OrLater.class)
     @Substitute
-    @Uninterruptible(reason = "Converts Object to Pointer.")
     private void copySwapMemory0(Object srcBase, long srcOffset, Object destBase, long destOffset, long bytes, long elemSize) {
-        MemoryUtil.copyConjointSwap(
-                        Word.objectToUntrackedPointer(srcBase).add(WordFactory.unsigned(srcOffset)),
-                        Word.objectToUntrackedPointer(destBase).add(WordFactory.unsigned(destOffset)),
-                        WordFactory.unsigned(bytes), WordFactory.unsigned(elemSize));
+        UnsafeMemorySupport.get().unsafeCopySwapMemory(srcBase, srcOffset, destBase, destOffset, bytes, elemSize);
     }
 
-    @TargetElement(onlyWith = JDK8OrEarlier.class)
     @Substitute
-    @Uninterruptible(reason = "Converts Object to Pointer.")
-    private void setMemory(Object destBase, long destOffset, long bytes, byte bvalue) {
-        MemoryUtil.fillToMemoryAtomic(
-                        Word.objectToUntrackedPointer(destBase).add(WordFactory.unsigned(destOffset)),
-                        WordFactory.unsigned(bytes), bvalue);
-    }
-
-    @TargetElement(onlyWith = JDK9OrLater.class)
-    @Substitute
-    @Uninterruptible(reason = "Converts Object to Pointer.")
     private void setMemory0(Object destBase, long destOffset, long bytes, byte bvalue) {
-        MemoryUtil.fillToMemoryAtomic(
-                        Word.objectToUntrackedPointer(destBase).add(WordFactory.unsigned(destOffset)),
-                        WordFactory.unsigned(bytes), bvalue);
+        UnsafeMemorySupport.get().unsafeSetMemory(destBase, destOffset, bytes, bvalue);
     }
 
-    @TargetElement(onlyWith = JDK8OrEarlier.class)
     @Substitute
     private int addressSize() {
-        /*
-         * No substitution necessary for JDK 9 or later because there the method is already
-         * implemented exactly like this.
-         */
-        return Unsafe.ADDRESS_SIZE;
+        return ConfigurationValues.getTarget().wordSize;
     }
 
     @Substitute
@@ -183,8 +98,9 @@ final class Target_Unsafe_Core {
     }
 
     @Substitute
-    public int arrayBaseOffset(Class<?> clazz) {
-        return (int) LayoutEncoding.getArrayBaseOffset(DynamicHub.fromClass(clazz).getLayoutEncoding()).rawValue();
+    @TargetElement(name = "arrayBaseOffset")
+    public long arrayBaseOffset(Class<?> clazz) {
+        return LayoutEncoding.getArrayBaseOffset(DynamicHub.fromClass(clazz).getLayoutEncoding()).rawValue();
     }
 
     @Substitute
@@ -193,27 +109,23 @@ final class Target_Unsafe_Core {
     }
 
     @Substitute
-    private void throwException(Throwable t) {
-        /* Make the Java compiler happy by pretending we are throwing a non-checked exception. */
-        throw KnownIntrinsics.unsafeCast(t, RuntimeException.class);
+    private void throwException(Throwable t) throws Throwable {
+        throw t;
     }
 
     @Substitute
     public void loadFence() {
-        final int fence = MemoryBarriers.LOAD_LOAD | MemoryBarriers.LOAD_STORE;
-        MembarNode.memoryBarrier(fence);
+        MembarNode.memoryBarrier(MembarNode.FenceKind.LOAD_ACQUIRE);
     }
 
     @Substitute
     public void storeFence() {
-        final int fence = MemoryBarriers.STORE_LOAD | MemoryBarriers.STORE_STORE;
-        MembarNode.memoryBarrier(fence);
+        MembarNode.memoryBarrier(MembarNode.FenceKind.STORE_RELEASE);
     }
 
     @Substitute
     public void fullFence() {
-        final int fence = MemoryBarriers.LOAD_LOAD | MemoryBarriers.LOAD_STORE | MemoryBarriers.STORE_LOAD | MemoryBarriers.STORE_STORE;
-        MembarNode.memoryBarrier(fence);
+        MembarNode.memoryBarrier(MembarNode.FenceKind.FULL);
     }
 
     @Substitute
@@ -225,154 +137,85 @@ final class Target_Unsafe_Core {
     public void ensureClassInitialized(Class<?> c) {
         DynamicHub.fromClass(c).ensureInitialized();
     }
-}
 
-@TargetClass(className = "sun.misc.MessageUtils", onlyWith = JDK8OrEarlier.class)
-final class Target_sun_misc_MessageUtils {
+    @Substitute
+    private int getLoadAverage0(double[] loadavg, int nelems) {
+        /* Adapted from `Unsafe_GetLoadAverage0` in `src/hotspot/share/prims/unsafe.cpp`. */
+        if (ImageSingletons.contains(LoadAverageSupport.class)) {
+            return ImageSingletons.lookup(LoadAverageSupport.class).getLoadAverage(loadavg, nelems);
+        }
+        return -1; /* The load average is unobtainable. */
+    }
+
+    @Substitute
+    public Object getUncompressedObject(long address) {
+        /* Adapted from `Unsafe_GetUncompressedObject` in `src/hotspot/share/prims/unsafe.cpp`. */
+        return ReferenceAccess.singleton().readObjectAt(Word.pointer(address), false);
+    }
 
     /*
-     * Low-level logging support in the JDK. Methods must not use char-to-byte conversions (because
-     * they are used to report errors in the converters). We just redirect to the low-level SVM log
-     * infrastructure.
+     * We are defensive and also handle private native methods by marking them as deleted. If they
+     * are reachable, the user is certainly doing something wrong. But we do not want to fail with a
+     * linking error.
      */
 
-    @Substitute
-    private static void toStderr(String msg) {
-        Log.log().string(msg);
-    }
+    @Delete
+    private static native void registerNatives();
+
+    @Delete
+    private native long objectFieldOffset0(Field f);
+
+    @Delete
+    private native long objectFieldOffset1(Class<?> c, String name);
+
+    @Delete
+    private native long staticFieldOffset0(Field f);
+
+    @Delete
+    private native Object staticFieldBase0(Field f);
+
+    @Delete
+    private native boolean shouldBeInitialized0(Class<?> c);
+
+    @Delete
+    private native void ensureClassInitialized0(Class<?> c);
+
+    @Delete
+    private native int arrayBaseOffset0(Class<?> arrayClass);
+
+    @Delete
+    private native int arrayIndexScale0(Class<?> arrayClass);
 
     @Substitute
-    private static void toStdout(String msg) {
-        Log.log().string(msg);
+    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25+16/src/hotspot/share/prims/unsafe.cpp#L708-L712")
+    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25+16/src/hotspot/share/prims/unsafe.cpp#L649-L705")
+    @SuppressWarnings("unused")
+    private Class<?> defineClass0(String name, byte[] b, int off, int len, ClassLoader loader, ProtectionDomain protectionDomain) {
+        // Note that if name is not null, it is a binary name in either / or .-form
+        return RuntimeClassLoading.defineClass(loader, name, b, off, len, new RuntimeClassLoading.ClassDefinitionInfo(protectionDomain));
     }
 }
 
-@Platforms(Platform.HOSTED_ONLY.class)
-class Package_jdk_internal_ref implements Function<TargetClass, String> {
-    @Override
-    public String apply(TargetClass annotation) {
-        if (JavaVersionUtil.Java8OrEarlier) {
-            return "sun.misc." + annotation.className();
-        } else {
-            return "jdk.internal.ref." + annotation.className();
-        }
-    }
-}
-
-@TargetClass(classNameProvider = Package_jdk_internal_ref.class, className = "Cleaner")
-final class Target_jdk_internal_ref_Cleaner {
-
-    @Alias @RecomputeFieldValue(kind = RecomputeFieldValue.Kind.Reset)//
-    static Target_jdk_internal_ref_Cleaner first;
-
+@TargetClass(jdk.internal.access.SharedSecrets.class)
+final class Target_jdk_internal_access_SharedSecrets {
     /**
-     * Contrary to the comment on {@code sun.misc.Cleaner}.dummyQueue, in SubstrateVM the queue can
-     * have Cleaner instances on it, because SubstrateVM does not have a ReferenceHandler thread to
-     * clean instances, so SubstrateVM puts them on the queue and drains the queue after collections
-     * in {@link SunMiscSupport#drainCleanerQueue()}.
-     * <p>
-     * Cleaner instances that do bad things are even worse in SubstrateVM than they are in the
-     * HotSpot VM, because they are run on the thread that started a collection.
-     * <p>
-     * Changing the access from `private` to `protected`, and reinitializing to an empty queue.
+     * The JavaIOAccess implementation installed by the class initializer of java.io.Console
+     * captures state like "is a tty". The only way to remove such state is by resetting the field.
      */
-    @Alias @RecomputeFieldValue(kind = RecomputeFieldValue.Kind.FromAlias)//
-    static ReferenceQueue<Object> dummyQueue = new ReferenceQueue<>();
-
-    @Alias
-    native void clean();
+    @Alias @RecomputeFieldValue(kind = RecomputeFieldValue.Kind.Reset) //
+    private static Target_jdk_internal_access_JavaIOAccess javaIOAccess;
 }
 
-@TargetClass(className = "jdk.internal.ref.CleanerImpl", onlyWith = JDK9OrLater.class)
-final class Target_jdk_internal_ref_CleanerImpl {
-
-    @Alias @RecomputeFieldValue(kind = RecomputeFieldValue.Kind.NewInstance, declClassName = "jdk.internal.ref.CleanerImpl$PhantomCleanableRef")//
-    Target_jdk_internal_ref_PhantomCleanable phantomCleanableList;
-
-    @Alias @RecomputeFieldValue(kind = RecomputeFieldValue.Kind.NewInstance, declClassName = "jdk.internal.ref.CleanerImpl$WeakCleanableRef")//
-    Target_jdk_internal_ref_WeakCleanable weakCleanableList;
-
-    @Alias @RecomputeFieldValue(kind = RecomputeFieldValue.Kind.NewInstance, declClassName = "jdk.internal.ref.CleanerImpl$SoftCleanableRef")//
-    Target_jdk_internal_ref_SoftCleanable softCleanableList;
-
-    @Alias @RecomputeFieldValue(kind = RecomputeFieldValue.Kind.NewInstance, declClassName = "java.lang.ref.ReferenceQueue")//
-    ReferenceQueue<Object> queue;
+@TargetClass(jdk.internal.access.JavaIOAccess.class)
+final class Target_jdk_internal_access_JavaIOAccess {
 }
 
-@TargetClass(className = "jdk.internal.ref.PhantomCleanable", onlyWith = JDK9OrLater.class)
-final class Target_jdk_internal_ref_PhantomCleanable {
-}
-
-@TargetClass(className = "jdk.internal.ref.WeakCleanable", onlyWith = JDK9OrLater.class)
-final class Target_jdk_internal_ref_WeakCleanable {
-}
-
-@TargetClass(className = "jdk.internal.ref.SoftCleanable", onlyWith = JDK9OrLater.class)
-final class Target_jdk_internal_ref_SoftCleanable {
-}
-
-@Platforms(Platform.HOSTED_ONLY.class)
-class Package_jdk_internal_perf implements Function<TargetClass, String> {
-    @Override
-    public String apply(TargetClass annotation) {
-        if (JavaVersionUtil.Java8OrEarlier) {
-            return "sun.misc." + annotation.className();
-        } else {
-            return "jdk.internal.perf." + annotation.className();
-        }
-    }
-}
-
-/** PerfCounter methods that access the lb field fail with SIGSEV. */
-@TargetClass(classNameProvider = Package_jdk_internal_perf.class, className = "PerfCounter")
-final class Target_jdk_internal_perf_PerfCounter {
-
+@TargetClass(className = "sun.reflect.misc.MethodUtil")
+final class Target_sun_reflect_misc_MethodUtil {
     @Substitute
-    @SuppressWarnings("static-method")
-    public long get() {
-        return 0;
+    private static Object invoke(Method m, Object obj, Object[] params) throws InvocationTargetException, IllegalAccessException {
+        return m.invoke(obj, params);
     }
-
-    @Substitute
-    public void set(@SuppressWarnings("unused") long var1) {
-    }
-
-    @Substitute
-    public void add(@SuppressWarnings("unused") long var1) {
-    }
-}
-
-@TargetClass(classNameProvider = Package_jdk_internal_misc.class, className = "SharedSecrets")
-final class Target_jdk_internal_misc_SharedSecrets {
-    @Substitute
-    private static Target_jdk_internal_misc_JavaAWTAccess getJavaAWTAccess() {
-        return null;
-    }
-}
-
-@TargetClass(classNameProvider = Package_jdk_internal_misc.class, className = "JavaAWTAccess")
-final class Target_jdk_internal_misc_JavaAWTAccess {
-}
-
-@TargetClass(classNameProvider = Package_jdk_internal_misc.class, className = "JavaLangAccess")
-final class Target_jdk_internal_misc_JavaLangAccess {
-}
-
-@Platforms(Platform.HOSTED_ONLY.class)
-class Package_jdk_internal_loader implements Function<TargetClass, String> {
-    @Override
-    public String apply(TargetClass annotation) {
-        if (JavaVersionUtil.Java8OrEarlier) {
-            return "sun.misc." + annotation.className();
-        } else {
-            return "jdk.internal.loader." + annotation.className();
-        }
-    }
-}
-
-@TargetClass(classNameProvider = Package_jdk_internal_loader.class, className = "URLClassPath", innerClass = "JarLoader")
-@Delete
-final class Target_sun_misc_URLClassPath_JarLoader {
 }
 
 /** Dummy class to have a class with the file's name. */

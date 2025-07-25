@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,27 +40,28 @@
  */
 package com.oracle.truffle.nfi.test;
 
-import com.oracle.truffle.api.CallTarget;
-import com.oracle.truffle.api.CompilerDirectives;
-import com.oracle.truffle.api.frame.VirtualFrame;
-import com.oracle.truffle.api.interop.ForeignAccess;
-import com.oracle.truffle.api.interop.InteropException;
-import com.oracle.truffle.api.interop.Message;
-import com.oracle.truffle.api.interop.TruffleObject;
-import com.oracle.truffle.api.nodes.Node;
-import com.oracle.truffle.nfi.test.interop.NativeVector;
-import com.oracle.truffle.tck.TruffleRunner;
-import com.oracle.truffle.tck.TruffleRunner.Inject;
-import java.util.ArrayList;
-import java.util.Collection;
 import static org.hamcrest.CoreMatchers.instanceOf;
 import static org.hamcrest.CoreMatchers.is;
+
+import java.util.ArrayList;
+import java.util.Collection;
+
+import org.hamcrest.MatcherAssert;
 import org.junit.Assert;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameter;
 import org.junit.runners.Parameterized.Parameters;
+
+import com.oracle.truffle.api.CallTarget;
+import com.oracle.truffle.api.CompilerDirectives;
+import com.oracle.truffle.api.frame.VirtualFrame;
+import com.oracle.truffle.api.interop.InteropException;
+import com.oracle.truffle.api.interop.InteropLibrary;
+import com.oracle.truffle.nfi.test.interop.NativeVector;
+import com.oracle.truffle.tck.TruffleRunner;
+import com.oracle.truffle.tck.TruffleRunner.Inject;
 
 @RunWith(Parameterized.class)
 @Parameterized.UseParametersRunnerFactory(TruffleRunner.ParametersFactory.class)
@@ -87,10 +88,10 @@ public class PointerNFITest extends NFITest {
     private NativeVector prepareVector() {
         NativeVector ret = new NativeVector(new double[initialLength]);
         if (mode == Mode.NATIVE) {
-            ret.transitionToNative();
+            ret.toNative();
         }
 
-        for (int i = 0; i < ret.size(); i++) {
+        for (int i = 0; i < ret.getArraySize(); i++) {
             ret.set(i, 42.0 * i + 17.0);
         }
 
@@ -99,8 +100,8 @@ public class PointerNFITest extends NFITest {
 
     private static double sum(NativeVector vector) {
         double ret = 0.0;
-        for (int i = 0; i < vector.size(); i++) {
-            ret += vector.get(i);
+        for (int i = 0; i < vector.getArraySize(); i++) {
+            ret += vector.readArrayElement(i);
         }
         return ret;
     }
@@ -117,9 +118,9 @@ public class PointerNFITest extends NFITest {
         try (NativeVector testVector = prepareVector()) {
             double sumBefore = sum(testVector);
 
-            Object ret = fold.call(testVector, testVector.size());
+            Object ret = fold.call(testVector, testVector.getArraySize());
 
-            Assert.assertThat("return type", ret, is(instanceOf(Double.class)));
+            MatcherAssert.assertThat("return type", ret, is(instanceOf(Double.class)));
             double retValue = (Double) ret;
 
             Assert.assertEquals("return value", sumBefore, retValue, Double.MIN_VALUE);
@@ -136,8 +137,8 @@ public class PointerNFITest extends NFITest {
 
     private void verifyInc(NativeVector testVector, double inc) {
         try (NativeVector orig = prepareVector()) {
-            for (int i = 0; i < testVector.size(); i++) {
-                Assert.assertEquals("index " + i, orig.get(i) + inc, testVector.get(i), Double.MIN_VALUE);
+            for (int i = 0; i < testVector.getArraySize(); i++) {
+                Assert.assertEquals("index " + i, orig.readArrayElement(i) + inc, testVector.readArrayElement(i), Double.MIN_VALUE);
             }
         }
     }
@@ -145,7 +146,7 @@ public class PointerNFITest extends NFITest {
     @Test
     public void testIncByNumber(@Inject(IncVector.class) CallTarget inc) {
         try (NativeVector testVector = prepareVector()) {
-            inc.call(testVector, testVector.size(), 5.5);
+            inc.call(testVector, testVector.getArraySize(), 5.5);
             verifyInc(testVector, 5.5);
         }
     }
@@ -155,7 +156,7 @@ public class PointerNFITest extends NFITest {
         try (NativeVector testVector = prepareVector();
                         NativeVector incVector = new NativeVector(new double[]{7.4})) {
 
-            inc.call(testVector, testVector.size(), incVector);
+            inc.call(testVector, testVector.getArraySize(), incVector);
 
             Assert.assertFalse("incVector shouldn't be transitioned to native", incVector.isPointer());
             verifyInc(testVector, 7.4);
@@ -166,9 +167,9 @@ public class PointerNFITest extends NFITest {
     public void testIncByNativeVector(@Inject(IncVector.class) CallTarget inc) {
         try (NativeVector testVector = prepareVector();
                         NativeVector incVector = new NativeVector(new double[]{3.8})) {
-            incVector.transitionToNative();
+            incVector.toNative();
 
-            inc.call(testVector, testVector.size(), incVector);
+            inc.call(testVector, testVector.getArraySize(), incVector);
 
             verifyInc(testVector, 3.8);
         }
@@ -176,37 +177,34 @@ public class PointerNFITest extends NFITest {
 
     public static class TestSlowPath extends NFITestRootNode {
 
-        @Child Node execute = Message.EXECUTE.createNode();
+        @Child InteropLibrary interop = getInterop();
 
-        @Child Node isPointer = Message.IS_POINTER.createNode();
-        @Child Node isBoxed = Message.IS_BOXED.createNode();
+        private final Object incrementByte = lookupAndBind("increment_SINT8", "(SINT8):SINT8");
+        private final Object incrementShort = lookupAndBind("increment_SINT16", "(SINT16):SINT16");
+        private final Object incrementInt = lookupAndBind("increment_SINT32", "(SINT32):SINT32");
+        private final Object incrementLong = lookupAndBind("increment_SINT64", "(SINT64):SINT64");
+        private final Object incrementFloat = lookupAndBind("increment_FLOAT", "(FLOAT):FLOAT");
+        private final Object incrementDouble = lookupAndBind("increment_DOUBLE", "(DOUBLE):DOUBLE");
 
-        private final TruffleObject incrementByte = lookupAndBind("increment_SINT8", "(SINT8):SINT8");
-        private final TruffleObject incrementShort = lookupAndBind("increment_SINT16", "(SINT16):SINT16");
-        private final TruffleObject incrementInt = lookupAndBind("increment_SINT32", "(SINT32):SINT32");
-        private final TruffleObject incrementLong = lookupAndBind("increment_SINT64", "(SINT64):SINT64");
-        private final TruffleObject incrementFloat = lookupAndBind("increment_FLOAT", "(FLOAT):FLOAT");
-        private final TruffleObject incrementDouble = lookupAndBind("increment_DOUBLE", "(DOUBLE):DOUBLE");
-
-        private final TruffleObject getFirstElement = lookupAndBind("getFirstElement", "(POINTER):DOUBLE");
+        private final Object getFirstElement = lookupAndBind("getFirstElement", "(POINTER):DOUBLE");
 
         @Override
         public Object executeTest(VirtualFrame frame) throws InteropException {
-            TruffleObject vector = (TruffleObject) frame.getArguments()[0];
-            boolean startedAsNative = ForeignAccess.sendIsPointer(isPointer, vector);
+            Object vector = frame.getArguments()[0];
+            boolean startedAsNative = interop.isPointer(vector);
 
             // pollute profile with different argument types to ensure we hit the slow path
-            ForeignAccess.sendExecute(execute, incrementByte, 0);
-            ForeignAccess.sendExecute(execute, incrementShort, 0);
-            ForeignAccess.sendExecute(execute, incrementInt, 0);
-            ForeignAccess.sendExecute(execute, incrementLong, 0);
-            ForeignAccess.sendExecute(execute, incrementFloat, 0);
-            ForeignAccess.sendExecute(execute, incrementDouble, 0);
+            interop.execute(incrementByte, 0);
+            interop.execute(incrementShort, 0);
+            interop.execute(incrementInt, 0);
+            interop.execute(incrementLong, 0);
+            interop.execute(incrementFloat, 0);
+            interop.execute(incrementDouble, 0);
 
             Object incremented = null;
-            if (ForeignAccess.sendIsBoxed(isBoxed, vector)) {
+            if (interop.isNumber(vector)) {
                 // test passing vector as primitive through slow-path
-                incremented = ForeignAccess.sendExecute(execute, incrementDouble, vector);
+                incremented = interop.execute(incrementDouble, vector);
                 if (incremented == null) {
                     CompilerDirectives.transferToInterpreter();
                     Assert.assertNotNull("incremented", incremented);
@@ -215,17 +213,17 @@ public class PointerNFITest extends NFITest {
 
             // up to this point, there is no reason to transform to native
             if (!startedAsNative) {
-                if (ForeignAccess.sendIsPointer(isPointer, vector)) {
+                if (interop.isPointer(vector)) {
                     CompilerDirectives.transferToInterpreter();
                     Assert.fail("unexpected TO_NATIVE");
                 }
             }
 
             // test passing vector as pointer through slow-path
-            double firstElement = (Double) ForeignAccess.sendExecute(execute, getFirstElement, vector);
+            double firstElement = interop.asDouble(interop.execute(getFirstElement, vector));
 
             if (incremented != null) {
-                double inc = (Double) incremented;
+                double inc = interop.asDouble(incremented);
                 if (inc != firstElement + 1.0) {
                     CompilerDirectives.transferToInterpreter();
                     Assert.assertEquals("incremented", firstElement + 1.0, inc, Double.MIN_VALUE);
@@ -241,10 +239,10 @@ public class PointerNFITest extends NFITest {
         try (NativeVector testVector = prepareVector()) {
             Object ret = test.call(testVector);
 
-            Assert.assertThat("return type", ret, is(instanceOf(Double.class)));
+            MatcherAssert.assertThat("return type", ret, is(instanceOf(Double.class)));
             double retValue = (Double) ret;
 
-            Assert.assertEquals("return value", testVector.get(0), retValue, Double.MIN_VALUE);
+            Assert.assertEquals("return value", testVector.readArrayElement(0), retValue, Double.MIN_VALUE);
         }
     }
 }

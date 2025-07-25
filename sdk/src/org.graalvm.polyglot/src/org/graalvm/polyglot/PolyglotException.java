@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2025, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,10 +40,14 @@
  */
 package org.graalvm.polyglot;
 
+import java.io.IOException;
+import java.io.NotSerializableException;
+import java.io.ObjectOutputStream;
 import java.io.PrintStream;
 import java.io.PrintWriter;
+import java.time.Duration;
 
-import org.graalvm.polyglot.impl.AbstractPolyglotImpl.AbstractExceptionImpl;
+import org.graalvm.polyglot.impl.AbstractPolyglotImpl.AbstractExceptionDispatch;
 import org.graalvm.polyglot.impl.AbstractPolyglotImpl.AbstractStackFrameImpl;
 
 /**
@@ -69,6 +73,8 @@ import org.graalvm.polyglot.impl.AbstractPolyglotImpl.AbstractStackFrameImpl;
  * error. For syntax errors a {@link #getSourceLocation() location} may be available.
  * <li>{@link #isIncompleteSource() Incomplete Source}: Is <code>true</code> if this returns a
  * {@link #isSyntaxError() syntax error} that indicates that the source is incomplete.
+ * <li>{@link #isResourceExhausted() Resource exhausted}: Is <code>true</code> if a resource limit
+ * e.g. the maximum memory was exhausted.
  * <li>{@link #isInternalError() Internal Error}: Is <code>true</code> if an internal implementation
  * error occurred in the polyglot runtime, the guest language or an instrument. It is not
  * recommended to show such errors to the user in production. Please consider filing issues for
@@ -77,58 +83,94 @@ import org.graalvm.polyglot.impl.AbstractPolyglotImpl.AbstractStackFrameImpl;
  *
  * @see Context
  * @see Value
- * @since 1.0
+ * @since 19.0
  */
 @SuppressWarnings("serial")
 public final class PolyglotException extends RuntimeException {
 
-    final AbstractExceptionImpl impl;
+    final AbstractExceptionDispatch dispatch;
+    final Object impl;
+    /**
+     * Holds a polyglot object that threw a {@code PolyglotException}, ensuring that the garbage
+     * collector does not collect the polyglot object while the {@code PolyglotException} is still
+     * reachable.
+     * <ul>
+     * <li>If the exception is thrown by a {@link Context}, this field holds the creator
+     * {@link Context}.</li>
+     * <li>If the exception is thrown by an {@link Engine}, this field holds the
+     * {@link Engine}.</li>
+     * <li>If the exception is thrown by a polyglot, this field is {@code null}.</li>
+     * </ul>
+     */
+    final Object anchor;
 
-    PolyglotException(String message, AbstractExceptionImpl impl) {
+    PolyglotException(String message, AbstractExceptionDispatch dispatch, Object receiver, Object anchor) {
         super(message);
-        this.impl = impl;
-        impl.onCreate(this);
+        this.dispatch = dispatch;
+        this.impl = receiver;
+        this.anchor = anchor;
+        dispatch.onCreate(receiver, this);
         // we need to materialize the stack if this exception is printed as cause of another error.
         // unfortunately we cannot detect this easily
         super.setStackTrace(getStackTrace());
     }
 
     /**
+     * Returns a short description of this exception. The result is the concatenation of:
+     * <ul>
+     * <li>the qualified name of the metaobject of the guest exception, if this object represents
+     * one, and it has a metaobject. Otherwise, the {@linkplain Class#getName() name} of the
+     * {@link PolyglotException} class.
+     * <li>": " (a colon and a space)
+     * <li>the result of invoking this object's {@link #getMessage} method
+     * </ul>
+     * If {@code getMessage} returns {@code null}, then just the class name is returned.
+     *
+     * @return a string representation of this exception.
+     *
+     * @since 25.0
+     */
+    @Override
+    public String toString() {
+        return dispatch.toString(impl);
+    }
+
+    /**
      * Prints host and guest language stack frames to the standard {@link System#err error output}.
      *
-     * @since 1.0
+     * @since 19.0
      */
     @Override
     public void printStackTrace() {
-        impl.printStackTrace(System.err);
+        dispatch.printStackTrace(impl, System.err);
     }
 
     /**
      * Prints host and guest language stack frames to specified print stream.
      *
-     * @since 1.0
+     * @since 19.0
      */
 
     @Override
     public void printStackTrace(PrintStream s) {
-        impl.printStackTrace(s);
+        dispatch.printStackTrace(impl, s);
     }
 
     /**
      * Prints host and guest language stack frames to specified print writer.
      *
-     * @since 1.0
+     * @since 19.0
      */
     @Override
     public void printStackTrace(PrintWriter s) {
-        impl.printStackTrace(s);
+        dispatch.printStackTrace(impl, s);
     }
 
     /**
      * Unsupported, {@link PolyglotException} instances are not writable therefore filling the stack
      * trace has no effect for them.
      *
-     * @since 1.0
+     * @since 19.0
      */
     @SuppressWarnings("sync-override")
     @Override
@@ -141,39 +183,39 @@ public final class PolyglotException extends RuntimeException {
      * recommended to use {@link #getPolyglotStackTrace()} as the guest language stack elements do
      * not always fit the Java format for stack trace elements.
      *
-     * @since 1.0
+     * @since 19.0
      */
     @Override
     public StackTraceElement[] getStackTrace() {
-        return impl.getStackTrace();
+        return dispatch.getStackTrace(impl);
     }
 
     /**
      * Gets a user readable message for the polyglot exception. In case the exception is
      * {@link #isInternalError() internal} then the original java class name is included in the
-     * message. The message never returns <code>null</code>.
+     * message. The message may return <code>null</code> if no message is available.
      *
-     * @since 1.0
+     * @since 19.0
      */
     @Override
     public String getMessage() {
-        return impl.getMessage();
+        return dispatch.getMessage(impl);
     }
 
     /**
      * Gets a guest language source location of this error or <code>null</code> if no source
      * location is available for this exception.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public SourceSection getSourceLocation() {
-        return impl.getSourceLocation();
+        return (SourceSection) dispatch.getSourceLocation(impl);
     }
 
     /**
      * {@inheritDoc}
      *
-     * @since 1.0
+     * @since 19.0
      */
     @Override
     public boolean equals(Object obj) {
@@ -186,7 +228,7 @@ public final class PolyglotException extends RuntimeException {
     /**
      * {@inheritDoc}
      *
-     * @since 1.0
+     * @since 19.0
      */
     @Override
     public int hashCode() {
@@ -197,7 +239,7 @@ public final class PolyglotException extends RuntimeException {
      * Unsupported, {@link PolyglotException} instances are not writable therefore setting the stack
      * trace has no effect for them.
      *
-     * @since 1.0
+     * @since 19.0
      */
     @Override
     public void setStackTrace(StackTraceElement[] stackTrace) {
@@ -219,10 +261,11 @@ public final class PolyglotException extends RuntimeException {
      * the first method invocation in the sequence.
      *
      * @see StackFrame
-     * @since 1.0
+     * @since 19.0
      */
+    @SuppressWarnings("unchecked")
     public Iterable<StackFrame> getPolyglotStackTrace() {
-        return impl.getPolyglotStackTrace();
+        return (Iterable<StackFrame>) (Iterable<?>) dispatch.getPolyglotStackTrace(impl);
     }
 
     /**
@@ -230,10 +273,10 @@ public final class PolyglotException extends RuntimeException {
      * case the first {@link #getPolyglotStackTrace() stack frame} returns a
      * {@link StackFrame#isHostFrame() host frame} as zeroth element.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public boolean isHostException() {
-        return impl.isHostException();
+        return dispatch.isHostException(impl);
     }
 
     /**
@@ -241,10 +284,10 @@ public final class PolyglotException extends RuntimeException {
      * case the first {@link #getPolyglotStackTrace() stack frame} returns a
      * {@link StackFrame#isGuestFrame() guest frame} as zeroth element.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public boolean isGuestException() {
-        return !impl.isHostException();
+        return !dispatch.isHostException(impl);
     }
 
     /**
@@ -255,10 +298,10 @@ public final class PolyglotException extends RuntimeException {
      *
      * @throws UnsupportedOperationException if this exception is not a host exception. Call
      *             {@link #isHostException()} to ensure its originating from the host language.
-     * @since 1.0
+     * @since 19.0
      */
     public Throwable asHostException() {
-        return impl.asHostException();
+        return dispatch.asHostException(impl);
     }
 
     /**
@@ -267,43 +310,80 @@ public final class PolyglotException extends RuntimeException {
      * hard to understand for guest language programmers and might contain implementation specific
      * details that allows guest language implementers to debug the problem.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public boolean isInternalError() {
-        return impl.isInternalError();
+        return dispatch.isInternalError(impl);
+    }
+
+    /**
+     * Returns <code>true</code> if this exception indicates that a resource limit was exceeded,
+     * else <code>false</code>. Resource limit exceeded errors may be raised for the following
+     * reasons:
+     * <ul>
+     * <li>The host runtime run out of memory or stack space. For example if host runtime throws
+     * {@link OutOfMemoryError} or {@link StackOverflowError}, then they will be translated to a
+     * {@link PolyglotException} that return <code>true</code> for {@link #isResourceExhausted()}.
+     * <li>A configured {@link ResourceLimits resource limit} was exceeded.
+     * <li>A runtime specific per context resource limit was exceeded. Depending on the host runtime
+     * implementation additional options to restrict the resource usage of a context may be
+     * specified using options.
+     * </ul>
+     * <p>
+     * Resource limit exceptions may be originating from the {@link #isHostException() host} or
+     * {@link #isGuestException() guest}. Resource limit exceeded errors are never
+     * {@link #isInternalError() internal}, but may have caused the context to be
+     * {@link #isCancelled() cancelled} such that it is no longer usable.
+     *
+     * @since 20.2
+     */
+    public boolean isResourceExhausted() {
+        return dispatch.isResourceExhausted(impl);
     }
 
     /**
      * Returns <code>true</code> if the execution was cancelled. The execution can be cancelled by
-     * {@link Context#close(boolean) closing} a context or if an instrument such as a debugger
-     * decides to cancel the current execution. The context that caused a cancel event becomes
-     * unusable, i.e. closed.
+     * {@link Context#close(boolean) closing} a context, if an instrument such as a debugger decides
+     * to cancel the current execution or if a {@link ResourceLimits resource limit} was exceeded.
+     * The context that caused a cancel event becomes unusable, i.e. closed.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public boolean isCancelled() {
-        return impl.isCancelled();
+        return dispatch.isCancelled(impl);
+    }
+
+    /**
+     * Returns <code>true</code> if the current application thread was interrupted by an
+     * {@link InterruptedException}, or by calling {@link Context#interrupt(Duration)} from the
+     * host.
+     *
+     * @since 20.3
+     */
+    public boolean isInterrupted() {
+        return dispatch.isInterrupted(impl);
     }
 
     /**
      * Returns <code>true</code> if this exception is caused by an attempt of a guest language
-     * program to exit the application using a builtin command. The provided exit code can be
-     * accessed using {@link #getExitStatus()}.
+     * program to exit the application. The provided exit code can be accessed using
+     * {@link #getExitStatus()}. This can be the result of either the soft or the hard exit.
      *
-     * @since 1.0
+     * @since 19.0
+     * @see Context
      */
     public boolean isExit() {
-        return impl.isExit();
+        return dispatch.isExit(impl);
     }
 
     /**
      * Returns <code>true</code> if this exception indicates a parser or syntax error. In such a
      * case #get
      *
-     * @since 1.0
+     * @since 19.0
      */
     public boolean isSyntaxError() {
-        return impl.isSyntaxError();
+        return dispatch.isSyntaxError(impl);
     }
 
     /**
@@ -319,38 +399,45 @@ public final class PolyglotException extends RuntimeException {
      * A shell might react to this exception and prompt for additional source code, if this method
      * returns <code>true</code>.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public boolean isIncompleteSource() {
-        return impl.isIncompleteSource();
+        return dispatch.isIncompleteSource(impl);
     }
 
     /**
      * Returns an additional guest language object. Returns <code>null</code> if no exception object
      * is available.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public Value getGuestObject() {
-        return impl.getGuestObject();
+        return (Value) dispatch.getGuestObject(impl);
     }
 
     /**
      * Returns the exit status if this exception indicates that the application was {@link #isExit()
-     * exited}. The exit status is intended to be passed to {@link System#exit(int)}.
+     * exited}. The exit status is intended to be passed to {@link System#exit(int)}. In case of
+     * hard exit the application can be configured to call {@link System#exit(int)} directly using
+     * {@link Context.Builder#useSystemExit(boolean)}.
      *
-     * @see #isExit()
-     * @since 1.0
+     * @see Context
+     * @since 19.0
      */
     public int getExitStatus() {
-        return impl.getExitStatus();
+        return dispatch.getExitStatus(impl);
+    }
+
+    @SuppressWarnings({"static-method", "unused"})
+    private void writeObject(ObjectOutputStream outputStream) throws IOException {
+        throw new NotSerializableException(PolyglotException.class.getSimpleName() + " serialization is not supported.");
     }
 
     /**
      * Represents a polyglot stack frame originating from a guest language or the host language
      * Java.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public final class StackFrame {
 
@@ -365,7 +452,7 @@ public final class PolyglotException extends RuntimeException {
          * provide a {@link #getSourceLocation() source location}. Instead the Java stack frame can
          * be accessed using {@link #toHostFrame()}.
          *
-         * @since 1.0
+         * @since 19.0
          */
         public boolean isHostFrame() {
             return impl.isHostFrame();
@@ -374,7 +461,7 @@ public final class PolyglotException extends RuntimeException {
         /**
          * Returns true if the stack frame originates from the guest language.
          *
-         * @since 1.0
+         * @since 19.0
          */
         public boolean isGuestFrame() {
             return !impl.isHostFrame();
@@ -385,7 +472,7 @@ public final class PolyglotException extends RuntimeException {
          * This is supported for host stack frames as well as guest language stack frames. A
          * conversion to the host frame format can be useful for interoperability.
          *
-         * @since 1.0
+         * @since 19.0
          */
         public StackTraceElement toHostFrame() {
             return impl.toHostFrame();
@@ -395,10 +482,23 @@ public final class PolyglotException extends RuntimeException {
          * Returns the source location of the stack frame or <code>null</code> if no source location
          * is available. Host frames do never provide a source location.
          *
-         * @since 1.0
+         * @since 19.0
          */
         public SourceSection getSourceLocation() {
-            return impl.getSourceLocation();
+            return (SourceSection) impl.getSourceLocation();
+        }
+
+        /**
+         * Returns the bytecode index of this frame if available, or a negative number if no
+         * bytecode index is available. The bytecode index is an internal identifier of the current
+         * execution location. The bytecode index is typically only provided by languages that are
+         * internally implemented as bytecode interpreter. This information is exposed for debugging
+         * or testing purposes and should not be relied upon for anything else.
+         *
+         * @since 24.1
+         */
+        public int getBytecodeIndex() {
+            return impl.getBytecodeIndex();
         }
 
         /**
@@ -406,7 +506,7 @@ public final class PolyglotException extends RuntimeException {
          * name is returned. In guest languages it returns a useful identifier for code. For
          * example, in JavaScript this can be the function name.
          *
-         * @since 1.0
+         * @since 19.0
          */
         public String getRootName() {
             return impl.getRootName();
@@ -416,17 +516,17 @@ public final class PolyglotException extends RuntimeException {
          * Returns the language of this stack frame. In case of the host language a synthetic Java
          * language object is returned.
          *
-         * @since 1.0
+         * @since 19.0
          */
         public Language getLanguage() {
-            return impl.getLanguage();
+            return (Language) impl.getLanguage();
         }
 
         /**
          * Returns a string representation of this stack frame. The format is inspired by the Java
          * stack frame format.
          *
-         * @since 1.0
+         * @since 19.0
          */
         @Override
         public String toString() {

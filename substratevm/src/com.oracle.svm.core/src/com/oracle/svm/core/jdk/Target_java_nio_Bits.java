@@ -24,29 +24,56 @@
  */
 package com.oracle.svm.core.jdk;
 
-import org.graalvm.compiler.word.Word;
-import org.graalvm.word.WordFactory;
+import java.util.concurrent.atomic.AtomicLong;
 
-import com.oracle.svm.core.MemoryUtil;
-import com.oracle.svm.core.annotate.Substitute;
+import com.oracle.svm.core.annotate.Alias;
+import com.oracle.svm.core.annotate.InjectAccessors;
+import com.oracle.svm.core.annotate.RecomputeFieldValue;
+import com.oracle.svm.core.annotate.RecomputeFieldValue.Kind;
 import com.oracle.svm.core.annotate.TargetClass;
-import com.oracle.svm.core.annotate.TargetElement;
 
 @TargetClass(className = "java.nio.Bits")
 final class Target_java_nio_Bits {
 
-    /*
-     * The original native method implementation calls back into the Java HotSpot VM, via the
-     * function JVM_CopySwapMemory. So this substitution is necessary even when we use the JDK
-     * native code. Our implementation is also OS and architecture independent - so we can have this
-     * substitution without a @Platforms annotation.
-     */
-    @TargetElement(onlyWith = JDK8OrEarlier.class)
-    @Substitute
-    private static void copySwapMemory0(Object srcBase, long srcOffset, Object destBase, long destOffset, long bytes, long elemSize) {
-        MemoryUtil.copyConjointSwap(
-                        Word.objectToUntrackedPointer(srcBase).add(WordFactory.unsigned(srcOffset)),
-                        Word.objectToUntrackedPointer(destBase).add(WordFactory.unsigned(destOffset)),
-                        WordFactory.unsigned(bytes), WordFactory.unsigned(elemSize));
+    // Checkstyle: stop
+
+    @Alias @RecomputeFieldValue(kind = Kind.FromAlias) //
+    private static int PAGE_SIZE = -1;
+
+    @Alias @RecomputeFieldValue(kind = Kind.FromAlias) //
+    private static boolean MEMORY_LIMIT_SET = true;
+    @Alias @InjectAccessors(MaxMemoryAccessor.class) //
+    private static long MAX_MEMORY;
+
+    @Alias @RecomputeFieldValue(kind = Kind.FromAlias) //
+    private static AtomicLong RESERVED_MEMORY = new AtomicLong();
+    @Alias @RecomputeFieldValue(kind = Kind.FromAlias) //
+    private static AtomicLong TOTAL_CAPACITY = new AtomicLong();
+    @Alias @RecomputeFieldValue(kind = Kind.FromAlias) //
+    private static AtomicLong COUNT = new AtomicLong();
+
+    @Alias @RecomputeFieldValue(kind = Kind.Reset) //
+    private static int RESERVE_GC_EPOCH;
+    // Checkstyle: resume
+}
+
+/**
+ * {@code java.nio.Bits} caches the max. direct memory size in the field {@code MAX_MEMORY}. We
+ * disable this cache and always call {@link DirectMemoryAccessors#getDirectMemory()} instead, which
+ * uses our own caching logic. Otherwise, it could happen that {@code MAX_MEMORY} caches an outdated
+ * value (with the serial GC, the max. heap size can change at run-time).
+ */
+final class MaxMemoryAccessor {
+    // Checkstyle: stop
+
+    static long getMAX_MEMORY() {
+        return DirectMemoryAccessors.getDirectMemory();
     }
+
+    @SuppressWarnings("unused")
+    static void setMAX_MEMORY(long value) {
+        /* Nothing to do. */
+    }
+
+    // Checkstyle: resume
 }

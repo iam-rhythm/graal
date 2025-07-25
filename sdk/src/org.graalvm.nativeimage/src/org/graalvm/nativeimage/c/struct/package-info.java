@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,12 +40,12 @@
  */
 /*
  @ApiInfo(
- group="Graal SDK"
+ group="Native Image"
  )
  */
 /**
  * This package provides parts of the Java / C interface that are related to C structures.
  *
- * @since 1.0
+ * @since 19.0
  */
 package org.graalvm.nativeimage.c.struct;

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -49,6 +49,15 @@ final class InternedSources {
     private final ConcurrentHashMap<SourceImpl.Key, WeakSourceRef> table = new ConcurrentHashMap<>();
     private final ReferenceQueue<SourceImpl> deadReferences = new ReferenceQueue<>();
 
+    void add(SourceImpl source) {
+        if (!source.isCached()) {
+            return;
+        }
+
+        // we don't actually need to compute the intern checks
+        table.put(source.key, new WeakSourceRef(source, deadReferences));
+    }
+
     Source intern(SourceImpl.Key key) {
         cleanupStaleEntries();
 
@@ -86,6 +95,10 @@ final class InternedSources {
             }
         }
         return source;
+    }
+
+    void resetNativeImageState() {
+        table.clear();
     }
 
     private void cleanupStaleEntries() {

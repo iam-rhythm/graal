@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2014, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -49,8 +49,8 @@ import java.lang.annotation.Target;
  * Informational only. Used to annotate a method that implements features implemented by a macro in
  * C. There is no automatic way to translate a C macro to equivalent Java code. Therefore, the body
  * of the annotated method must be written manually, and updated manually when the C macro changes.
- * 
- * @since 1.0
+ *
+ * @since 19.0
  */
 @Retention(RetentionPolicy.SOURCE)
 @Target({ElementType.METHOD})
@@ -59,7 +59,7 @@ public @interface CMacroInfo {
     /**
      * Specifies the name of the C macro the annotated method corresponds to.
      *
-     * @since 1.0
+     * @since 19.0
      */
     String value() default "";
 }

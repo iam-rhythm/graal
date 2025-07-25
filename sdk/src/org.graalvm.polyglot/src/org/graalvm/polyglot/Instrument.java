@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2025, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -41,7 +41,9 @@
 package org.graalvm.polyglot;
 
 import org.graalvm.options.OptionDescriptors;
-import org.graalvm.polyglot.impl.AbstractPolyglotImpl.AbstractInstrumentImpl;
+import org.graalvm.polyglot.impl.AbstractPolyglotImpl.AbstractInstrumentDispatch;
+
+import java.util.Objects;
 
 /**
  * A handle for an <em>instrument</em> installed in an {@link Engine engine}. The instrument is
@@ -52,54 +54,73 @@ import org.graalvm.polyglot.impl.AbstractPolyglotImpl.AbstractInstrumentImpl;
  * thread.
  *
  * @see Engine#getInstruments()
- * @since 1.0
+ * @since 19.0
  */
 public final class Instrument {
 
-    final AbstractInstrumentImpl impl;
+    final AbstractInstrumentDispatch dispatch;
+    final Object receiver;
+    /**
+     * Strong reference to {@link Engine} to prevent it from being garbage collected and closed
+     * while {@link Instrument} is still reachable.
+     */
+    final Engine engine;
 
-    Instrument(AbstractInstrumentImpl impl) {
-        this.impl = impl;
+    Instrument(AbstractInstrumentDispatch dispatch, Object receiver, Engine engine) {
+        this.dispatch = dispatch;
+        this.receiver = receiver;
+        this.engine = Objects.requireNonNull(engine);
     }
 
     /**
      * Gets the ID clients can use to acquire this instrument.
      *
      * @return the unique ID for this instrument.
-     * @since 1.0
+     * @since 19.0
      */
     public String getId() {
-        return impl.getId();
+        return dispatch.getId(receiver);
     }
 
     /**
      * Gets a human-readable name for this instrument.
      *
      * @return the user-friendly name for this instrument.
-     * @since 1.0
+     * @since 19.0
      */
     public String getName() {
-        return impl.getName();
+        return dispatch.getName(receiver);
     }
 
     /**
      * Gets the options available for this instrument.
      *
      * @return the options as {@link OptionDescriptors}.
-     * @since 1.0
+     * @since 19.0
      */
     public OptionDescriptors getOptions() {
-        return impl.getOptions();
+        return dispatch.getOptions(receiver);
+    }
+
+    /**
+     * Returns the source options descriptors available for sources of this instrument.
+     *
+     * @see #getOptions()
+     * @see Source.Builder#option(String, String)
+     * @since 25.0
+     */
+    public OptionDescriptors getSourceOptions() {
+        return dispatch.getSourceOptions(receiver);
     }
 
     /**
      * Gets the version of this instrument.
      *
      * @return the version of this instrument.
-     * @since 1.0
+     * @since 19.0
      */
     public String getVersion() {
-        return impl.getVersion();
+        return dispatch.getVersion(receiver);
     }
 
     /**
@@ -110,10 +131,45 @@ public final class Instrument {
      * @param <T> the type of the internal service.
      * @param type class of the service that is being requested.
      * @return instance of requested type, <code>null</code> if no such service is available.
-     * @since 1.0
+     * @since 19.0
      */
     public <T> T lookup(Class<T> type) {
-        return impl.lookup(type);
+        return dispatch.lookup(receiver, type);
     }
 
+    /**
+     * Gets the website of this instrument.
+     *
+     * @return the website of this instrument.
+     * @since 22.1.0
+     */
+    public String getWebsite() {
+        return dispatch.getWebsite(receiver);
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * @since 24.2
+     */
+    @Override
+    public int hashCode() {
+        return this.dispatch.hashCode(this.receiver);
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * @since 24.2
+     */
+    @Override
+    public boolean equals(Object obj) {
+        Object otherImpl;
+        if (obj instanceof Instrument) {
+            otherImpl = ((Instrument) obj).receiver;
+        } else {
+            return false;
+        }
+        return dispatch.equals(receiver, otherImpl);
+    }
 }

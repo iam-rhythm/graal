@@ -31,13 +31,22 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.PrintStream;
+import java.io.UnsupportedEncodingException;
+import java.util.EnumSet;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicBoolean;
 
-import org.graalvm.nativeimage.Feature;
 import org.graalvm.nativeimage.ImageSingletons;
+import org.graalvm.nativeimage.Platform;
+import org.graalvm.nativeimage.Platforms;
+import org.graalvm.nativeimage.hosted.Feature;
 
-import com.oracle.svm.core.annotate.AutomaticFeature;
-import com.oracle.svm.core.annotate.RecomputeFieldValue;
+import com.oracle.svm.core.layeredimagesingleton.FeatureSingleton;
+import com.oracle.svm.core.layeredimagesingleton.InitialLayerOnlyImageSingleton;
+import com.oracle.svm.core.layeredimagesingleton.LayeredImageSingletonBuilderFlags;
+import com.oracle.svm.core.util.VMError;
+
+import jdk.graal.compiler.api.replacements.Fold;
 
 /**
  * This class provides replacement values for the {@link System#in}, {@link System#out}, and
@@ -49,50 +58,99 @@ import com.oracle.svm.core.annotate.RecomputeFieldValue;
  * This can be customized by calling {@link #setIn}, {@link #setOut}, and {@link #setErr} before the
  * static analysis starts, i.e., in a {@link Feature#beforeAnalysis} method.
  */
-public final class SystemInOutErrSupport {
-    private InputStream in = new BufferedInputStream(new FileInputStream(FileDescriptor.in));
-    private PrintStream out = new PrintStream(new BufferedOutputStream(new FileOutputStream(FileDescriptor.out), 128), true);
-    private PrintStream err = new PrintStream(new BufferedOutputStream(new FileOutputStream(FileDescriptor.err), 128), true);
+public final class SystemInOutErrSupport implements InitialLayerOnlyImageSingleton {
+    private final InputStream initialIn = new BufferedInputStream(new FileInputStream(FileDescriptor.in));
+    private InputStream in = initialIn;
+    private PrintStream out = newPrintStream(new FileOutputStream(FileDescriptor.out), System.getProperty("sun.stdout.encoding"));
+    private final PrintStream initialErr = newPrintStream(new FileOutputStream(FileDescriptor.err), System.getProperty("sun.stderr.encoding"));
+    private PrintStream err = initialErr;
 
-    public static void setIn(InputStream in) {
-        ImageSingletons.lookup(SystemInOutErrSupport.class).in = Objects.requireNonNull(in);
+    @Platforms(Platform.HOSTED_ONLY.class) //
+    final AtomicBoolean isSealed = new AtomicBoolean(false);
+
+    /* Create `PrintStream` in the same way as `System.newPrintStream`. */
+    private static PrintStream newPrintStream(FileOutputStream fos, String enc) {
+        if (enc != null) {
+            try {
+                return new PrintStream(new BufferedOutputStream(fos, 128), true, enc);
+            } catch (UnsupportedEncodingException ignored) {
+            }
+        }
+        return new PrintStream(new BufferedOutputStream(fos, 128), true);
     }
 
-    public static void setOut(PrintStream out) {
-        ImageSingletons.lookup(SystemInOutErrSupport.class).out = Objects.requireNonNull(out);
-    }
-
-    public static void setErr(PrintStream err) {
-        ImageSingletons.lookup(SystemInOutErrSupport.class).err = Objects.requireNonNull(err);
-    }
-
-    // Checkstyle: stop
-    Object replaceStreams(Object object) {
-        if (object == System.in) {
-            return in;
-        } else if (object == System.out) {
-            return out;
-        } else if (object == System.err) {
-            return err;
-        } else {
-            return object;
+    public void seal() {
+        if (!isSealed.getPlain()) {
+            isSealed.set(true);
         }
     }
-    // Checkstyle: resume
+
+    public void checkSealed() {
+        VMError.guarantee(!isSealed.get(), "SystemInOurErrorSupport is already sealed");
+    }
+
+    private static SystemInOutErrSupport singleton() {
+        return ImageSingletons.lookup(SystemInOutErrSupport.class);
+    }
+
+    @Fold
+    public InputStream in() {
+        seal();
+        return in;
+    }
+
+    @Platforms(Platform.HOSTED_ONLY.class)
+    public static void setIn(InputStream in) {
+        var support = singleton();
+        support.checkSealed();
+        support.in = Objects.requireNonNull(in);
+    }
+
+    @Fold
+    public PrintStream out() {
+        seal();
+        return out;
+    }
+
+    @Platforms(Platform.HOSTED_ONLY.class)
+    public static void setOut(PrintStream out) {
+        var support = singleton();
+        support.checkSealed();
+        support.out = Objects.requireNonNull(out);
+    }
+
+    @Fold
+    public PrintStream err() {
+        seal();
+        return err;
+    }
+
+    @Fold
+    public InputStream initialIn() {
+        seal();
+        return initialIn;
+    }
+
+    @Fold
+    public PrintStream initialErr() {
+        seal();
+        return initialErr;
+    }
+
+    @Platforms(Platform.HOSTED_ONLY.class)
+    public static void setErr(PrintStream err) {
+        var support = singleton();
+        support.checkSealed();
+        support.err = Objects.requireNonNull(err);
+    }
+
+    @Override
+    public EnumSet<LayeredImageSingletonBuilderFlags> getImageBuilderFlags() {
+        return LayeredImageSingletonBuilderFlags.ALL_ACCESS;
+    }
 }
 
-/**
- * We use an {@link Feature.DuringSetupAccess#registerObjectReplacer object replacer} because the
- * streams can be cached in other instance and static fields in addition to the fields in
- * {@link System}. We do not know all these places, so we do now know where to place
- * {@link RecomputeFieldValue} annotations.
- */
-@AutomaticFeature
-class SystemInOutErrFeature implements Feature {
-    @Override
-    public void duringSetup(DuringSetupAccess access) {
-        SystemInOutErrSupport support = new SystemInOutErrSupport();
-        ImageSingletons.add(SystemInOutErrSupport.class, support);
-        access.registerObjectReplacer(support::replaceStreams);
-    }
+@SuppressWarnings("unused")
+class SystemInOutErrFeature implements Feature, FeatureSingleton {
+    /* Dummy for backward compatibility. */
 }

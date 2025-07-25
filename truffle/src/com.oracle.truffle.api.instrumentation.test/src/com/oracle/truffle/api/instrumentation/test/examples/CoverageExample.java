@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2016, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -52,9 +52,9 @@ import com.oracle.truffle.api.instrumentation.ExecutionEventNode;
 import com.oracle.truffle.api.instrumentation.ExecutionEventNodeFactory;
 import com.oracle.truffle.api.instrumentation.Instrumenter;
 import com.oracle.truffle.api.instrumentation.SourceSectionFilter;
+import com.oracle.truffle.api.instrumentation.StandardTags.ExpressionTag;
 import com.oracle.truffle.api.instrumentation.TruffleInstrument;
 import com.oracle.truffle.api.instrumentation.TruffleInstrument.Registration;
-import static com.oracle.truffle.api.instrumentation.test.InstrumentationTestLanguage.EXPRESSION;
 import com.oracle.truffle.api.source.SourceSection;
 
 /**
@@ -65,7 +65,7 @@ import com.oracle.truffle.api.source.SourceSection;
  * Covered statements are printed to the instrument stream which should demonstrate an alternate way
  * of communication from the instrument to the user.
  */
-// BEGIN: com.oracle.truffle.api.instrumentation.test.examples.CoverageExample
+// @start region = "com.oracle.truffle.api.instrumentation.test.examples.CoverageExample"
 @Registration(id = CoverageExample.ID, services = Object.class)
 public final class CoverageExample extends TruffleInstrument {
 
@@ -76,17 +76,18 @@ public final class CoverageExample extends TruffleInstrument {
     @Override
     protected void onCreate(final Env env) {
         SourceSectionFilter.Builder builder = SourceSectionFilter.newBuilder();
-        SourceSectionFilter filter = builder.tagIs(EXPRESSION).build();
+        SourceSectionFilter filter = builder.tagIs(ExpressionTag.class).build();
         Instrumenter instrumenter = env.getInstrumenter();
         instrumenter.attachExecutionEventFactory(filter,
-                        new CoverageEventFactory(env));
+                        new CoverageExampleEventFactory(env));
     }
 
-    private class CoverageEventFactory implements ExecutionEventNodeFactory {
+    private class CoverageExampleEventFactory
+                    implements ExecutionEventNodeFactory {
 
         private final Env env;
 
-        CoverageEventFactory(final Env env) {
+        CoverageExampleEventFactory(final Env env) {
             this.env = env;
         }
 
@@ -110,4 +111,4 @@ public final class CoverageExample extends TruffleInstrument {
     }
 
 }
-// END: com.oracle.truffle.api.instrumentation.test.examples.CoverageExample
+// @end region = "com.oracle.truffle.api.instrumentation.test.examples.CoverageExample"

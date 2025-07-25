@@ -24,90 +24,36 @@
  */
 package com.oracle.svm.core.jdk;
 
-import org.graalvm.nativeimage.c.function.CodePointer;
-import org.graalvm.word.Pointer;
+import org.graalvm.nativeimage.Platforms;
+import org.graalvm.nativeimage.impl.InternalPlatform;
 
-import com.oracle.svm.core.annotate.NeverInline;
+import com.oracle.svm.core.NeverInline;
+import com.oracle.svm.core.annotate.Alias;
 import com.oracle.svm.core.annotate.Substitute;
 import com.oracle.svm.core.annotate.TargetClass;
-import com.oracle.svm.core.annotate.TargetElement;
-import com.oracle.svm.core.code.CodeInfoQueryResult;
-import com.oracle.svm.core.code.CodeInfoTable;
-import com.oracle.svm.core.code.FrameInfoQueryResult;
-import com.oracle.svm.core.deopt.DeoptimizedFrame;
+import com.oracle.svm.core.hub.DynamicHub;
 import com.oracle.svm.core.snippets.KnownIntrinsics;
-import com.oracle.svm.core.stack.JavaStackWalker;
-import com.oracle.svm.core.stack.StackFrameVisitor;
-import com.oracle.svm.core.util.VMError;
 
-@TargetClass(classNameProvider = Package_jdk_internal_reflect.class, className = "Reflection")
-public final class Target_jdk_internal_reflect_Reflection {
+@TargetClass(value = jdk.internal.reflect.Reflection.class)
+final class Target_jdk_internal_reflect_Reflection {
 
     @Substitute
     @NeverInline("Starting a stack walk in the caller frame")
-    public static Class<?> getCallerClass() {
-        GetCallerClassVisitor visitor = new GetCallerClassVisitor();
-        JavaStackWalker.walkCurrentThread(KnownIntrinsics.readCallerStackPointer(), KnownIntrinsics.readReturnAddress(), visitor);
-        return visitor.result;
+    @Platforms(InternalPlatform.NATIVE_ONLY.class)
+    private static Class<?> getCallerClass() {
+        return StackTraceUtils.getCallerClass(KnownIntrinsics.readCallerStackPointer(), true);
     }
 
     @Substitute
-    public static int getClassAccessFlags(Class<?> cls) {
-        return cls.getModifiers();
+    private static int getClassAccessFlags(DynamicHub cls) {
+        return cls.getClassAccessFlags();
     }
 
-    @Substitute //
-    @TargetElement(onlyWith = JDK9OrLater.class) //
-    @SuppressWarnings({"unused"})
-    public static /* native */ boolean areNestMates(Class<?> currentClass, Class<?> memberClass) {
-        throw VMError.unsupportedFeature("JDK9OrLater: Target_jdk_internal_reflect_Reflection.areNestMates");
-    }
-}
-
-class GetCallerClassVisitor implements StackFrameVisitor {
-    int depth;
-    Class<?> result;
-
-    @Override
-    public boolean visitFrame(Pointer sp, CodePointer ip, DeoptimizedFrame deoptimizedFrame) {
-        if (deoptimizedFrame != null) {
-            for (DeoptimizedFrame.VirtualFrame frame = deoptimizedFrame.getTopFrame(); frame != null; frame = frame.getCaller()) {
-                if (!visitJavaFrame(frame.getFrameInfo())) {
-                    return false;
-                }
-            }
-        } else {
-            CodeInfoQueryResult codeInfo = CodeInfoTable.lookupCodeInfoQueryResult(ip);
-            for (FrameInfoQueryResult frameInfo = codeInfo.getFrameInfo(); frameInfo != null; frameInfo = frameInfo.getCaller()) {
-                if (!visitJavaFrame(frameInfo)) {
-                    return false;
-                }
-            }
-        }
-        return true;
+    @Substitute
+    private static boolean areNestMates(Class<?> currentClass, Class<?> memberClass) {
+        return DynamicHub.fromClass(currentClass).isNestmateOf(memberClass);
     }
 
-    private boolean visitJavaFrame(FrameInfoQueryResult frameInfo) {
-        depth++;
-
-        if (depth == 1) {
-            /* The method that contains the invoke of getCallerClass(). */
-            return true;
-
-        } else if (frameInfo.getSourceClass() != null && frameInfo.getSourceClass().getAnnotation(IgnoreForGetCallerClass.class) != null) {
-            /*
-             * Ignore a frame from a class manually annotated as an invocation frame, e.g., for
-             * reflective method invocation or a lambda.
-             */
-            return true;
-        } else if ((frameInfo.getSourceClass() == java.lang.reflect.Method.class && "invoke".equals(frameInfo.getSourceMethodName())) ||
-                        (frameInfo.getSourceClass() == java.lang.reflect.Constructor.class && "newInstance".equals(frameInfo.getSourceMethodName())) ||
-                        (frameInfo.getSourceClass() == java.lang.Class.class && "newInstance".equals(frameInfo.getSourceMethodName()))) {
-            /* Ignore a reflective method / constructor invocation frame. */
-            return true;
-        }
-
-        result = frameInfo.getSourceClass();
-        return false;
-    }
+    @Alias
+    public static native void ensureNativeAccess(Class<?> currentClass, Class<?> owner, String methodName, boolean jni);
 }

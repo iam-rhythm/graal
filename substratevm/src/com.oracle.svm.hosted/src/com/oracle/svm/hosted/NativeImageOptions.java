@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2023, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,54 +24,89 @@
  */
 package com.oracle.svm.hosted;
 
-import static org.graalvm.compiler.options.OptionType.Debug;
-import static org.graalvm.compiler.options.OptionType.User;
+import static jdk.graal.compiler.options.OptionType.Debug;
+import static jdk.graal.compiler.options.OptionType.User;
 
-import java.util.Arrays;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.concurrent.ForkJoinPool;
 
 import org.graalvm.collections.EconomicMap;
-import org.graalvm.compiler.options.Option;
-import org.graalvm.compiler.options.OptionKey;
-import org.graalvm.compiler.options.OptionType;
-import org.graalvm.compiler.options.OptionValues;
 
-import com.oracle.graal.pointsto.api.PointstoOptions;
-import com.oracle.graal.pointsto.util.CompletionExecutor;
+import com.oracle.graal.pointsto.reports.ReportUtils;
+import com.oracle.svm.core.SubstrateOptions;
 import com.oracle.svm.core.option.APIOption;
+import com.oracle.svm.core.option.AccumulatingLocatableMultiOptionValue;
+import com.oracle.svm.core.option.BundleMember;
 import com.oracle.svm.core.option.HostedOptionKey;
+import com.oracle.svm.core.option.SubstrateOptionsParser;
+import com.oracle.svm.core.util.InterruptImageBuilding;
 import com.oracle.svm.core.util.UserError;
-import com.oracle.svm.hosted.image.AbstractBootImage;
+import com.oracle.svm.hosted.classinitialization.ClassInitializationOptions;
+import com.oracle.svm.hosted.util.CPUType;
+import com.oracle.svm.util.LogUtils;
+import com.oracle.svm.util.StringUtil;
+
+import jdk.graal.compiler.options.Option;
+import jdk.graal.compiler.options.OptionKey;
+import jdk.graal.compiler.options.OptionStability;
+import jdk.graal.compiler.options.OptionValues;
+import jdk.graal.compiler.serviceprovider.GraalServices;
 
 public class NativeImageOptions {
 
-    public static final int DEFAULT_MAX_ANALYSIS_SCALING = 16;
+    @Option(help = "Comma separated list of CPU features that will be enabled while building the " +
+                    "target executable, irrespective of whether they are supported by the hosted " +
+                    "environment. Note that enabling features not present within the target environment " +
+                    "may result in application crashes. The specific options available are target " +
+                    "platform dependent. See --list-cpu-features for feature list. These features " +
+                    "are in addition to -march.", type = User, stability = OptionStability.STABLE)//
+    public static final HostedOptionKey<AccumulatingLocatableMultiOptionValue.Strings> CPUFeatures = new HostedOptionKey<>(AccumulatingLocatableMultiOptionValue.Strings.buildWithCommaDelimiter());
 
-    @Option(help = "Class containing the default entry point method. Optional if --shared is used.", type = OptionType.User)//
-    public static final HostedOptionKey<String> Class = new HostedOptionKey<>("");
+    @APIOption(name = "list-cpu-features")//
+    @Option(help = "Show CPU features specific to the target platform and exit.", type = User)//
+    public static final HostedOptionKey<Boolean> ListCPUFeatures = new HostedOptionKey<>(false);
 
-    @Option(help = "Name of the main entry point method. Optional if --shared is used.")//
-    public static final HostedOptionKey<String> Method = new HostedOptionKey<>("main");
+    @Option(help = "Comma separated list of CPU features that will be enabled for runtime checks. The " +
+                    "native image may check at run time if such features are supported by the target " +
+                    "CPU, and can optimize certain operations based on this information. If a feature " +
+                    "is not supported at run time, a less optimized variant will be executed. Because of " +
+                    "the presence of multiple code variants, enabling runtime features can result in " +
+                    "larger executables. To completely turn off runtime checked CPU features, set this " +
+                    "option to the empty string. The specific options available are target platform " +
+                    "dependent. See --list-cpu-features for feature list. The default values are: " +
+                    "AMD64: 'AVX,AVX2'; AArch64: ''", type = User)//
+    public static final HostedOptionKey<AccumulatingLocatableMultiOptionValue.Strings> RuntimeCheckedCPUFeatures = new HostedOptionKey<>(
+                    AccumulatingLocatableMultiOptionValue.Strings.buildWithCommaDelimiter());
 
-    @Option(help = "Name of the output file to be generated", type = OptionType.User)//
-    public static final HostedOptionKey<String> Name = new HostedOptionKey<>("");
+    public static final String MICRO_ARCHITECTURE_NATIVE = "native";
+    public static final String MICRO_ARCHITECTURE_COMPATIBILITY = "compatibility";
+    public static final String MICRO_ARCHITECTURE_LIST = "list";
 
-    @APIOption(name = "shared", fixedValue = {"SHARED_LIBRARY"}, customHelp = "build shared library")//
-    @APIOption(name = "static", fixedValue = {"STATIC_EXECUTABLE"}, customHelp = "build statically linked executable (requires static libc and zlib)")//
-    @Option(help = "Generate a SHARED_LIBRARY, EXECUTABLE or STATIC_EXECUTABLE image")//
-    public static final HostedOptionKey<String> Kind = new HostedOptionKey<>(AbstractBootImage.NativeImageKind.EXECUTABLE.name());
+    @APIOption(name = "-march")//
+    @Option(help = "Generate instructions for a specific machine type. Defaults to 'x86-64-v3' on AMD64 and 'armv8.1-a' on AArch64. " +
+                    "Use -march=" + MICRO_ARCHITECTURE_COMPATIBILITY + " for best compatibility, or -march=" + MICRO_ARCHITECTURE_NATIVE +
+                    " for best performance if the native executable is deployed on the same machine or on a machine with the same CPU features. " +
+                    "To list all available machine types, use -march=" + MICRO_ARCHITECTURE_LIST + ".", type = User)//
+    public static final HostedOptionKey<String> MicroArchitecture = new HostedOptionKey<>(null) {
+        protected void onValueUpdate(EconomicMap<OptionKey<?>, Object> values, String oldValue, String newValue) {
+            if (MICRO_ARCHITECTURE_LIST.equals(newValue)) {
+                CPUType.printList();
+                throw new InterruptImageBuilding("");
+            }
+        }
+    };
 
-    @Option(help = "Comma separated list of CPU features that will be used for image generation on the AMD64 platform. " +
-                    "Features SSE and SSE2 are enabled by default. Other available features are: " +
-                    "CX8, CMOV, FXSR, HT, MMX, AMD_3DNOW_PREFETCH, SSE3, SSSE3, SSE4A, SSE4_1, " +
-                    "SSE4_2, POPCNT, LZCNT, TSC, TSCINV, AVX, AVX2, AES, ERMS, CLMUL, BMI1, " +
-                    "BMI2, RTM, ADX, AVX512F, AVX512DQ, AVX512PF, AVX512ER, AVX512CD, AVX512BW", type = User)//
-    public static final HostedOptionKey<String[]> CPUFeatures = new HostedOptionKey<>(null);
-
-    @Option(help = "Overrides CPUFeatures and uses the native architecture, i.e., the architecture of a machine that builds an image. NativeArchitecture takes precedence over CPUFeatures", type = User)//
-    public static final HostedOptionKey<Boolean> NativeArchitecture = new HostedOptionKey<>(false);
-
-    @Option(help = "Define PageSize of a machine that runs the image. The default = 0 (== same as host machine page size)")//
-    public static final HostedOptionKey<Integer> PageSize = new HostedOptionKey<>(0);
+    @Option(help = "Uses the native architecture, i.e., the architecture of a machine that builds an image.", type = User, //
+                    deprecated = true, deprecationMessage = "Please use '-march=native' instead. See '--help' for details.") //
+    public static final HostedOptionKey<Boolean> NativeArchitecture = new HostedOptionKey<>(false) {
+        @Override
+        protected void onValueUpdate(EconomicMap<OptionKey<?>, Object> values, Boolean oldValue, Boolean newValue) {
+            MicroArchitecture.update(values, newValue ? MICRO_ARCHITECTURE_NATIVE : null);
+        }
+    };
 
     @Option(help = "Print information about classes, methods, and fields that are present in the native image")//
     public static final HostedOptionKey<Boolean> PrintUniverse = new HostedOptionKey<>(false);
@@ -91,14 +126,12 @@ public class NativeImageOptions {
     @Option(help = "Print the sizes of the native image heap as the image is built")//
     public static final HostedOptionKey<Boolean> PrintImageHeapPartitionSizes = new HostedOptionKey<>(false);
 
-    @Option(help = "Print features-specific information")//
+    @Option(help = "Print a list of active features")//
     public static final HostedOptionKey<Boolean> PrintFeatures = new HostedOptionKey<>(false);
 
     @Option(help = "Directory for temporary files generated during native image generation. If this option is specified, the temporary files are not deleted so that you can inspect them after native image generation")//
-    public static final HostedOptionKey<String> TempDirectory = new HostedOptionKey<>("");
-
-    @Option(help = "Test Mach-O debuginfo generation")//
-    public static final HostedOptionKey<Boolean> MachODebugInfoTesting = new HostedOptionKey<>(false);
+    @BundleMember(role = BundleMember.Role.Output)//
+    public static final HostedOptionKey<AccumulatingLocatableMultiOptionValue.Paths> TempDirectory = new HostedOptionKey<>(AccumulatingLocatableMultiOptionValue.Paths.build());
 
     @Option(help = "Suppress console error output for unittests")//
     public static final HostedOptionKey<Boolean> SuppressStderr = new HostedOptionKey<>(false);
@@ -109,18 +142,13 @@ public class NativeImageOptions {
     @Option(help = "Allow MethodTypeFlow to see @Fold methods")//
     public static final HostedOptionKey<Boolean> AllowFoldMethods = new HostedOptionKey<>(false);
 
-    @APIOption(name = "report-unsupported-elements-at-runtime")//
-    @Option(help = "Report usage of unsupported methods and fields at run time when they are accessed the first time, instead of as an error during image building", type = User)//
-    public static final HostedOptionKey<Boolean> ReportUnsupportedElementsAtRuntime = new HostedOptionKey<>(false);
+    @APIOption(name = "report-unsupported-elements-at-runtime", deprecated = "The option is deprecated and will be removed in the future. The use of unsupported elements is always reported at run time.")//
+    @Option(help = "Report usage of unsupported methods and fields at run time when they are accessed the first time, instead of as an error during image building", type = Debug)//
+    public static final HostedOptionKey<Boolean> ReportUnsupportedElementsAtRuntime = new HostedOptionKey<>(true);
 
-    @APIOption(name = "allow-incomplete-classpath")//
-    @Option(help = "Allow image building with an incomplete class path: report type resolution errors at run time when they are accessed the first time, instead of during image building", type = User)//
-    public static final HostedOptionKey<Boolean> AllowIncompleteClasspath = new HostedOptionKey<Boolean>(false) {
-        @Override
-        protected void onValueUpdate(EconomicMap<OptionKey<?>, Object> values, Boolean oldValue, Boolean newValue) {
-            PointstoOptions.UnresolvedIsError.update(values, !newValue);
-        }
-    };
+    @APIOption(name = "allow-incomplete-classpath", deprecated = "Allowing an incomplete classpath is now the default. Use --link-at-build-time to report linking errors at image build time for a class or package.")//
+    @Option(help = "Deprecated", type = User)//
+    static final HostedOptionKey<Boolean> AllowIncompleteClasspath = new HostedOptionKey<>(false);
 
     @SuppressWarnings("all")
     private static boolean areAssertionsEnabled() {
@@ -129,9 +157,6 @@ public class NativeImageOptions {
         assert assertsEnabled = true;
         return assertsEnabled;
     }
-
-    @Option(help = "Report the original exception cause for unsupported features.")//
-    public static final HostedOptionKey<Boolean> ReportUnsupportedFeaturesCause = new HostedOptionKey<>(false);
 
     /**
      * Enum with all C standards.
@@ -149,28 +174,64 @@ public class NativeImageOptions {
         }
     }
 
-    @Option(help = "C standard to use in header files. Possible values are: [C89, C99, C11]", type = User)//
+    @Option(help = "C standard to use in header files. Possible values are 'C89', 'C99', and 'C11'.", type = User)//
     public static final HostedOptionKey<String> CStandard = new HostedOptionKey<>("C89");
 
     public static CStandards getCStandard() {
         try {
             return CStandards.valueOf(CStandard.getValue());
         } catch (IllegalArgumentException e) {
-            throw UserError.abort("C standard " + CStandard.getValue() + " is not supported. Supported standards are: " + Arrays.toString(CStandards.values()));
+            throw UserError.abort("C standard '%s' is not supported. Supported standards are %s.", CStandard.getValue(), StringUtil.joinSingleQuoted(CStandards.values()));
         }
     }
 
-    /**
-     * Configures the number of threads used by the {@link CompletionExecutor}.
-     */
-    @Option(help = "The maximum number of threads to use concurrently during native image generation.")//
-    public static final HostedOptionKey<Integer> NumberOfThreads = new HostedOptionKey<>(Math.min(Runtime.getRuntime().availableProcessors(), 32));
+    private static int availableProcessors() {
+        return Runtime.getRuntime().availableProcessors();
+    }
 
-    /*
-     * Analysis scales well up to 12 cores and gives slight improvements until 18 cores. We set the
-     * default value to 16 to minimize wasted resources in large machines.
+    /**
+     * Configures the number of threads of the common pool.
      */
-    @Option(help = "The number of threads to use for analysis during native image generation. The number must be smaller than the NumberOfThreads.")//
+    private static final String PARALLELISM_OPTION_NAME = "parallelism";
+    @APIOption(name = PARALLELISM_OPTION_NAME)//
+    @Option(help = "The maximum number of threads the build process is allowed to use.")//
+    public static final HostedOptionKey<Integer> NumberOfThreads = new HostedOptionKey<>(Math.min(availableProcessors(), 32), key -> {
+        int numberOfThreads = key.getValue();
+        if (numberOfThreads < 1) {
+            throw UserError.abort("The number of threads was set to %s. Please set the '--%s' option to at least 1.", numberOfThreads, PARALLELISM_OPTION_NAME);
+        }
+        int numAvailableProcessors = availableProcessors();
+        if (numberOfThreads > numAvailableProcessors) {
+            LogUtils.warning("Specified parallelism exceeds the number of available processors (%d).", numAvailableProcessors);
+        }
+    });
+
+    public static int getActualNumberOfThreads() {
+        String commonParallelismProperty = System.getProperty("java.util.concurrent.ForkJoinPool.common.parallelism");
+        if (commonParallelismProperty != null) {
+            return Integer.parseInt(commonParallelismProperty);
+        } else {
+            return NumberOfThreads.getValue();
+        }
+    }
+
+    public static void setCommonPoolParallelism(OptionValues optionValues) {
+        int targetParallelism = Math.max(1, NumberOfThreads.getValueOrDefault(optionValues.getMap()) - 1);
+        if (ForkJoinPool.commonPool().getParallelism() == targetParallelism) {
+            /* Nothing to do. */
+            return;
+        }
+
+        try {
+            ForkJoinPool.commonPool().setParallelism(targetParallelism);
+        } catch (UnsupportedOperationException e) {
+            if (NumberOfThreads.hasBeenSet(optionValues)) {
+                LogUtils.warning("Could not apply the '--parallelism' option due to the `java.util.concurrent.ForkJoinPool.common.parallelism` system property being set as the same time.");
+            }
+        }
+    }
+
+    @Option(help = "Deprecated, option no longer has any effect", deprecated = true, deprecationMessage = "Please use '--parallelism' instead.")//
     public static final HostedOptionKey<Integer> NumberOfAnalysisThreads = new HostedOptionKey<>(-1);
 
     @Option(help = "Return after analysis")//
@@ -179,39 +240,65 @@ public class NativeImageOptions {
     @Option(help = "Exit after analysis")//
     public static final HostedOptionKey<Boolean> ExitAfterAnalysis = new HostedOptionKey<>(false);
 
-    @Option(help = "Throw unsafe operation offset errors.)")//
+    @Option(help = "Exit after writing relocatable file")//
+    public static final HostedOptionKey<Boolean> ExitAfterRelocatableImageWrite = new HostedOptionKey<>(false);
+
+    @Option(help = "Throw unsafe operation offset errors.")//
     public static final HostedOptionKey<Boolean> ThrowUnsafeOffsetErrors = new HostedOptionKey<>(true);
 
-    @Option(help = "Print unsafe operation offset warnings.)")//
+    @Option(help = "Print unsafe operation offset warnings.")//
     public static final HostedOptionKey<Boolean> ReportUnsafeOffsetWarnings = new HostedOptionKey<>(false);
 
-    @Option(help = "Print unsafe operation offset warnings.)")//
+    @Option(help = "Print unsafe operation offset warnings.")//
     public static final HostedOptionKey<Boolean> UnsafeOffsetWarningsAreFatal = new HostedOptionKey<>(false);
 
-    @Option(help = "Show exception stack traces for exceptions during image building.)")//
+    /**
+     * Inspired by HotSpot's hs_err_<pid>.log files and for build-time errors (err_b).
+     *
+     * Keep in sync with the {@code catch_files} array in {@code ci/common.jsonnet}.
+     */
+    private static final String DEFAULT_ERROR_FILE_NAME = "svm_err_b_%t_pid%p.md";
+
+    public static final Path getErrorFilePath(OptionValues hostedOptionValues) {
+        String errorFile = NativeImageOptions.ErrorFile.getValue(hostedOptionValues);
+        Path expandedErrorFile = expandErrorFile(errorFile);
+        if (expandedErrorFile.isAbsolute()) {
+            throw UserError.abort("The error filename mask specified with " + SubstrateOptionsParser.commandArgument(NativeImageOptions.ErrorFile, errorFile) +
+                            " is not allowed to be an absolute path.");
+        }
+        return NativeImageGenerator.generatedFiles(hostedOptionValues).resolve(expandedErrorFile);
+    }
+
+    private static Path expandErrorFile(String errorFile) {
+        String timestamp = new SimpleDateFormat("yyyyMMdd'T'HHmmss.SSS").format(new Date(GraalServices.getGlobalTimeStamp()));
+        return Path.of(errorFile.replaceAll("%p", GraalServices.getExecutionID()).replaceAll("%t", timestamp));
+    }
+
+    @Option(help = "If an error occurs, save a build error report to this file [default: " + DEFAULT_ERROR_FILE_NAME + "] (%p replaced with pid, %t with timestamp).)")//
+    public static final HostedOptionKey<String> ErrorFile = new HostedOptionKey<>(DEFAULT_ERROR_FILE_NAME);
+
+    @Option(help = "Show exception stack traces for exceptions during image building.)", stability = OptionStability.STABLE)//
     public static final HostedOptionKey<Boolean> ReportExceptionStackTraces = new HostedOptionKey<>(areAssertionsEnabled());
 
-    @Option(help = "Maximum number of types allowed in the image. Used for tests where small number of types in necessary.", type = Debug)//
+    @Option(help = "Maximum number of types allowed in the image. Used for tests where small number of types is necessary.", type = Debug)//
     public static final HostedOptionKey<Integer> MaxReachableTypes = new HostedOptionKey<>(-1);
 
-    public static int getMaximumNumberOfConcurrentThreads(OptionValues optionValues) {
-        int maxNumberOfThreads = NativeImageOptions.NumberOfThreads.getValue(optionValues);
-        if (maxNumberOfThreads < 0) {
-            throw UserError.abort("Number of threads can't be negative. Set the NumberOfThreads flag to a positive value.");
-        }
-        return maxNumberOfThreads;
-    }
+    @Option(help = "Sets the dir where diagnostic information is dumped.")//
+    @BundleMember(role = BundleMember.Role.Output)//
+    public static final HostedOptionKey<AccumulatingLocatableMultiOptionValue.Paths> DiagnosticsDir = new HostedOptionKey<>(
+                    AccumulatingLocatableMultiOptionValue.Paths.buildWithDefaults(Paths.get("reports", ReportUtils.timeStampedFileName("diagnostics", ""))));
 
-    public static int getMaximumNumberOfAnalysisThreads(OptionValues optionValues) {
-        int optionValue = NativeImageOptions.NumberOfAnalysisThreads.getValue(optionValues);
-        int analysisThreads = NumberOfAnalysisThreads.hasBeenSet(optionValues) ? optionValue : Math.min(getMaximumNumberOfConcurrentThreads(optionValues), DEFAULT_MAX_ANALYSIS_SCALING);
-        if (analysisThreads < 0) {
-            throw UserError.abort("Number of analysis threads can't be negative. Set the NumberOfAnalysisThreads flag to a positive value.");
+    @Option(help = "Enables the diagnostic mode.")//
+    public static final HostedOptionKey<Boolean> DiagnosticsMode = new HostedOptionKey<>(false) {
+        @Override
+        protected void onValueUpdate(EconomicMap<OptionKey<?>, Object> values, Boolean oldValue, Boolean newValue) {
+            if (newValue) {
+                ClassInitializationOptions.PrintClassInitialization.update(values, true);
+                SubstitutionReportFeature.Options.ReportPerformedSubstitutions.update(values, true);
+                SubstrateOptions.DumpTargetInfo.update(values, true);
+                PrintFeatures.update(values, true);
+                ReportExceptionStackTraces.update(values, true);
+            }
         }
-
-        if (analysisThreads > NumberOfThreads.getValue(optionValues)) {
-            throw UserError.abort("Number of analysis threads can't be larger than NumberOfThreads. Set the NumberOfAnalysisThreads flag to a positive value smaller than NumberOfThreads.");
-        }
-        return analysisThreads;
-    }
+    };
 }

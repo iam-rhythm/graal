@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, Oracle and/or its affiliates.
+ * Copyright (c) 2018, 2021, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -29,49 +29,63 @@
  */
 package com.oracle.truffle.llvm.runtime.interop;
 
-import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
+import com.oracle.truffle.api.dsl.Fallback;
+import com.oracle.truffle.api.dsl.GenerateUncached;
+import com.oracle.truffle.api.dsl.NodeChild;
 import com.oracle.truffle.api.dsl.Specialization;
-import com.oracle.truffle.api.interop.TruffleObject;
+import com.oracle.truffle.api.frame.VirtualFrame;
+import com.oracle.truffle.api.library.CachedLibrary;
 import com.oracle.truffle.llvm.runtime.except.LLVMPolyglotException;
+import com.oracle.truffle.llvm.runtime.interop.LLVMAsForeignNodeGen.OptionalAsForeignNodeGen;
+import com.oracle.truffle.llvm.runtime.interop.LLVMAsForeignNodeGen.StrictAsForeignNodeGen;
+import com.oracle.truffle.llvm.runtime.library.internal.LLVMAsForeignLibrary;
+import com.oracle.truffle.llvm.runtime.nodes.api.LLVMExpressionNode;
 import com.oracle.truffle.llvm.runtime.nodes.api.LLVMNode;
 import com.oracle.truffle.llvm.runtime.pointer.LLVMManagedPointer;
 
+@NodeChild(type = LLVMExpressionNode.class)
 public abstract class LLVMAsForeignNode extends LLVMNode {
 
-    final boolean allowNonForeign;
+    public abstract Object execute(VirtualFrame frame);
 
-    protected LLVMAsForeignNode(boolean allowNonForeign) {
-        this.allowNonForeign = allowNonForeign;
-    }
-
-    public abstract TruffleObject execute(LLVMManagedPointer pointer);
+    public abstract Object execute(LLVMManagedPointer pointer);
 
     public static LLVMAsForeignNode create() {
-        return LLVMAsForeignNodeGen.create(false);
+        return StrictAsForeignNodeGen.create(null);
+    }
+
+    public static LLVMAsForeignNode getUncached() {
+        return StrictAsForeignNodeGen.getUncached();
+    }
+
+    public static LLVMAsForeignNode create(LLVMExpressionNode arg) {
+        return StrictAsForeignNodeGen.create(arg);
     }
 
     public static LLVMAsForeignNode createOptional() {
-        return LLVMAsForeignNodeGen.create(true);
+        return OptionalAsForeignNodeGen.create(null);
     }
 
-    @Specialization(guards = "isForeign(pointer)")
-    TruffleObject doForeign(LLVMManagedPointer pointer) {
-        LLVMTypedForeignObject foreign = (LLVMTypedForeignObject) pointer.getObject();
-        return foreign.getForeign();
+    @Specialization(guards = "foreigns.isForeign(pointer)")
+    Object doForeign(Object pointer,
+                    @CachedLibrary(limit = "3") LLVMAsForeignLibrary foreigns) {
+        return foreigns.asForeign(pointer);
     }
 
-    @Specialization(guards = {"allowNonForeign", "!isForeign(pointer)"})
-    TruffleObject doOther(@SuppressWarnings("unused") LLVMManagedPointer pointer) {
-        return null;
+    @GenerateUncached
+    abstract static class StrictAsForeignNode extends LLVMAsForeignNode {
+
+        @Fallback
+        Object doFail(@SuppressWarnings("unused") Object pointer) {
+            throw new LLVMPolyglotException(this, "Pointer does not point to a polyglot value");
+        }
     }
 
-    @Specialization(guards = {"!allowNonForeign", "!isForeign(pointer)"})
-    @TruffleBoundary
-    TruffleObject doFail(@SuppressWarnings("unused") LLVMManagedPointer pointer) {
-        throw new LLVMPolyglotException(this, "Pointer does not point to a polyglot value.");
-    }
+    abstract static class OptionalAsForeignNode extends LLVMAsForeignNode {
 
-    protected static boolean isForeign(LLVMManagedPointer pointer) {
-        return pointer.getOffset() == 0 && pointer.getObject() instanceof LLVMTypedForeignObject;
+        @Fallback
+        Object doNonForeign(@SuppressWarnings("unused") Object pointer) {
+            return null;
+        }
     }
 }

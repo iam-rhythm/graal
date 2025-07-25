@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2014, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,23 +40,21 @@
  */
 package com.oracle.truffle.api.test.profiles;
 
-import static com.oracle.truffle.api.test.ReflectionUtils.getStaticField;
 import static com.oracle.truffle.api.test.ReflectionUtils.invoke;
-import static com.oracle.truffle.api.test.ReflectionUtils.invokeStatic;
-import static com.oracle.truffle.api.test.ReflectionUtils.loadRelative;
 import static org.hamcrest.CoreMatchers.equalTo;
 import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.CoreMatchers.not;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertSame;
-import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assume.assumeThat;
 
 import java.util.Objects;
 
 import org.junit.Before;
+import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.experimental.theories.DataPoint;
 import org.junit.experimental.theories.Theories;
@@ -64,6 +62,8 @@ import org.junit.experimental.theories.Theory;
 import org.junit.runner.RunWith;
 
 import com.oracle.truffle.api.profiles.PrimitiveValueProfile;
+import com.oracle.truffle.api.test.ReflectionUtils;
+import com.oracle.truffle.tck.tests.TruffleTestAssumptions;
 
 @RunWith(Theories.class)
 @SuppressWarnings("deprecation")
@@ -117,11 +117,16 @@ public class PrimitiveValueProfileTest {
     private static final float FLOAT_DELTA = 0.00001f;
     private static final double DOUBLE_DELTA = 0.00001;
 
+    @BeforeClass
+    public static void runWithWeakEncapsulationOnly() {
+        TruffleTestAssumptions.assumeWeakEncapsulation();
+    }
+
     private PrimitiveValueProfile profile;
 
     @Before
     public void create() {
-        profile = (PrimitiveValueProfile) invokeStatic(loadRelative(PrimitiveValueProfileTest.class, "PrimitiveValueProfile$Enabled"), "create");
+        profile = ReflectionUtils.newInstance(PrimitiveValueProfile.class);
     }
 
     private static boolean isGeneric(PrimitiveValueProfile profile) {
@@ -991,7 +996,7 @@ public class PrimitiveValueProfileTest {
 
     @Test
     public void testDisabled() {
-        PrimitiveValueProfile p = (PrimitiveValueProfile) getStaticField(loadRelative(PrimitiveValueProfileTest.class, "PrimitiveValueProfile$Disabled"), "INSTANCE");
+        PrimitiveValueProfile p = PrimitiveValueProfile.getUncached();
         assertThat(p.profile(O1), is(O1));
         assertThat(p.profile(B1), is(B1));
         assertThat(p.profile(S1), is(S1));

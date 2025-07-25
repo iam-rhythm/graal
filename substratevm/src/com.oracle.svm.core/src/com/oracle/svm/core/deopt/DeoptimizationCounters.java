@@ -24,8 +24,8 @@
  */
 package com.oracle.svm.core.deopt;
 
-import org.graalvm.compiler.api.replacements.Fold;
-import org.graalvm.compiler.options.Option;
+import jdk.graal.compiler.api.replacements.Fold;
+import jdk.graal.compiler.options.Option;
 import org.graalvm.nativeimage.ImageSingletons;
 
 import com.oracle.svm.core.option.HostedOptionKey;
@@ -51,7 +51,7 @@ public class DeoptimizationCounters {
      * Rewriting the stack pointer does not allow passing the start time properly through the call
      * stack.
      */
-    static final FastThreadLocalLong startTime = FastThreadLocalFactory.createLong();
+    static final FastThreadLocalLong startTime = FastThreadLocalFactory.createLong("DeoptimizationCounters.startTime");
 
     @Fold
     public static DeoptimizationCounters counters() {

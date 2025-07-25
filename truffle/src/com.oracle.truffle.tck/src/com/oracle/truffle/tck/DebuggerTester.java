@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -43,8 +43,10 @@ package com.oracle.truffle.tck;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.PrintStream;
+import java.lang.reflect.AccessibleObject;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.net.URI;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -55,23 +57,25 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import org.graalvm.collections.Pair;
+import org.graalvm.polyglot.Context;
+import org.graalvm.polyglot.Engine;
+import org.graalvm.polyglot.PolyglotException;
+import org.graalvm.polyglot.Source;
+import org.graalvm.polyglot.Value;
 import org.junit.Assert;
 
 import com.oracle.truffle.api.debug.Breakpoint;
 import com.oracle.truffle.api.debug.Debugger;
 import com.oracle.truffle.api.debug.DebuggerSession;
+import com.oracle.truffle.api.debug.SourceElement;
 import com.oracle.truffle.api.debug.SuspendedCallback;
 import com.oracle.truffle.api.debug.SuspendedEvent;
-import com.oracle.truffle.api.debug.SourceElement;
 import com.oracle.truffle.api.source.SourceSection;
-
-import org.graalvm.polyglot.Context;
-import org.graalvm.polyglot.Engine;
-import org.graalvm.polyglot.PolyglotException;
-import org.graalvm.polyglot.Source;
 
 /**
  * Test utility class that makes it easier to test and debug debugger functionality for guest
@@ -83,7 +87,10 @@ import org.graalvm.polyglot.Source;
  * <p>
  * The debugger tester can print debug traces to standard output with -Dtruffle.debug.trace=true.
  *
- * Example usage: {@link com.oracle.truffle.tck.DebuggerTesterSnippets#testDebugging()}
+ * Example usage:
+ *
+ * {@snippet file="com/oracle/truffle/tck/DebuggerTester.java"
+ * region="DebuggerTesterSnippets#testDebugging"}
  *
  * @since 0.16
  */
@@ -115,6 +122,22 @@ public final class DebuggerTester implements AutoCloseable {
         out.println("DebuggerTester: " + message);
     }
 
+    private static Boolean optimizingRuntimeUsed;
+
+    private static boolean isOptimizingRuntime() {
+        Boolean optimizing = optimizingRuntimeUsed;
+        if (optimizing == null) {
+            try (Engine e = Engine.create()) {
+                optimizingRuntimeUsed = optimizing = !e.getImplementationName().equals("Interpreted");
+            }
+        }
+        return optimizing;
+    }
+
+    private static boolean isDeoptLoopDetectionAvailable() {
+        return Runtime.version().feature() >= 25;
+    }
+
     private final ExecutingLoop executingLoop;
     private SuspendedCallback handler;
 
@@ -126,7 +149,7 @@ public final class DebuggerTester implements AutoCloseable {
      * @since 0.16
      */
     public DebuggerTester() {
-        this(null);
+        this(null, null);
     }
 
     /**
@@ -134,16 +157,37 @@ public final class DebuggerTester implements AutoCloseable {
      *
      * @param contextBuilder a pre-set context builder. Only out and err streams are set on this
      *            builder prior the {@link Context} instance creation.
-     *
      * @see #DebuggerTester()
      * @since 0.31
      */
     public DebuggerTester(Context.Builder contextBuilder) {
+        this(null, contextBuilder);
+    }
+
+    /**
+     * Constructs a new debugger tester instance with a pre-set context builder and engine.
+     *
+     * @param engine engine to use for the context builder.
+     * @param contextBuilder a pre-set context builder. Only out and err streams are set on this
+     *            builder prior the {@link Context} instance creation.
+     * @see #DebuggerTester()
+     * @since 25.0
+     */
+    public DebuggerTester(Engine engine, Context.Builder contextBuilder) {
         this.newEvent = new ArrayBlockingQueue<>(1);
         this.executing = new Semaphore(0);
         this.initialized = new Semaphore(0);
         final AtomicReference<Engine> engineRef = new AtomicReference<>();
         final AtomicReference<Throwable> error = new AtomicReference<>();
+        if (engine != null) {
+            contextBuilder.engine(engine);
+        } else if (isOptimizingRuntime()) {
+            // TODO GR-65179
+            contextBuilder.option("engine.MaximumCompilations", "-1");
+            if (isDeoptLoopDetectionAvailable()) {
+                contextBuilder.option("compiler.DeoptCycleDetectionThreshold", "-1");
+            }
+        }
         this.executingLoop = new ExecutingLoop(contextBuilder, engineRef, error);
         this.evalThread = new Thread(executingLoop);
         this.evalThread.start();
@@ -234,29 +278,59 @@ public final class DebuggerTester implements AutoCloseable {
     /**
      * Starts a new {@link Context#eval(Source) evaluation} on the background thread. Only one
      * evaluation can be active at a time. Please ensure that {@link #expectDone()} completed
-     * successfully before starting a new evaluation. Throws an {@link IllegalStateException} if
+     * successfully before starting a new evaluation. When no source is available please refer to
+     * {@link DebuggerTester#startExecute(Function)}. Throws an {@link IllegalStateException} if
      * another evaluation is still executing or the tester is already closed.
      *
      * @since 0.27
      */
     public void startEval(Source s) {
-        if (this.executingSource != null) {
-            throw new IllegalStateException("Already executing other source " + s);
-        }
-        this.executingSource = new ExecutingSource(s);
+        startExecute(new Function<Context, Value>() {
+            public Value apply(Context c) {
+                return c.eval(s);
+            }
+        });
     }
 
     /**
-     * Expects an suspended event and returns it for potential assertions. If the execution
-     * completed or was killed instead then an assertion error is thrown. The returned suspended
-     * event is only valid until on of {@link #expectKilled()},
-     * {@link #expectSuspended(SuspendedCallback)} or {@link #expectDone()} is called again. Throws
-     * an {@link IllegalStateException} if the tester is already closed.
+     * Starts a new script evaluation on the background thread. Only one evaluation can be active at
+     * a time. Please ensure that {@link #expectDone()} completed successfully before starting a new
+     * evaluation. If a Source is available please refer to {@link DebuggerTester#startEval(Source)}
+     * . Throws an {@link IllegalStateException} if another evaluation is still executing or the
+     * tester is already closed.
+     *
+     * @since 20.0
+     */
+    public void startExecute(Function<Context, Value> script) {
+        if (this.executingSource != null) {
+            throw new IllegalStateException("Already executing other source ");
+        }
+        this.executingSource = new ExecutingSource(script);
+    }
+
+    /**
+     * Expects a suspended event and returns it for potential assertions. If the execution completed
+     * or was killed instead then an assertion error is thrown. The returned suspended event is only
+     * valid until on of {@link #expectKilled()}, {@link #expectSuspended(SuspendedCallback)} or
+     * {@link #expectDone()} is called again. Throws an {@link IllegalStateException} if the tester
+     * is already closed.
      *
      * @param callback handler to be called when the execution is suspended
      * @since 0.16
      */
     public void expectSuspended(SuspendedCallback callback) {
+        expectSuspended(callback, null);
+    }
+
+    /**
+     * Expects a suspended event and returns it for potential assertions, allows to verify errors
+     * printed to the error output.
+     *
+     * @param callback handler to be called when the execution is suspended
+     * @param errorVerifier handler, which returns <code>true</code> when the error is expected
+     * @since 24.1
+     */
+    public void expectSuspended(SuspendedCallback callback, Function<String, Boolean> errorVerifier) {
         if (closed) {
             throw new IllegalStateException("Already closed.");
         }
@@ -268,7 +342,12 @@ public final class DebuggerTester implements AutoCloseable {
             event = takeEvent();
             String e = getErr();
             if (!e.isEmpty()) {
-                throw new AssertionError("Error output is not empty: " + e);
+                if (errorVerifier != null) {
+                    Assert.assertTrue(e, errorVerifier.apply(e));
+                    err.reset();
+                } else {
+                    throw new AssertionError("Error output is not empty: " + e);
+                }
             }
         } catch (InterruptedException e) {
             throw new AssertionError(e);
@@ -449,6 +528,16 @@ public final class DebuggerTester implements AutoCloseable {
      * @since 0.33
      */
     public void assertLineBreakpointsResolution(String sourceWithMarks, String resolvedMarkName, String language) {
+        assertLineBreakpointsResolution(sourceWithMarks, null, resolvedMarkName, language);
+    }
+
+    /**
+     * @param positionPredicate <code>null</code> to test line breakpoints on all lines, or a
+     *            predicate that limits the testable lines.
+     * @see #assertLineBreakpointsResolution(java.lang.String, java.lang.String, java.lang.String)
+     * @since 19.3.0
+     */
+    public void assertLineBreakpointsResolution(String sourceWithMarks, PositionPredicate positionPredicate, String resolvedMarkName, String language) {
         Pattern br = Pattern.compile("(" + resolvedMarkName + "\\d+_|" + resolvedMarkName + "\\d+-\\d+_)");
         Map<Integer, Integer> bps = new HashMap<>();
         String sourceString = sourceWithMarks;
@@ -483,7 +572,7 @@ public final class DebuggerTester implements AutoCloseable {
         final Source source = Source.newBuilder(language, sourceString, "testMisplacedLineBreakpoint." + language).buildLiteral();
         com.oracle.truffle.api.source.Source tsource = DebuggerTester.getSourceImpl(source);
         for (int l = 1; l < source.getLineCount(); l++) {
-            if (!bps.containsKey(l)) {
+            if ((positionPredicate == null || positionPredicate.testLine(l)) && !bps.containsKey(l)) {
                 Assert.fail("Line " + l + " is missing.");
             }
         }
@@ -555,6 +644,10 @@ public final class DebuggerTester implements AutoCloseable {
      * @since 0.33
      */
     public void assertColumnBreakpointsResolution(String sourceWithMarks, String breakpointMarkName, String resolvedMarkName, String language) {
+        assertColumnBreakpointsResolution(sourceWithMarks, breakpointMarkName, resolvedMarkName, language, null);
+    }
+
+    public void assertColumnBreakpointsResolution(String sourceWithMarks, String breakpointMarkName, String resolvedMarkName, String language, URI bpURI) {
         Pattern br = Pattern.compile("([" + breakpointMarkName + resolvedMarkName + "]\\d+_|" + resolvedMarkName + "\\d+-\\d+_)");
         Map<Integer, int[]> bps = new HashMap<>();
         String sourceString = sourceWithMarks;
@@ -605,27 +698,34 @@ public final class DebuggerTester implements AutoCloseable {
             try (DebuggerSession session = startSession()) {
 
                 startEval(source);
-                int[] resolvedIndexPtr = new int[]{0};
+                int[] resolvedLineColumn = new int[]{0, 0};
+                Breakpoint.Builder bpBuilder = (bpURI != null) ? Breakpoint.newBuilder(bpURI) : Breakpoint.newBuilder(DebuggerTester.getSourceImpl(source));
                 Breakpoint breakpoint = session.install(
-                                Breakpoint.newBuilder(DebuggerTester.getSourceImpl(source)).lineIs(line).columnIs(column).oneShot().resolveListener(new Breakpoint.ResolveListener() {
+                                bpBuilder.lineIs(line).columnIs(column).oneShot().resolveListener(new Breakpoint.ResolveListener() {
                                     @Override
                                     public void breakpointResolved(Breakpoint brkp, SourceSection section) {
-                                        resolvedIndexPtr[0] = section.getCharIndex() + 1;
+                                        resolvedLineColumn[0] = section.getStartLine();
+                                        resolvedLineColumn[1] = section.getStartColumn();
                                         if (TRACE) {
-                                            trace("  resolved: " + (resolvedIndexPtr[0]));
+                                            trace("  resolved: " + resolvedLineColumn[0] + ":" + resolvedLineColumn[1]);
                                         }
                                     }
                                 }).build());
 
+                int bpLine = source.getLineNumber(bp[1] - 1);
+                int bpColumn = source.getColumnNumber(bp[1] - 1);
+                Pair<Integer, Integer> breakpointPosition = Pair.create(bpLine, bpColumn);
                 expectSuspended((SuspendedEvent event) -> {
-                    Assert.assertEquals("Expected " + bp[0] + " => " + bp[1] + ", resolved at " + resolvedIndexPtr[0],
-                                    bp[1], event.getSourceSection().getCharIndex() + 1);
+                    Pair<Integer, Integer> eventPosition = Pair.create(event.getSourceSection().getStartLine(), event.getSourceSection().getStartColumn());
+                    Assert.assertEquals("B" + bpId + ": Expected " + bp[0] + " => " + breakpointPosition + ", event at " + eventPosition,
+                                    breakpointPosition, eventPosition);
                     Assert.assertSame(breakpoint, event.getBreakpoints().iterator().next());
                     event.prepareContinue();
                 });
                 expectDone();
-                Assert.assertEquals("Expected resolved " + bp[0] + " => " + bp[1],
-                                bp[1], resolvedIndexPtr[0]);
+                Pair<Integer, Integer> resolvedPosition = Pair.create(resolvedLineColumn[0], resolvedLineColumn[1]);
+                Assert.assertEquals("B" + bpId + ": Expected resolved " + bp[0] + " => " + bp[1],
+                                breakpointPosition, resolvedPosition);
             }
         }
     }
@@ -641,6 +741,24 @@ public final class DebuggerTester implements AutoCloseable {
      * @since 0.33
      */
     public void assertBreakpointsBreakEverywhere(Source source) {
+        assertBreakpointsBreakEverywhere(source, null);
+    }
+
+    /**
+     * Utility method that tests if a breakpoint submitted to any location permitted by the
+     * {@link PositionPredicate} in the source code suspends the execution. A two-pass test is
+     * performed. In the first pass, line breakpoints are submitted to every testable line. In the
+     * second pass, breakpoints are submitted to every testable line and column combination, even
+     * outside the source scope, if permitted by the {@link PositionPredicate}. It is expected that
+     * the breakpoints resolve to a nearest suspendable location and it is checked that all
+     * submitted breakpoints are hit.
+     *
+     * @param source a source to evaluate with breakpoints submitted everywhere
+     * @param positionPredicate <code>null</code> to submit breakpoints everywhere, or a predicate
+     *            that limits the testable positions.
+     * @since 19.3.0
+     */
+    public void assertBreakpointsBreakEverywhere(Source source, PositionPredicate positionPredicate) {
         int numLines = source.getLineCount();
         int numColumns = 0;
         for (int i = 1; i <= numLines; i++) {
@@ -651,19 +769,22 @@ public final class DebuggerTester implements AutoCloseable {
         }
         com.oracle.truffle.api.source.Source tsource = DebuggerTester.getSourceImpl(source);
         final List<Breakpoint> breakpoints = new ArrayList<>();
-        final Set<Breakpoint> breakpointsResolved = new HashSet<>();
+        final Map<Breakpoint, SourceSection> breakpointsResolved = new HashMap<>();
         final List<Breakpoint> breakpointsHit = new ArrayList<>();
         Breakpoint.ResolveListener resolveListener = new Breakpoint.ResolveListener() {
             @Override
             public void breakpointResolved(Breakpoint breakpoint, SourceSection section) {
-                Assert.assertFalse(breakpointsResolved.contains(breakpoint));
-                breakpointsResolved.add(breakpoint);
+                Assert.assertTrue("Resolved at " + section + ", have " + breakpointsResolved.get(breakpoint),
+                                !breakpointsResolved.containsKey(breakpoint) || !section.equals(breakpointsResolved.get(breakpoint)));
+                breakpointsResolved.put(breakpoint, section);
             }
         };
         // Test all line breakpoints
-        for (int l = 1; l < (numLines + 5); l++) {
-            Breakpoint breakpoint = Breakpoint.newBuilder(tsource).lineIs(l).oneShot().resolveListener(resolveListener).build();
-            breakpoints.add(breakpoint);
+        for (int l = 1; l <= numLines; l++) {
+            if (positionPredicate == null || positionPredicate.testLine(l)) {
+                Breakpoint breakpoint = Breakpoint.newBuilder(tsource).lineIs(l).oneShot().resolveListener(resolveListener).build();
+                breakpoints.add(breakpoint);
+            }
         }
         assertBreakpoints(source, breakpoints, breakpointsResolved, breakpointsHit);
 
@@ -672,16 +793,19 @@ public final class DebuggerTester implements AutoCloseable {
         breakpointsHit.clear();
 
         // Test all line/column breakpoints
-        for (int l = 1; l < (numLines + 5); l++) {
-            for (int c = 1; c < (numColumns + 5); c++) {
-                Breakpoint breakpoint = Breakpoint.newBuilder(tsource).lineIs(l).columnIs(c).oneShot().resolveListener(resolveListener).build();
-                breakpoints.add(breakpoint);
+        for (int l = 1; l <= numLines; l++) {
+            int endColumn = (l == numLines) ? source.getLineLength(l) : numColumns + 5;
+            for (int c = 1; c < endColumn; c++) {
+                if (positionPredicate == null || positionPredicate.testLineColumn(l, c)) {
+                    Breakpoint breakpoint = Breakpoint.newBuilder(tsource).lineIs(l).columnIs(c).oneShot().resolveListener(resolveListener).build();
+                    breakpoints.add(breakpoint);
+                }
             }
         }
         assertBreakpoints(source, breakpoints, breakpointsResolved, breakpointsHit);
     }
 
-    private void assertBreakpoints(Source source, List<Breakpoint> breakpoints, Set<Breakpoint> breakpointsResolved, List<Breakpoint> breakpointsHit) {
+    private void assertBreakpoints(Source source, List<Breakpoint> breakpoints, Map<Breakpoint, SourceSection> breakpointsResolved, List<Breakpoint> breakpointsHit) {
         try (DebuggerSession session = startSession(new SourceElement[0])) {
             for (Breakpoint breakpoint : breakpoints) {
                 session.install(breakpoint);
@@ -719,7 +843,7 @@ public final class DebuggerTester implements AutoCloseable {
      * @since 0.28
      */
     public static com.oracle.truffle.api.source.Source getSourceImpl(Source source) {
-        return (com.oracle.truffle.api.source.Source) getField(source, "impl");
+        return (com.oracle.truffle.api.source.Source) getField(source, "receiver");
     }
 
     // Copied from ReflectionUtils.
@@ -734,13 +858,9 @@ public final class DebuggerTester implements AutoCloseable {
     }
 
     private static void setAccessible(Field field, boolean flag) {
-        if (!Java8OrEarlier) {
-            openForReflectionTo(field.getDeclaringClass(), DebuggerTester.class);
-        }
+        openForReflectionTo(field.getDeclaringClass(), DebuggerTester.class);
         field.setAccessible(flag);
     }
-
-    private static final boolean Java8OrEarlier = System.getProperty("java.specification.version").compareTo("1.9") < 0;
 
     /**
      * Opens {@code declaringClass}'s package to allow a method declared in {@code accessor} to call
@@ -775,7 +895,7 @@ public final class DebuggerTester implements AutoCloseable {
     }
 
     private void putEvent(Object event) {
-        trace("Put event " + this + ": " + Thread.currentThread());
+        trace("Put event " + event + " to " + this + ": " + Thread.currentThread());
         if (event instanceof SuspendedEvent) {
             try {
                 if (handler == null) {
@@ -800,6 +920,7 @@ public final class DebuggerTester implements AutoCloseable {
     }
 
     private void onSuspend(SuspendedEvent event) {
+        trace("On SUSPEND " + event + " of " + this + ": " + Thread.currentThread());
         if (closed) {
             return;
         }
@@ -830,14 +951,41 @@ public final class DebuggerTester implements AutoCloseable {
 
     private static final class ExecutingSource {
 
-        private final Source source;
+        private final Function<Context, Value> function;
         private Throwable error;
         private String returnValue;
 
-        ExecutingSource(Source source) {
-            this.source = source;
+        ExecutingSource(Function<Context, Value> function) {
+            this.function = function;
         }
 
+        @Override
+        public String toString() {
+            return "ExecutingSource[" + function + "], error = " + error + ", returnValue = " + returnValue;
+        }
+
+    }
+
+    /**
+     * Predicate of testable positions.
+     *
+     * @since 19.3.0
+     */
+    public interface PositionPredicate {
+
+        /**
+         * Whether to test at the line.
+         *
+         * @since 19.3.0
+         */
+        boolean testLine(int line);
+
+        /**
+         * Whether to test at the line and column position.
+         *
+         * @since 19.3.0
+         */
+        boolean testLineColumn(int line, int column);
     }
 
     class ExecutingLoop implements Runnable {
@@ -872,18 +1020,24 @@ public final class DebuggerTester implements AutoCloseable {
                     }
                     ExecutingSource s = executingSource;
                     try {
-                        trace("Start executing " + this);
-                        s.returnValue = context.eval(s.source).toString();
-                        trace("Done executing " + this);
+                        trace("Start executing " + s + " on " + DebuggerTester.this + ": " + Thread.currentThread());
+                        s.returnValue = s.function.apply(context).toString();
                     } catch (Throwable e) {
                         s.error = e;
                     } finally {
+                        trace("Done executing " + s + " on " + DebuggerTester.this + ": " + Thread.currentThread());
                         putEvent(s);
                     }
                 }
             } finally {
                 if (context != null) {
-                    context.close();
+                    try {
+                        context.close();
+                    } catch (PolyglotException pe) {
+                        if (!pe.isCancelled() && !pe.isExit()) {
+                            throw pe;
+                        }
+                    }
                 }
             }
         }
@@ -892,7 +1046,7 @@ public final class DebuggerTester implements AutoCloseable {
 
 class DebuggerTesterSnippets {
 
-    // BEGIN: DebuggerTesterSnippets.testDebugging
+    // @start region = "DebuggerTesterSnippets#testDebugging"
     public void testDebugging() {
         try (DebuggerTester tester = new DebuggerTester()) {
             // use your guest language source here
@@ -922,5 +1076,5 @@ class DebuggerTesterSnippets {
             }
         }
     }
-    // END: DebuggerTesterSnippets.testDebugging
+    // @end region = "DebuggerTesterSnippets#testDebugging"
 }

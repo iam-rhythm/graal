@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, Oracle and/or its affiliates.
+ * Copyright (c) 2018, 2021, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -29,91 +29,203 @@
  */
 package com.oracle.truffle.llvm.runtime.interop.access;
 
-import com.oracle.truffle.api.CompilerDirectives;
+import com.oracle.truffle.api.dsl.Bind;
 import com.oracle.truffle.api.dsl.Cached;
 import com.oracle.truffle.api.dsl.Fallback;
+import com.oracle.truffle.api.dsl.GenerateAOT;
+import com.oracle.truffle.api.dsl.GenerateUncached;
+import com.oracle.truffle.api.dsl.ImportStatic;
 import com.oracle.truffle.api.dsl.Specialization;
-import com.oracle.truffle.api.interop.ForeignAccess;
-import com.oracle.truffle.api.interop.Message;
-import com.oracle.truffle.api.interop.TruffleObject;
+import com.oracle.truffle.api.interop.InteropLibrary;
+import com.oracle.truffle.api.interop.InvalidArrayIndexException;
 import com.oracle.truffle.api.interop.UnknownIdentifierException;
 import com.oracle.truffle.api.interop.UnsupportedMessageException;
 import com.oracle.truffle.api.interop.UnsupportedTypeException;
-import com.oracle.truffle.api.nodes.Node;
+import com.oracle.truffle.api.library.CachedLibrary;
+import com.oracle.truffle.api.profiles.BranchProfile;
 import com.oracle.truffle.llvm.runtime.except.LLVMPolyglotException;
+import com.oracle.truffle.llvm.runtime.interop.LLVMDataEscapeNode;
 import com.oracle.truffle.llvm.runtime.interop.access.LLVMInteropAccessNode.AccessLocation;
-import com.oracle.truffle.llvm.runtime.interop.access.LLVMInteropWriteNodeGen.GetValueSizeNodeGen;
+import com.oracle.truffle.llvm.runtime.interop.convert.ForeignToLLVM.ForeignToLLVMType;
 import com.oracle.truffle.llvm.runtime.nodes.api.LLVMNode;
 
+@GenerateUncached
 public abstract class LLVMInteropWriteNode extends LLVMNode {
 
     public static LLVMInteropWriteNode create() {
         return LLVMInteropWriteNodeGen.create();
     }
 
-    @Child Node write = Message.WRITE.createNode();
-
-    public abstract void execute(LLVMInteropType.Structured type, TruffleObject foreign, long offset, Object value);
+    public abstract void execute(LLVMInteropType.Structured baseType, Object foreign, long offset, Object value, ForeignToLLVMType writeType);
 
     @Specialization(guards = "type != null")
-    void doKnownType(LLVMInteropType.Structured type, TruffleObject foreign, long offset, Object value,
-                    @Cached("create()") LLVMInteropAccessNode access) {
+    void doKnownType(LLVMInteropType.Structured type, Object foreign, long offset, Object value, ForeignToLLVMType writeType,
+                    @Cached LLVMInteropAccessNode access,
+                    @Cached WriteLocationNode write) {
         AccessLocation location = access.execute(type, foreign, offset);
-        write(location, value);
+        write.execute(location.identifier, location, value, writeType);
     }
 
-    @Child GetValueSizeNode getSize;
-
-    @Fallback
-    void doUnknownType(@SuppressWarnings("unused") LLVMInteropType.Structured type, TruffleObject foreign, long offset, Object value) {
-        if (getSize == null) {
-            CompilerDirectives.transferToInterpreterAndInvalidate();
-            getSize = insert(GetValueSizeNodeGen.create());
-        }
-
+    @Specialization(guards = "type == null")
+    void doUnknownType(@SuppressWarnings("unused") LLVMInteropType.Structured type, Object foreign, long offset, Object value, ForeignToLLVMType writeType,
+                    @Cached WriteLocationNode write) {
         // type unknown: fall back to "array of unknown value type"
-        int elementAccessSize = getSize.execute(value);
-        AccessLocation location = new AccessLocation(foreign, Long.divideUnsigned(offset, elementAccessSize), null);
-        write(location, value);
+        AccessLocation location = new AccessLocation(foreign, Long.divideUnsigned(offset, writeType.getSizeInBytes()), null);
+        write.execute(location.identifier, location, value, writeType);
     }
 
-    private void write(AccessLocation location, Object value) {
-        try {
-            ForeignAccess.sendWrite(write, location.base, location.identifier, value);
-        } catch (UnknownIdentifierException ex) {
-            CompilerDirectives.transferToInterpreter();
-            throw new LLVMPolyglotException(this, "Member '%s' not found.", location.identifier);
-        } catch (UnsupportedMessageException ex) {
-            CompilerDirectives.transferToInterpreter();
-            throw new LLVMPolyglotException(this, "Can not write member '%s'.", location.identifier);
-        } catch (UnsupportedTypeException ex) {
-            CompilerDirectives.transferToInterpreter();
-            throw new LLVMPolyglotException(this, "Wrong type writing to member '%s'.", location.identifier);
-        }
-    }
+    @GenerateUncached
+    abstract static class WriteLocationNode extends LLVMNode {
 
-    abstract static class GetValueSizeNode extends LLVMNode {
+        abstract void execute(Object identifier, AccessLocation location, Object value, ForeignToLLVMType writeType);
 
-        protected abstract int execute(Object value);
-
-        @Specialization(guards = "valueClass.isInstance(value)")
-        int doCached(@SuppressWarnings("unused") Object value,
-                        @Cached("value.getClass()") @SuppressWarnings("unused") Class<?> valueClass,
-                        @Cached("doGeneric(value)") int cachedSize) {
-            return cachedSize;
-        }
-
-        @Specialization(replaces = "doCached")
-        int doGeneric(Object value) {
-            if (value instanceof Byte || value instanceof Boolean) {
-                return 1;
-            } else if (value instanceof Short || value instanceof Character) {
-                return 2;
-            } else if (value instanceof Integer || value instanceof Float) {
-                return 4;
-            } else {
-                return 8;
+        @Specialization(limit = "3")
+        @GenerateAOT.Exclude
+        void writeMember(String identifier, AccessLocation location, Object value, @SuppressWarnings("unused") ForeignToLLVMType writeType,
+                        @CachedLibrary("location.base") InteropLibrary interop,
+                        @Cached ConvertOutgoingNode convertOutgoing,
+                        @Cached BranchProfile exception) {
+            assert identifier == location.identifier;
+            try {
+                interop.writeMember(location.base, identifier, convertOutgoing.execute(value, location.type, writeType));
+            } catch (UnsupportedMessageException ex) {
+                exception.enter();
+                throw new LLVMPolyglotException(this, "Cannot write member '%s'.", identifier);
+            } catch (UnknownIdentifierException ex) {
+                exception.enter();
+                throw new LLVMPolyglotException(this, "Member '%s' not found.", identifier);
+            } catch (UnsupportedTypeException ex) {
+                exception.enter();
+                throw new LLVMPolyglotException(this, "Wrong type writing to member '%s'.", identifier);
             }
+        }
+
+        @Specialization(guards = "isLocationTypeNullOrSameSize(location, writeType)", limit = "3")
+        @GenerateAOT.Exclude
+        void writeArrayElementTypeMatch(long identifier, AccessLocation location, Object value, ForeignToLLVMType writeType,
+                        @CachedLibrary("location.base") InteropLibrary interop,
+                        @Cached ConvertOutgoingNode convertOutgoing,
+                        @Cached BranchProfile exception) {
+            assert identifier == (Long) location.identifier;
+            long idx = identifier;
+            try {
+                interop.writeArrayElement(location.base, idx, convertOutgoing.execute(value, location.type, writeType));
+            } catch (InvalidArrayIndexException ex) {
+                exception.enter();
+                throw new LLVMPolyglotException(this, "Invalid array index %d.", idx);
+            } catch (UnsupportedMessageException ex) {
+                exception.enter();
+                throw new LLVMPolyglotException(this, "Cannot write array element %d.", idx);
+            } catch (UnsupportedTypeException ex) {
+                exception.enter();
+                throw new LLVMPolyglotException(this, "Wrong type writing to array element %d.", idx);
+            }
+        }
+
+        @Specialization(guards = {"!isLocationTypeNullOrSameSize(location, writeType)", "locationType.isI8()", "writeTypeSizeInBytes > 1"}, limit = "3")
+        @GenerateAOT.Exclude
+        void writeArrayElementToI8(long identifier, AccessLocation location, Object value, ForeignToLLVMType writeType,
+                        @CachedLibrary("location.base") InteropLibrary interop,
+                        @Cached ReinterpretLLVMAsLong toLong,
+                        @Cached BranchProfile exception,
+                        @Bind("location.type.kind.foreignToLLVMType") @SuppressWarnings("unused") ForeignToLLVMType locationType,
+                        @Bind("writeType.getSizeInBytes()") int writeTypeSizeInBytes) {
+            assert identifier == (Long) location.identifier;
+            long idx = identifier;
+            try {
+                long longValue = toLong.executeWithWriteType(value, writeType);
+                // TODO (je) this currently assumes little endian (GR-24919)
+                for (int i = 0; i < writeTypeSizeInBytes; i++, idx++) {
+                    interop.writeArrayElement(location.base, idx, (byte) longValue);
+                    longValue >>= 8;
+                }
+            } catch (InvalidArrayIndexException ex) {
+                exception.enter();
+                throw new LLVMPolyglotException(this, "Invalid array index %d.", idx);
+            } catch (UnsupportedMessageException ex) {
+                exception.enter();
+                throw new LLVMPolyglotException(this, "Cannot write array element %d.", idx);
+            } catch (UnsupportedTypeException ex) {
+                exception.enter();
+                throw new LLVMPolyglotException(this, "Wrong type writing to array element %d.", idx);
+            }
+        }
+
+        @Fallback
+        void fallback(@SuppressWarnings("unused") Object identifier, AccessLocation location, Object value, ForeignToLLVMType writeType) {
+            assert location.type != null;
+            throw new LLVMPolyglotException(this, "Cannot write object '%s' of size %d byte(s) to foreign object of element size %d", value, writeType.getSizeInBytes(),
+                            location.type.kind.foreignToLLVMType.getSizeInBytes());
+        }
+
+        static boolean isLocationTypeNullOrSameSize(AccessLocation location, ForeignToLLVMType accessType) {
+            return location.type == null || location.type.kind.foreignToLLVMType.getSizeInBytes() == accessType.getSizeInBytes();
+        }
+    }
+
+    @ImportStatic(ForeignToLLVMType.class)
+    @GenerateUncached
+    abstract static class ReinterpretLLVMAsLong extends LLVMNode {
+        abstract long executeWithWriteType(Object value, ForeignToLLVMType writeType);
+
+        @Specialization(guards = "writeType.getSizeInBytes() == 2")
+        long doI16(Object value, @SuppressWarnings("unused") ForeignToLLVMType writeType,
+                        @Cached LLVMDataEscapeNode.LLVMI16DataEscapeNode dataEscape) {
+            return dataEscape.executeWithTargetI16(value);
+        }
+
+        @Specialization(guards = "writeType.getSizeInBytes() == 4")
+        long doI32(Object value, @SuppressWarnings("unused") ForeignToLLVMType writeType,
+                        @Cached LLVMDataEscapeNode.LLVMI32DataEscapeNode dataEscape) {
+            return dataEscape.executeWithTargetI32(value);
+        }
+
+        @Specialization(guards = "writeType.getSizeInBytes() == 8")
+        long doI64(Object value, @SuppressWarnings("unused") ForeignToLLVMType writeType,
+                        @Cached LLVMDataEscapeNode.LLVMI64DataEscapeNode dataEscape) {
+            return dataEscape.executeWithTargetI64(value);
+        }
+
+        @Fallback
+        long fallback(@SuppressWarnings("unused") Object value, ForeignToLLVMType writeType) {
+            throw new LLVMPolyglotException(this, "Unexpected access type %s", writeType);
+        }
+
+    }
+
+    @GenerateUncached
+    abstract static class ConvertOutgoingNode extends LLVMNode {
+
+        abstract Object execute(Object value, LLVMInteropType.Value outgoingType, ForeignToLLVMType writeType);
+
+        @Specialization(limit = "3", guards = {"outgoingType != null", "cachedOutgoingType == outgoingType.kind.foreignToLLVMType", "type.getSizeInBytes() == cachedOutgoingType.getSizeInBytes()"})
+        @GenerateAOT.Exclude
+        Object doKnownType(Object value, LLVMInteropType.Value outgoingType, @SuppressWarnings("unused") ForeignToLLVMType type,
+                        @Cached("outgoingType.kind.foreignToLLVMType") @SuppressWarnings("unused") ForeignToLLVMType cachedOutgoingType,
+                        @Cached(parameters = "cachedOutgoingType") LLVMDataEscapeNode dataEscape) {
+            return dataEscape.executeWithType(value, outgoingType.baseType);
+        }
+
+        static boolean typeMismatch(LLVMInteropType.Value outgoingType, ForeignToLLVMType writeType) {
+            if (outgoingType == null) {
+                return true;
+            } else {
+                return outgoingType.getSize() != writeType.getSizeInBytes();
+            }
+        }
+
+        /**
+         * @param value
+         * @param outgoingType
+         * @param type
+         * @see #execute(Object, LLVMInteropType.Value, ForeignToLLVMType)
+         */
+        @Specialization(limit = "3", guards = {"typeMismatch(outgoingType, cachedType)", "cachedType == type"})
+        @GenerateAOT.Exclude
+        Object doUnknownType(Object value, LLVMInteropType.Value outgoingType, ForeignToLLVMType type,
+                        @Cached("type") @SuppressWarnings("unused") ForeignToLLVMType cachedType,
+                        @Cached(parameters = "type") LLVMDataEscapeNode dataEscape) {
+            return dataEscape.executeWithTarget(value);
         }
     }
 }

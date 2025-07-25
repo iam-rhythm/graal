@@ -24,250 +24,243 @@
  */
 package com.oracle.svm.core.posix.pthread;
 
-import org.graalvm.compiler.core.common.NumUtil;
-import org.graalvm.compiler.word.Word;
-import org.graalvm.nativeimage.Feature;
+import static com.oracle.svm.core.heap.RestrictHeapAccess.Access.NO_ALLOCATION;
+
+import jdk.graal.compiler.word.Word;
 import org.graalvm.nativeimage.ImageSingletons;
 import org.graalvm.nativeimage.LogHandler;
 import org.graalvm.nativeimage.Platform;
 import org.graalvm.nativeimage.Platforms;
-import org.graalvm.nativeimage.StackValue;
-import org.graalvm.nativeimage.c.struct.SizeOf;
-import org.graalvm.word.UnsignedWord;
-import org.graalvm.word.WordFactory;
 
-import com.oracle.svm.core.SubstrateOptions;
-import com.oracle.svm.core.annotate.AutomaticFeature;
-import com.oracle.svm.core.annotate.Uninterruptible;
-import com.oracle.svm.core.annotate.UnknownObjectField;
-import com.oracle.svm.core.config.ConfigurationValues;
-import com.oracle.svm.core.config.ObjectLayout;
-import com.oracle.svm.core.locks.ClassInstanceReplacer;
+import com.oracle.svm.core.Uninterruptible;
+import com.oracle.svm.core.c.CIsolateData;
+import com.oracle.svm.core.c.CIsolateDataFactory;
+import com.oracle.svm.core.graal.stackvalue.UnsafeStackValue;
+import com.oracle.svm.core.heap.RestrictHeapAccess;
+import com.oracle.svm.core.jdk.UninterruptibleUtils;
 import com.oracle.svm.core.locks.VMCondition;
+import com.oracle.svm.core.locks.VMLockSupport;
 import com.oracle.svm.core.locks.VMMutex;
 import com.oracle.svm.core.log.Log;
 import com.oracle.svm.core.posix.headers.Errno;
 import com.oracle.svm.core.posix.headers.Pthread;
 import com.oracle.svm.core.posix.headers.Time;
-import com.oracle.svm.core.thread.VMThreads;
+import com.oracle.svm.core.stack.StackOverflowCheck;
+import com.oracle.svm.core.thread.VMThreads.SafepointBehavior;
 
-import jdk.vm.ci.meta.JavaKind;
-
-/**
- * Support of {@link VMMutex} and {@link VMCondition} in multi-threaded environments. Locking is
- * implemented via pthreads.
- */
-@AutomaticFeature
-@Platforms({Platform.LINUX_AND_JNI.class, Platform.DARWIN_AND_JNI.class})
-final class PthreadVMLockFeature implements Feature {
-
-    private final ClassInstanceReplacer<VMMutex, VMMutex> mutexReplacer = new ClassInstanceReplacer<VMMutex, VMMutex>(VMMutex.class) {
-        @Override
-        protected VMMutex createReplacement(VMMutex source) {
-            return new PthreadVMMutex();
-        }
-    };
-
-    private final ClassInstanceReplacer<VMCondition, VMCondition> conditionReplacer = new ClassInstanceReplacer<VMCondition, VMCondition>(VMCondition.class) {
-        @Override
-        protected VMCondition createReplacement(VMCondition source) {
-            return new PthreadVMCondition((PthreadVMMutex) mutexReplacer.apply(source.getMutex()));
-        }
-    };
+public abstract class PthreadVMLockSupport extends VMLockSupport {
 
     @Override
-    public boolean isInConfiguration(IsInConfigurationAccess access) {
-        return SubstrateOptions.MultiThreaded.getValue();
+    @Platforms(Platform.HOSTED_ONLY.class)
+    protected VMMutex replaceVMMutex(VMMutex source) {
+        return new PthreadVMMutex(source.getName());
     }
 
     @Override
-    public void duringSetup(DuringSetupAccess access) {
-        ImageSingletons.add(PthreadVMLockSupport.class, new PthreadVMLockSupport());
-        access.registerObjectReplacer(mutexReplacer);
-        access.registerObjectReplacer(conditionReplacer);
+    @Platforms(Platform.HOSTED_ONLY.class)
+    protected VMCondition replaceVMCondition(VMCondition source) {
+        return new PthreadVMCondition((PthreadVMMutex) mutexReplacer.apply(source.getMutex()), source.getConditionName());
     }
 
-    @Override
-    public void beforeCompilation(BeforeCompilationAccess access) {
-        ObjectLayout layout = ConfigurationValues.getObjectLayout();
-        int nextIndex = 0;
-
-        PthreadVMMutex[] mutexes = mutexReplacer.getReplacements().toArray(new PthreadVMMutex[0]);
-        int mutexSize = NumUtil.roundUp(SizeOf.get(Pthread.pthread_mutex_t.class), 8);
-        for (PthreadVMMutex mutex : mutexes) {
-            mutex.structOffset = WordFactory.unsigned(layout.getArrayElementOffset(JavaKind.Byte, nextIndex));
-            nextIndex += mutexSize;
-        }
-
-        PthreadVMCondition[] conditions = conditionReplacer.getReplacements().toArray(new PthreadVMCondition[0]);
-        int conditionSize = NumUtil.roundUp(SizeOf.get(Pthread.pthread_cond_t.class), 8);
-        for (PthreadVMCondition condition : conditions) {
-            condition.structOffset = WordFactory.unsigned(layout.getArrayElementOffset(JavaKind.Byte, nextIndex));
-            nextIndex += conditionSize;
-        }
-
-        PthreadVMLockSupport lockSupport = ImageSingletons.lookup(PthreadVMLockSupport.class);
-        lockSupport.mutexes = mutexes;
-        lockSupport.conditions = conditions;
-        lockSupport.pthreadStructs = new byte[nextIndex];
-    }
-}
-
-public final class PthreadVMLockSupport {
-    /** All mutexes, so that we can initialize them at run time when the VM starts. */
-    @UnknownObjectField(types = PthreadVMMutex[].class)//
-    protected PthreadVMMutex[] mutexes;
-
-    /** All conditions, so that we can initialize them at run time when the VM starts. */
-    @UnknownObjectField(types = PthreadVMCondition[].class)//
-    protected PthreadVMCondition[] conditions;
-
-    /**
-     * Raw memory for the pthread lock structures. Since we know that native image objects are never
-     * moved, we can safely hand out pointers into the middle of this array to C code. The offset
-     * into this array is stored in {@link PthreadVMMutex#structOffset} and
-     * {@link PthreadVMCondition#structOffset}.
-     */
-    @UnknownObjectField(types = byte[].class)//
-    protected byte[] pthreadStructs;
-
-    /**
-     * Must be called once early during startup, before any mutex or condition is used.
-     */
-    @Uninterruptible(reason = "Called from uninterruptible code. Too early for safepoints.")
-    public static boolean initialize() {
-        for (PthreadVMMutex mutex : ImageSingletons.lookup(PthreadVMLockSupport.class).mutexes) {
-            if (Pthread.pthread_mutex_init(mutex.getStructPointer(), WordFactory.nullPointer()) != 0) {
-                return false;
-            }
-        }
-        for (PthreadVMCondition condition : ImageSingletons.lookup(PthreadVMLockSupport.class).conditions) {
-            if (PthreadConditionUtils.initCondition(condition.getStructPointer()) != 0) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    @Uninterruptible(reason = "Called from uninterruptible code.", calleeMustBe = false)
-    protected static void checkResult(int result, String functionName) {
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public static void checkResult(int result, String functionName) {
         if (result != 0) {
-            /*
-             * Functions are called very early and late during our execution, so there is not much
-             * we can do when they fail.
-             */
-            VMThreads.StatusSupport.setStatusIgnoreSafepoints();
-            Log.log().string(functionName).string(" returned ").signed(result).newline();
-            ImageSingletons.lookup(LogHandler.class).fatalError();
+            fatalError(result, functionName);
         }
+    }
+
+    @Uninterruptible(reason = "Error handling is interruptible.", calleeMustBe = false)
+    @RestrictHeapAccess(access = NO_ALLOCATION, reason = "Must not allocate in fatal error handling.")
+    private static void fatalError(int result, String functionName) {
+        /*
+         * Functions are called very early and late during our execution, so there is not much we
+         * can do when they fail.
+         */
+        SafepointBehavior.preventSafepoints();
+        StackOverflowCheck.singleton().disableStackOverflowChecksForFatalError();
+
+        Log.log().string(functionName).string(" returned ").signed(result).newline();
+        ImageSingletons.lookup(LogHandler.class).fatalError();
     }
 }
 
 final class PthreadVMMutex extends VMMutex {
 
-    protected UnsignedWord structOffset;
+    private final CIsolateData<Pthread.pthread_mutex_t> structPointer;
 
     @Platforms(Platform.HOSTED_ONLY.class)
-    protected PthreadVMMutex() {
+    PthreadVMMutex(String name) {
+        super(name);
+        structPointer = CIsolateDataFactory.createStruct("pthreadMutex_" + name, Pthread.pthread_mutex_t.class);
     }
 
-    @Uninterruptible(reason = "Called from uninterruptible code.")
-    protected Pthread.pthread_mutex_t getStructPointer() {
-        return (Pthread.pthread_mutex_t) Word.objectToUntrackedPointer(ImageSingletons.lookup(PthreadVMLockSupport.class).pthreadStructs).add(structOffset);
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    Pthread.pthread_mutex_t getStructPointer() {
+        return structPointer.get();
+    }
+
+    @Override
+    @Uninterruptible(reason = "Too early for safepoints.")
+    public int initialize() {
+        return Pthread.pthread_mutex_init(getStructPointer(), Word.nullPointer());
+    }
+
+    @Override
+    @Uninterruptible(reason = "The isolate teardown is in progress.")
+    public int destroy() {
+        return Pthread.pthread_mutex_destroy(getStructPointer());
     }
 
     @Override
     public VMMutex lock() {
+        assert !isOwner() : "Recursive locking is not supported";
         PthreadVMLockSupport.checkResult(Pthread.pthread_mutex_lock(getStructPointer()), "pthread_mutex_lock");
-        locked = true;
+        setOwnerToCurrentThread();
         return this;
     }
 
     @Override
-    @Uninterruptible(reason = "Called from uninterruptible code.")
-    public VMMutex lockNoTransition() {
+    @Uninterruptible(reason = "Whole critical section needs to be uninterruptible.", callerMustBe = true)
+    public void lockNoTransition() {
+        assert !isOwner() : "Recursive locking is not supported";
         PthreadVMLockSupport.checkResult(Pthread.pthread_mutex_lock_no_transition(getStructPointer()), "pthread_mutex_lock");
-        locked = true;
-        return this;
+        setOwnerToCurrentThread();
     }
 
     @Override
-    @Uninterruptible(reason = "Called from uninterruptible code.")
+    @Uninterruptible(reason = "Whole critical section needs to be uninterruptible.", callerMustBe = true)
+    public void lockNoTransitionUnspecifiedOwner() {
+        PthreadVMLockSupport.checkResult(Pthread.pthread_mutex_lock_no_transition(getStructPointer()), "pthread_mutex_lock");
+        setOwnerToUnspecified();
+    }
+
+    @Override
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     public void unlock() {
-        locked = false;
+        clearCurrentThreadOwner();
         PthreadVMLockSupport.checkResult(Pthread.pthread_mutex_unlock(getStructPointer()), "pthread_mutex_unlock");
     }
 
     @Override
-    public void unlockWithoutChecks() {
-        locked = false;
-        Pthread.pthread_mutex_unlock(getStructPointer());
+    @Uninterruptible(reason = "Whole critical section needs to be uninterruptible.", callerMustBe = true)
+    public void unlockNoTransitionUnspecifiedOwner() {
+        clearUnspecifiedOwner();
+        PthreadVMLockSupport.checkResult(Pthread.pthread_mutex_unlock(getStructPointer()), "pthread_mutex_unlock");
     }
 }
 
 final class PthreadVMCondition extends VMCondition {
 
-    protected UnsignedWord structOffset;
+    private final CIsolateData<Pthread.pthread_cond_t> structPointer;
 
-    @Platforms(Platform.HOSTED_ONLY.class)
-    protected PthreadVMCondition(PthreadVMMutex mutex) {
-        super(mutex);
+    PthreadVMCondition(PthreadVMMutex mutex, String name) {
+        super(mutex, name);
+        structPointer = CIsolateDataFactory.createStruct("pthreadCondition_" + getName(), Pthread.pthread_cond_t.class);
     }
 
-    @Uninterruptible(reason = "Called from uninterruptible code.")
-    protected Pthread.pthread_cond_t getStructPointer() {
-        return (Pthread.pthread_cond_t) Word.objectToUntrackedPointer(ImageSingletons.lookup(PthreadVMLockSupport.class).pthreadStructs).add(structOffset);
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    Pthread.pthread_cond_t getStructPointer() {
+        return structPointer.get();
+    }
+
+    @Override
+    @Uninterruptible(reason = "Too early for safepoints.")
+    public int initialize() {
+        return PthreadConditionUtils.initConditionWithRelativeTime(getStructPointer());
+    }
+
+    @Override
+    @Uninterruptible(reason = "The isolate teardown is in progress.")
+    public int destroy() {
+        return Pthread.pthread_cond_destroy(getStructPointer());
     }
 
     @Override
     public void block() {
+        mutex.clearCurrentThreadOwner();
         PthreadVMLockSupport.checkResult(Pthread.pthread_cond_wait(getStructPointer(), ((PthreadVMMutex) getMutex()).getStructPointer()), "pthread_cond_wait");
+        mutex.setOwnerToCurrentThread();
     }
 
     @Override
-    @Uninterruptible(reason = "Called from uninterruptible code.")
+    @Uninterruptible(reason = "Should only be called if the thread did an explicit transition to native earlier.", callerMustBe = true)
     public void blockNoTransition() {
+        mutex.clearCurrentThreadOwner();
         PthreadVMLockSupport.checkResult(Pthread.pthread_cond_wait_no_transition(getStructPointer(), ((PthreadVMMutex) getMutex()).getStructPointer()), "pthread_cond_wait");
+        mutex.setOwnerToCurrentThread();
+    }
+
+    @Override
+    @Uninterruptible(reason = "Should only be called if the thread did an explicit transition to native earlier.", callerMustBe = true)
+    public void blockNoTransitionUnspecifiedOwner() {
+        mutex.clearUnspecifiedOwner();
+        PthreadVMLockSupport.checkResult(Pthread.pthread_cond_wait_no_transition(getStructPointer(), ((PthreadVMMutex) getMutex()).getStructPointer()), "pthread_cond_wait");
+        mutex.setOwnerToUnspecified();
     }
 
     @Override
     public long block(long waitNanos) {
-        Time.timespec deadlineTimespec = StackValue.get(Time.timespec.class);
-        PthreadConditionUtils.delayNanosToDeadlineTimespec(waitNanos, deadlineTimespec);
-
-        final int timedwaitResult = Pthread.pthread_cond_timedwait(getStructPointer(), ((PthreadVMMutex) getMutex()).getStructPointer(), deadlineTimespec);
-        /* If the timed wait timed out, then I am done blocking. */
-        if (timedwaitResult == Errno.ETIMEDOUT()) {
+        if (waitNanos <= 0) {
             return 0L;
         }
+
+        long startTime = System.nanoTime();
+        Time.timespec absTime = UnsafeStackValue.get(Time.timespec.class);
+        PthreadConditionUtils.fillTimespec(absTime, waitNanos);
+
+        mutex.clearCurrentThreadOwner();
+        int timedWaitResult = Pthread.pthread_cond_timedwait(getStructPointer(), ((PthreadVMMutex) getMutex()).getStructPointer(), absTime);
+        mutex.setOwnerToCurrentThread();
+
+        /* If the timed wait timed out, then I am done blocking. */
+        if (timedWaitResult == Errno.ETIMEDOUT()) {
+            return 0L;
+        }
+
         /* Check for other errors from the timed wait. */
-        PthreadVMLockSupport.checkResult(timedwaitResult, "pthread_cond_timedwait");
-        return PthreadConditionUtils.deadlineTimespecToDelayNanos(deadlineTimespec);
+        PthreadVMLockSupport.checkResult(timedWaitResult, "PthreadVMLockSupport.block(long): pthread_cond_timedwait");
+        return remainingNanos(waitNanos, startTime);
     }
 
     @Override
-    @Uninterruptible(reason = "Called from uninterruptible code.")
+    @Uninterruptible(reason = "Should only be called if the thread did an explicit transition to native earlier.", callerMustBe = true)
     public long blockNoTransition(long waitNanos) {
-        Time.timespec deadlineTimespec = StackValue.get(Time.timespec.class);
-        PthreadConditionUtils.delayNanosToDeadlineTimespec(waitNanos, deadlineTimespec);
-
-        final int timedwaitResult = Pthread.pthread_cond_timedwait_no_transition(getStructPointer(), ((PthreadVMMutex) getMutex()).getStructPointer(), deadlineTimespec);
-        /* If the timed wait timed out, then I am done blocking. */
-        if (timedwaitResult == Errno.ETIMEDOUT()) {
+        if (waitNanos <= 0) {
             return 0L;
         }
+
+        long startTime = System.nanoTime();
+        Time.timespec absTime = UnsafeStackValue.get(Time.timespec.class);
+        PthreadConditionUtils.fillTimespec(absTime, waitNanos);
+
+        mutex.clearCurrentThreadOwner();
+        int timedWaitResult = Pthread.pthread_cond_timedwait_no_transition(getStructPointer(), ((PthreadVMMutex) getMutex()).getStructPointer(), absTime);
+        mutex.setOwnerToCurrentThread();
+
+        /* If the timed wait timed out, then I am done blocking. */
+        if (timedWaitResult == Errno.ETIMEDOUT()) {
+            return 0L;
+        }
+
         /* Check for other errors from the timed wait. */
-        PthreadVMLockSupport.checkResult(timedwaitResult, "pthread_cond_timedwait");
-        return PthreadConditionUtils.deadlineTimespecToDelayNanos(deadlineTimespec);
+        PthreadVMLockSupport.checkResult(timedWaitResult, "PthreadVMLockSupport.blockNoTransition(long): pthread_cond_timedwait");
+        return remainingNanos(waitNanos, startTime);
+    }
+
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    private static long remainingNanos(long waitNanos, long startNanos) {
+        long actual = System.nanoTime() - startNanos;
+        return UninterruptibleUtils.Math.max(0, waitNanos - actual);
     }
 
     @Override
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     public void signal() {
         PthreadVMLockSupport.checkResult(Pthread.pthread_cond_signal(getStructPointer()), "pthread_cond_signal");
     }
 
     @Override
-    @Uninterruptible(reason = "Called from uninterruptible code.")
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     public void broadcast() {
         PthreadVMLockSupport.checkResult(Pthread.pthread_cond_broadcast(getStructPointer()), "pthread_cond_broadcast");
     }

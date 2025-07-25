@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2014, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -63,31 +63,35 @@ import org.graalvm.nativeimage.c.CContext;
  * enumeration value. This annotation is optional and only needed if an attribute has a non-default
  * value.
  * <p>
- * Note that C enumeration are merely a type-safe way to specify integer constants in C. Therefore,
- * C enumeration values can be imported to Java as a regular {@link CConstant}; and {@link CEnum}
- * can be used to import regular integer C constants as a Java enumeration.
+ * Note that in C, the keyword "enum" is merely a type-safe way to specify integer constants.
+ * Therefore, it is also possible to import C enumeration values as regular {@link CConstant}s into
+ * Java.
+ * <p>
+ * {@link CEnum} can also be used to import multiple (potentially unrelated) regular integer C
+ * constants into a single Java enumeration. However, please note that each C constant will be
+ * converted to the C type that {@link CEnum} specifies.
  * <p>
  * The annotated class, or an outer class that contains the class, must be annotated with
  * {@link CContext}.
  *
- * @since 1.0
+ * @since 19.0
  */
 @Retention(RetentionPolicy.RUNTIME)
 @Target(ElementType.TYPE)
 public @interface CEnum {
 
     /**
-     * Specifies the name of the imported C enum type. If no name is provided, <code>int</code> is
-     * used instead.
+     * Specifies the name of the imported C enum type. If no name is provided, the C data type
+     * <code>int</code> is used instead.
      *
-     * @since 1.0
+     * @since 19.0
      */
     String value() default "";
 
     /**
      * Add the C <code>enum</code> keyword to the name specified in {@link #value()}.
      *
-     * @since 1.0
+     * @since 19.0
      */
     boolean addEnumKeyword() default false;
 }

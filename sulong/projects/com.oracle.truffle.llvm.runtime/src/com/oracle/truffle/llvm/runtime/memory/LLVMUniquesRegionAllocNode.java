@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, Oracle and/or its affiliates.
+ * Copyright (c) 2018, 2021, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -29,37 +29,23 @@
  */
 package com.oracle.truffle.llvm.runtime.memory;
 
-import com.oracle.truffle.api.CompilerDirectives;
-import com.oracle.truffle.api.CompilerDirectives.CompilationFinal;
-import com.oracle.truffle.api.dsl.Cached;
 import com.oracle.truffle.api.dsl.Specialization;
-import com.oracle.truffle.api.frame.FrameSlot;
 import com.oracle.truffle.api.frame.VirtualFrame;
-import com.oracle.truffle.llvm.runtime.memory.LLVMStack.UniquesRegion.UniquesRegionAllocator;
+import com.oracle.truffle.llvm.runtime.nodes.api.LLVMExpressionNode;
 import com.oracle.truffle.llvm.runtime.nodes.api.LLVMNode;
 
 public abstract class LLVMUniquesRegionAllocNode extends LLVMNode {
-    private final UniquesRegionAllocator allocator;
 
-    @CompilationFinal private FrameSlot stackPointer;
+    @Child private LLVMExpressionNode allocation;
 
-    public LLVMUniquesRegionAllocNode(UniquesRegionAllocator allocator) {
-        this.allocator = allocator;
+    public LLVMUniquesRegionAllocNode(LLVMExpressionNode allocation) {
+        this.allocation = allocation;
     }
 
     public abstract void execute(VirtualFrame frame);
 
-    protected FrameSlot getStackPointerSlot() {
-        if (stackPointer == null) {
-            CompilerDirectives.transferToInterpreterAndInvalidate();
-            stackPointer = getRootNode().getFrameDescriptor().findFrameSlot(LLVMStack.FRAME_ID);
-        }
-        return stackPointer;
-    }
-
     @Specialization
-    protected void doOp(VirtualFrame frame, @Cached("getLLVMMemory()") LLVMMemory memory) {
-        allocator.allocate(frame, memory, getStackPointerSlot());
+    protected void doOp(VirtualFrame frame) {
+        frame.setObject(LLVMStack.UNIQUES_REGION_ID, allocation.executeGeneric(frame));
     }
-
 }

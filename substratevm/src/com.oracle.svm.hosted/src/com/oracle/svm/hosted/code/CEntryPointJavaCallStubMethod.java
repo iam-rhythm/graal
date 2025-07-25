@@ -24,20 +24,24 @@
  */
 package com.oracle.svm.hosted.code;
 
-import java.lang.annotation.Annotation;
+import java.lang.reflect.AnnotatedElement;
 import java.util.List;
 
-import org.graalvm.compiler.nodes.ConstantNode;
-import org.graalvm.compiler.nodes.ValueNode;
 import org.graalvm.nativeimage.c.function.CEntryPoint;
 import org.graalvm.nativeimage.c.function.CFunctionPointer;
 
-import com.oracle.graal.pointsto.meta.HostedProviders;
+import com.oracle.graal.pointsto.meta.AnalysisMethod;
+import com.oracle.graal.pointsto.meta.AnalysisType;
 import com.oracle.svm.core.c.BoxedRelocatedPointer;
-import com.oracle.svm.core.util.VMError;
+import com.oracle.svm.core.c.function.CEntryPointOptions;
+import com.oracle.svm.core.thread.VMThreads.StatusSupport;
+import com.oracle.svm.core.util.UserError;
 import com.oracle.svm.hosted.phases.HostedGraphKit;
 
-import jdk.vm.ci.meta.ResolvedJavaField;
+import jdk.graal.compiler.nodes.CallTargetNode;
+import jdk.graal.compiler.nodes.ConstantNode;
+import jdk.graal.compiler.nodes.ValueNode;
+import jdk.graal.compiler.nodes.java.LoadFieldNode;
 import jdk.vm.ci.meta.ResolvedJavaMethod;
 import jdk.vm.ci.meta.ResolvedJavaType;
 
@@ -46,12 +50,13 @@ import jdk.vm.ci.meta.ResolvedJavaType;
  * {@linkplain CEntryPointCallStubMethod native-to-Java stub}.
  */
 public class CEntryPointJavaCallStubMethod extends CCallStubMethod {
+
     private final String name;
     private final ResolvedJavaType declaringClass;
     private final CFunctionPointer target;
 
     CEntryPointJavaCallStubMethod(ResolvedJavaMethod original, String name, ResolvedJavaType declaringClass, CFunctionPointer target) {
-        super(original, true);
+        super(original, StatusSupport.STATUS_IN_NATIVE);
         this.name = name;
         this.declaringClass = declaringClass;
         this.target = target;
@@ -73,33 +78,31 @@ public class CEntryPointJavaCallStubMethod extends CCallStubMethod {
     }
 
     @Override
-    protected ValueNode createTargetAddressNode(HostedGraphKit kit, HostedProviders providers, List<ValueNode> arguments) {
-        try {
-            /*
-             * We currently cannot handle {@link MethodPointer} as a constant in the code, so we use
-             * an indirection with a non-final field load from an object of BoxedRelocatedPointer.
-             */
-            BoxedRelocatedPointer box = new BoxedRelocatedPointer(target);
-            ConstantNode boxNode = kit.createObject(box);
-            ResolvedJavaField field = providers.getMetaAccess().lookupJavaField(BoxedRelocatedPointer.class.getDeclaredField("pointer"));
-            return kit.createLoadField(boxNode, field);
-        } catch (NoSuchFieldException e) {
-            throw VMError.shouldNotReachHere(e);
+    protected void emitCallerEpilogue(HostedGraphKit kit) {
+        CEntryPointOptions options = getOriginal().getAnnotation(CEntryPointOptions.class);
+        if (options != null && options.callerEpilogue() != null && options.callerEpilogue() != CEntryPointOptions.NoCallerEpilogue.class) {
+            AnalysisType epilogue = kit.getMetaAccess().lookupJavaType(options.callerEpilogue());
+            AnalysisMethod[] epilogueMethods = epilogue.getDeclaredMethods(false);
+            UserError.guarantee(epilogueMethods.length == 1 && epilogueMethods[0].isStatic() && epilogueMethods[0].getSignature().getParameterCount(false) == 0,
+                            "Caller epilogue class must declare exactly one static method without parameters: %s -> %s", getOriginal(), epilogue);
+            kit.createInvokeWithExceptionAndUnwind(epilogueMethods[0], CallTargetNode.InvokeKind.Static, kit.getFrameState(), kit.bci());
         }
     }
 
     @Override
-    public Annotation[] getAnnotations() {
-        return getDeclaredAnnotations();
+    protected ValueNode createTargetAddressNode(HostedGraphKit kit, List<ValueNode> arguments) {
+        /*
+         * We currently cannot handle {@link MethodPointer} as a constant in the code, so we use an
+         * indirection with a non-final field load from an object of BoxedRelocatedPointer.
+         */
+        BoxedRelocatedPointer box = CEntryPointCallStubSupport.singleton().getBoxedRelocatedPointer(target);
+        ConstantNode boxNode = kit.createObject(box);
+        LoadFieldNode node = kit.createLoadFieldNode(boxNode, BoxedRelocatedPointer.class, "pointer");
+        return kit.append(node);
     }
 
     @Override
-    public Annotation[] getDeclaredAnnotations() {
-        return new Annotation[0];
-    }
-
-    @Override
-    public <T extends Annotation> T getAnnotation(Class<T> annotationClass) {
+    public AnnotatedElement getAnnotationRoot() {
         return null;
     }
 }

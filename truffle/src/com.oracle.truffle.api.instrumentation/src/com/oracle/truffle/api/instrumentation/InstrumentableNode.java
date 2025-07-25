@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -43,9 +43,9 @@ package com.oracle.truffle.api.instrumentation;
 import java.util.Set;
 
 import com.oracle.truffle.api.CallTarget;
-import com.oracle.truffle.api.TruffleLanguage;
-import com.oracle.truffle.api.TruffleRuntime;
+import com.oracle.truffle.api.CompilerDirectives;
 import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
+import com.oracle.truffle.api.TruffleLanguage;
 import com.oracle.truffle.api.frame.VirtualFrame;
 import com.oracle.truffle.api.instrumentation.InstrumentableNode.WrapperNode;
 import com.oracle.truffle.api.nodes.Node;
@@ -85,12 +85,16 @@ import com.oracle.truffle.api.source.SourceSection;
  * <p>
  * <b>Example minimal implementation of an instrumentable node:</b>
  *
- * {@link com.oracle.truffle.api.instrumentation.InstrumentableNodeSnippets.SimpleNode}
+ * {@snippet file = "com/oracle/truffle/api/instrumentation/InstrumentableNode.java" region =
+ * "com.oracle.truffle.api.instrumentation.InstrumentableNodeSnippets.SimpleNode"}
  *
  * <p>
  * Example for a typical implementation of an instrumentable node with support for source
  * sections:</b>
- * {@link com.oracle.truffle.api.instrumentation.InstrumentableNodeSnippets.RecommendedNode}
+ *
+ * {@snippet file = "com/oracle/truffle/api/instrumentation/InstrumentableNode.java" region =
+ * "com.oracle.truffle.api.instrumentation.InstrumentableNodeSnippets.RecommendedNode"}
+ *
  * <p>
  *
  * @see #isInstrumentable() to decide whether node is instrumentable.
@@ -109,12 +113,11 @@ public interface InstrumentableNode extends NodeInterface {
      * <p>
      * The implementation of this method must ensure that its result is stable after the parent
      * {@link RootNode root node} was wrapped in a {@link CallTarget} using
-     * {@link TruffleRuntime#createCallTarget(RootNode)}. The result is stable if the result of
-     * calling this method remains always the same.
+     * {@link RootNode#getCallTarget()}. The result is stable if the result of calling this method
+     * remains always the same.
      * <p>
      * This method might be called in parallel from multiple threads even if the language is single
-     * threaded. The method may be invoked without a {@link TruffleLanguage#getContextReference()
-     * language context} currently being active.
+     * threaded. The method may be invoked without a language context currently being active.
      *
      * @since 0.33
      */
@@ -130,7 +133,7 @@ public interface InstrumentableNode extends NodeInterface {
      * original node. After the replacement of an instrumentable node with a wrapper we refer to the
      * original node as an instrumented node. Wrappers can be generated automatically using an
      * annotation processor by annotating the class with @{@link GenerateWrapper}. Please note that
-     * if an instrumetnable node subclass has additional execute methods then a new wrapper must be
+     * if an instrumentable node subclass has additional execute methods then a new wrapper must be
      * generated or implemented. Otherwise the {@link Node#replace(Node) replacement} of the
      * instrumentable node with the wrapper will fail if the subtype is used as static type in nodes
      * {@link Child children}.
@@ -150,8 +153,12 @@ public interface InstrumentableNode extends NodeInterface {
      * delegate has just thrown an exception.</li>
      * </ul>
      * <p>
-     * This method is always invoked on an interpreter thread. The method is always invoked with a
-     * {@link TruffleLanguage#getContextReference() language context} currently being active.
+     * This method is always invoked on an interpreter thread. The method may be invoked without a
+     * language context currently being active.
+     * <p>
+     * If {@link #findProbe()} is overriden and never returns a <code>null</code> value, then
+     * {@link #createWrapper(ProbeNode)} does not need to be implemented and may throw an
+     * {@link UnsupportedOperationException} instead.
      *
      * @param probe the {@link ProbeNode probe node} to be adopted and sent execution events by the
      *            wrapper
@@ -159,6 +166,33 @@ public interface InstrumentableNode extends NodeInterface {
      * @since 0.33
      */
     WrapperNode createWrapper(ProbeNode probe);
+
+    /**
+     * Determines how to find a probe given an instrumentable node. Implementing this method allows
+     * to customize probe storage, e.g. if a different strategy should be used other than the
+     * default wrapper node strategy. The default implementation discovers the probe through the
+     * parent wrapper node by calling {@link WrapperNode#getProbeNode()}. A probe can be initialized
+     * lazily on {@link #findProbe()} calls using {@link #createProbe(SourceSection)}. This method
+     * will never be invoked if {@link #isInstrumentable()} returns <code>false</code>.
+     * <p>
+     * If this method returns <code>null</code> then the default wrapper node strategy will be
+     * applied for this instrumentable node. A custom probe storage strategy must therefore ensure
+     * that this method never returns <code>null</code>.
+     * <p>
+     * The probe must be stored/read from a reference with volatile semantics. This method must
+     * produce a {@link CompilerDirectives#isPartialEvaluationConstant(Object) partial evaluation
+     * constant} if the receiver is a PE constant.
+     *
+     * @see #createProbe(SourceSection)
+     * @since 24.2
+     */
+    default ProbeNode findProbe() {
+        Node parent = ((Node) this).getParent();
+        if (parent instanceof WrapperNode w) {
+            return w.getProbeNode();
+        }
+        return null;
+    }
 
     /**
      * Returns <code>true</code> if this node should be considered tagged by a given tag else
@@ -173,23 +207,24 @@ public interface InstrumentableNode extends NodeInterface {
      * implement tagging using Java types is by overriding the {@link #hasTag(Class)} method. This
      * example shows how to tag a node subclass and all its subclasses as statement:
      *
-     * {@link com.oracle.truffle.api.instrumentation.InstrumentableNodeSnippets.StatementNode}
+     * {@snippet file = "com/oracle/truffle/api/instrumentation/InstrumentableNode.java" region =
+     * "com.oracle.truffle.api.instrumentation.InstrumentableNodeSnippets.StatementNode"}
      *
      * <p>
      * Often it is impossible to just rely on the node's Java type to implement tagging. This
      * example shows how to use local state to implement tagging for a node.
      *
-     * {@link com.oracle.truffle.api.instrumentation.InstrumentableNodeSnippets.HaltNode}
+     * {@snippet file = "com/oracle/truffle/api/instrumentation/InstrumentableNode.java" region =
+     * "com.oracle.truffle.api.instrumentation.InstrumentableNodeSnippets.HaltNode"}
      *
      * <p>
      * The implementation of hasTag method must ensure that its result is stable after the parent
      * {@link RootNode root node} was wrapped in a {@link CallTarget} using
-     * {@link TruffleRuntime#createCallTarget(RootNode)}. The result is stable if the result of
-     * calling this method for a particular tag remains always the same.
+     * {@link RootNode#getCallTarget()}. The result is stable if the result of calling this method
+     * for a particular tag remains always the same.
      * <p>
      * This method might be called in parallel from multiple threads even if the language is single
-     * threaded. The method may be invoked without a {@link TruffleLanguage#getContextReference()
-     * language context} currently being active.
+     * threaded. The method may be invoked without a language context currently being active.
      *
      * @param tag the class {@link com.oracle.truffle.api.instrumentation.ProvidedTags provided} by
      *            the {@link TruffleLanguage language}
@@ -204,8 +239,8 @@ public interface InstrumentableNode extends NodeInterface {
     /**
      * Returns an interop capable object that contains all keys and values of attributes associated
      * with this node. The returned object must return <code>true</code> in response to the
-     * {@link com.oracle.truffle.api.interop.Message#HAS_KEYS has keys} message. If
-     * <code>null</code> is returned then an empty tag object without any readable keys will be
+     * {@link com.oracle.truffle.api.interop.InteropLibrary#hasMembers(Object) has members} message.
+     * If <code>null</code> is returned then an empty tag object without any readable keys will be
      * assumed. Multiple calls to {@link #getNodeObject()} for a particular node may return the same
      * or objects with different identity. The returned object must not support any write operation.
      * The returned object must not support execution or instantiation and must not have a size.
@@ -227,9 +262,9 @@ public interface InstrumentableNode extends NodeInterface {
      * a TruffleObject and return this instance.
      * <p>
      * This method might be called in parallel from multiple threads even if the language is single
-     * threaded. The method may be invoked without a {@link TruffleLanguage#getContextReference()
-     * language context} currently being active. The {@link Node#getLock() AST lock} is held while
-     * {@link #getNodeObject()} object is invoked. There is no lock held when the object is read.
+     * threaded. The method may be invoked without a language context currently being active. The
+     * {@link Node#getLock() AST lock} is held while {@link #getNodeObject()} object is invoked.
+     * There is no lock held when the object is read.
      *
      * @return the node object as TruffleObject or <code>null</code> if no node object properties
      *         are available for this instrumented node
@@ -255,18 +290,29 @@ public interface InstrumentableNode extends NodeInterface {
      * relies on the stability of materialized nodes. Use {@link Node#notifyInserted(Node)} when you
      * need to change the structure of instrumentable nodes.
      * <p>
+     * Node must return itself from this method when it has already seen all the materializedTags
+     * specified as an argument, i.e., not only if the set of tags is exactly the same as before,
+     * but also if the current set of tags is completely contained in the union of all the sets of
+     * tags specified in all the calls of this method that led to creation of this materialized
+     * node.
+     * <p>
+     * If the node returns a new node from this method, the subtree rooted at the new node must be
+     * completely unadopted, i.e., all nodes it contains must not have existed in the original AST.
+     * Also, the new subtree must be completely materialized, so that no new materializations occur
+     * when the instrumentation framework instruments the new subtree during the current traversal.
+     * <p>
      * The AST lock is acquired while this method is invoked. Therefore it is not allowed to run
      * guest language code while this method is invoked. This method might be called in parallel
      * from multiple threads even if the language is single threaded. The method may be invoked
-     * without a {@link TruffleLanguage#getContextReference() language context} currently being
-     * active.
+     * without a language context currently being active. Language reference is always available.
      * <p>
      * In the example below, we show how the <code>IncrementNode</code> with a
      * <code>ConstantNode</code> child is optimized into a <code>ConstantIncrementNode</code> and
      * how it can implement <code>materializeSyntaxNodes</code> to restore the syntactic structure
      * of the AST:
      * <p>
-     * {@link com.oracle.truffle.api.instrumentation.InstrumentableNodeSnippets.ExpressionNode}
+     * {@snippet file = "com/oracle/truffle/api/instrumentation/InstrumentableNode.java" region =
+     * "com.oracle.truffle.api.instrumentation.InstrumentableNodeSnippets.ExpressionNode"}
      *
      * @param materializedTags a set of tags that requested to be materialized
      * @since 0.33
@@ -309,8 +355,6 @@ public interface InstrumentableNode extends NodeInterface {
      * <li>Otherwise, this node's source section contains the character index. Use following steps
      * to find the nearest tagged node in this node's hierarchy:
      * <ol type="a">
-     * <li>Find the nearest tagged parent node, remember it's existence as an
-     * <code>outerCandidate</code> boolean.</li>
      * <li>Traverse the node children in declaration order (AST breadth-first order). For every
      * child do:
      * <ol>
@@ -318,41 +362,26 @@ public interface InstrumentableNode extends NodeInterface {
      * <li>When the child does not have a source section assigned, ignore it.</li>
      * <li>When the <code>sourceCharIndex</code> is inside the child's source section, find if it's
      * tagged with one of the tags (store as <code>isTagged</code>) and repeat recursively from
-     * <b>3.b.</b> using this child as the node and passing the current
-     * <code>outerCandidate || isTagged</code> as the new <code>outerCandidate</code> value.</li>
-     * <li>When the child is above the character index, remember the lowest such child (store in
-     * <code>lowestHigherNode</code> and <code>lowestHigherTaggedNode</code> if the child is
-     * tagged).</li>
-     * <li>When the child is below the character index, remember the highest such child (store in
-     * <code>highestLowerNode</code> and <code>highestLowerTaggedNode</code> if the child is
-     * tagged).</li>
+     * <b>3.a.</b> using this child as the node.</li>
+     * <li>When the child is above the character index, remember a sorted list of such children up
+     * to the lowest tagged child (store in <code>higherNodes</code> list).</li>
+     * <li>When the child is below the character index, remember a sorted list of such children down
+     * to the highest tagged child (store in <code>lowerNodes</code> list).</li>
      * </ol>
      * </li>
-     * <li>If a tagged child node was found in <b>3.b</b> with source section matching the
+     * <li>If a tagged child node was found in <b>3.a</b> with source section matching the
      * <code>sourceCharIndex</code>, return it.</li>
-     * <li>Otherwise, we check the lowest/highest nodes:
+     * <li>Otherwise, we check the list of lower/higher nodes:
      * <ol>
-     * <li>Prefer the node after the character index, unless we're in a nested recursive call, in
-     * which case prefer the first instrumentable node in the current scope. The motivation is to
-     * prefer the next tagged code location, but when the next node is not tagged, we search for the
-     * first tagged child in the next node.</li>
-     * <li>Create a <code>primaryNode</code> alias to the <code>lowestHigherNode</code> if not in a
-     * recursive call and to <code>highestLowerNode</code> otherwise.</li>
-     * <li>Create a <code>secondaryNode</code> alias to the <code>highestLowerNode</code> if not in
-     * a recursive call and to <code>lowestHigherNode</code> otherwise.</li>
-     * <li>Create an analogous aliases for highest/lowest tagged nodes.</li>
-     * <li>If <code>primaryNode</code> is tagged, return it.</li>
-     * <li>Otherwise, if <code>secondaryNode</code> is tagged, return it.</li>
-     * <li>If <code>outerCandidate</code> is false, repeat <b>3.b.</b> on <code>primaryNode</code>
-     * and if it provides a tagged child, return it, otherwise return <code>primaryTaggedNode</code>
-     * if it's not <code>null</code>.</li>
-     * <li>Otherwise, if <code>outerCandidate</code> is false, repeat <b>3.b.</b> on
-     * <code>secondaryNode</code> and if it provides a tagged child, return it, otherwise return
-     * <code>secondaryTaggedNode</code> if it's not <code>null</code>.</li>
+     * <li>Prefer the node after the character index.</li>
+     * <li>Traverse <code>higherNodes</code> in ascending order. When the node is tagged, return it,
+     * when not, repeat with that node from <b>3.a.</b></li>
+     * <li>If no tagged node was found, traverse <code>lowerNodes</code> in descending order. When
+     * the node is tagged, return it, when not, repeat with that node from <b>3.a.</b></li>
      * <li>When nothing was found in the steps above, return <code>null</code>.</li>
      * </ol>
      * </li>
-     * <li>If <b>d.</b> didn't provide a tagged node, apply this algorithm recursively to a parent
+     * <li>If <b>c.</b> didn't provide a tagged node, apply this algorithm recursively to a parent
      * of this node, if exists. If you encounter the nearest tagged parent node found in <b>3.a</b>,
      * return it. Otherwise, return a tagged child found in the steps above, if any.</li>
      * </ol>
@@ -365,6 +394,7 @@ public interface InstrumentableNode extends NodeInterface {
      *            this set
      * @return the nearest instrumentable node according to the execution flow and tagged with some
      *         of the tags, or <code>null</code> when none was found
+     * @see #findNearestNodeAt(int, int, Set)
      * @since 0.33
      */
     default Node findNearestNodeAt(int sourceCharIndex, Set<Class<? extends Tag>> tags) {
@@ -372,23 +402,76 @@ public interface InstrumentableNode extends NodeInterface {
     }
 
     /**
-     * Nodes that the instrumentation framework inserts into guest language ASTs (between
-     * {@link Instrumentable} guest language nodes and their parents) for the purpose of interposing
-     * on execution events and reporting them via the instrumentation framework.
+     * Find the nearest {@link Node node} to the given source line and column position, according to
+     * the guest language control flow, that is tagged with some of the given tags.
+     * <p>
+     * Behaves in the same way as {@link #findNearestNodeAt(int, Set)} but uses line/column as the
+     * position specification instead of a character index.
      *
-     * @see #createWrapper(Node, ProbeNode)
+     * @param line 1-based line number
+     * @param column 1-based column number, or less than one when the column is unknown
+     * @param tags a set of tags, the nearest node needs to be tagged with at least one tag from
+     *            this set
+     * @return the nearest instrumentable node according to the execution flow and tagged with some
+     *         of the tags, or <code>null</code> when none was found
+     * @see #findNearestNodeAt(int, Set)
+     * @since 23.0
+     */
+    default Node findNearestNodeAt(int line, int column, Set<Class<? extends Tag>> tags) {
+        if (line < 1) {
+            throw new IllegalArgumentException("A 1-based line needs to be specified, was " + line);
+        }
+        return DefaultNearestNodeSearch.findNearestNodeAt(line, column, (Node) this, tags);
+    }
+
+    /**
+     * Find the first {@link #isInstrumentable() instrumentable} node on it's parent chain. If the
+     * provided node is instrumentable itself, it is returned. If not, the first parent node that is
+     * instrumentable is returned, if any.
+     *
+     * @param node a Node
+     * @return the first instrumentable node, or <code>null</code> when no instrumentable parent
+     *         exists.
+     * @since 20.3
+     */
+    static Node findInstrumentableParent(Node node) {
+        Node inode = node;
+        while (inode != null && (inode instanceof WrapperNode || !(inode instanceof InstrumentableNode && ((InstrumentableNode) inode).isInstrumentable()))) {
+            inode = inode.getParent();
+        }
+        assert inode == null || inode instanceof InstrumentableNode && ((InstrumentableNode) inode).isInstrumentable() : inode;
+        assert !(inode instanceof WrapperNode) : inode;
+        return inode;
+    }
+
+    /**
+     * Method allows to create an eager probe node given an instrumentable node. This is useful to
+     * implement custom probe storage by implementing {@link #findProbe()}.
+     *
+     * @param sourceSection the eager materialized source section for this probe.
+     * @since 24.2
+     */
+    default ProbeNode createProbe(SourceSection sourceSection) {
+        return new ProbeNode(this, sourceSection);
+    }
+
+    /**
+     * Nodes that the instrumentation framework inserts into guest language ASTs (between
+     * {@link InstrumentableNode instrumentable} guest language nodes and their parents) for the
+     * purpose of interposing on execution events and reporting them via the instrumentation
+     * framework.
+     *
+     * @see #createWrapper(ProbeNode)
      * @since 0.33
      */
-    @SuppressWarnings("deprecation")
-    public interface WrapperNode extends NodeInterface, InstrumentableFactory.WrapperNode {
+    public interface WrapperNode extends NodeInterface {
 
         /**
          * The {@link InstrumentableNode instrumentable} guest language node, adopted as a child,
          * whose execution events the wrapper reports to the instrumentation framework.
          * <p>
          * This method might be called in parallel from multiple threads. The method may be invoked
-         * without a {@link TruffleLanguage#getContextReference() language context} currently being
-         * active.
+         * without a language context currently being active.
          *
          * @since 0.33
          */
@@ -399,8 +482,7 @@ public interface InstrumentableNode extends NodeInterface {
          * guest language <em>delegate</em> node.
          * <p>
          * This method might be called in parallel from multiple threads. The method may be invoked
-         * without a {@link TruffleLanguage#getContextReference() language context} currently being
-         * active.
+         * without a language context currently being active.
          *
          * @since 0.33
          */
@@ -410,6 +492,7 @@ public interface InstrumentableNode extends NodeInterface {
 
 }
 
+// @formatter:off // @replace regex='.*' replacement=''
 class InstrumentableNodeSnippets {
 
     static class SimpleNodeWrapper implements WrapperNode {
@@ -427,13 +510,14 @@ class InstrumentableNodeSnippets {
         }
     }
 
-    // BEGIN: com.oracle.truffle.api.instrumentation.InstrumentableNodeSnippets.SimpleNode
+    // @start region="com.oracle.truffle.api.instrumentation.InstrumentableNodeSnippets.SimpleNode"
     @GenerateWrapper
-    abstract class SimpleNode extends Node implements InstrumentableNode {
+    abstract static class SimpleNode extends Node
+                    implements InstrumentableNode {
 
         public abstract Object execute(VirtualFrame frame);
 
-        public final boolean isInstrumentable() {
+        public boolean isInstrumentable() {
             return true;
         }
 
@@ -442,7 +526,7 @@ class InstrumentableNodeSnippets {
             return new SimpleNodeWrapper(this, probe);
         }
     }
-    // END: com.oracle.truffle.api.instrumentation.InstrumentableNodeSnippets.SimpleNode
+    // @end region="com.oracle.truffle.api.instrumentation.InstrumentableNodeSnippets.SimpleNode"
 
     static class RecommendedNodeWrapper implements WrapperNode {
 
@@ -459,9 +543,10 @@ class InstrumentableNodeSnippets {
         }
     }
 
-    // BEGIN: com.oracle.truffle.api.instrumentation.InstrumentableNodeSnippets.RecommendedNode
+    // @start region="com.oracle.truffle.api.instrumentation.InstrumentableNodeSnippets.RecommendedNode"
     @GenerateWrapper
-    abstract class RecommendedNode extends Node implements InstrumentableNode {
+    abstract static class RecommendedNode extends Node
+                    implements InstrumentableNode {
 
         private static final int NO_SOURCE = -1;
 
@@ -503,19 +588,21 @@ class InstrumentableNodeSnippets {
             return new RecommendedNodeWrapper(this, probe);
         }
     }
-    // END: com.oracle.truffle.api.instrumentation.InstrumentableNodeSnippets.RecommendedNode
+    // @end region="com.oracle.truffle.api.instrumentation.InstrumentableNodeSnippets.RecommendedNode"
 
     abstract static class StatementNodeWrapper implements WrapperNode {
 
         @SuppressWarnings("unused")
-        static StatementNodeWrapper create(StatementNode statementNode, ProbeNode probe) {
+        static StatementNodeWrapper create(StatementNode statementNode,
+                        ProbeNode probe) {
             return null;
         }
     }
 
-    // BEGIN: com.oracle.truffle.api.instrumentation.InstrumentableNodeSnippets.StatementNode
+    // @start region="com.oracle.truffle.api.instrumentation.InstrumentableNodeSnippets.StatementNode"
     @GenerateWrapper
-    abstract class StatementNode extends SimpleNode implements InstrumentableNode {
+    abstract static class StatementNode extends SimpleNode
+                    implements InstrumentableNode {
 
         @Override
         public final Object execute(VirtualFrame frame) {
@@ -537,7 +624,7 @@ class InstrumentableNodeSnippets {
             return false;
         }
     }
-    // END: com.oracle.truffle.api.instrumentation.InstrumentableNodeSnippets.StatementNode
+    // @end region="com.oracle.truffle.api.instrumentation.InstrumentableNodeSnippets.StatementNode"
 
     private static final class Debugger {
         static class HaltTag extends Tag {
@@ -545,9 +632,8 @@ class InstrumentableNodeSnippets {
     }
 
     @SuppressWarnings("unused")
-    class HaltNodeWrapper implements WrapperNode {
+    static class HaltNodeWrapper implements WrapperNode {
         HaltNodeWrapper(Node node, ProbeNode probe) {
-
         }
 
         public Node getDelegateNode() {
@@ -559,13 +645,19 @@ class InstrumentableNodeSnippets {
         }
     }
 
-    // BEGIN: com.oracle.truffle.api.instrumentation.InstrumentableNodeSnippets.HaltNode
+    @SuppressWarnings("unused")
+    // @start region="com.oracle.truffle.api.instrumentation.InstrumentableNodeSnippets.HaltNode"
     @GenerateWrapper
-    class HaltNode extends Node implements InstrumentableNode {
+    static class HaltNode extends Node implements InstrumentableNode {
         private boolean isDebuggerHalt;
 
         public void setDebuggerHalt(boolean isDebuggerHalt) {
             this.isDebuggerHalt = isDebuggerHalt;
+        }
+
+        public Object execute(VirtualFrame frame) {
+            // does nothing;
+            return null;
         }
 
         public boolean isInstrumentable() {
@@ -584,10 +676,10 @@ class InstrumentableNodeSnippets {
         }
 
     }
-    // END: com.oracle.truffle.api.instrumentation.InstrumentableNodeSnippets.HaltNode
 
+    // @end region="com.oracle.truffle.api.instrumentation.InstrumentableNodeSnippets.HaltNode"
     @SuppressWarnings("unused")
-    class ExpressionNodeWrapper implements WrapperNode {
+    static class ExpressionNodeWrapper implements WrapperNode {
         ExpressionNodeWrapper(Node node, ProbeNode probe) {
         }
 
@@ -600,9 +692,10 @@ class InstrumentableNodeSnippets {
         }
     }
 
-    // BEGIN: com.oracle.truffle.api.instrumentation.InstrumentableNodeSnippets.ExpressionNode
+    // @start region="com.oracle.truffle.api.instrumentation.InstrumentableNodeSnippets.ExpressionNode"
     @GenerateWrapper
-    abstract class ExpressionNode extends Node implements InstrumentableNode {
+    abstract static class ExpressionNode extends Node
+                    implements InstrumentableNode {
         abstract int execute(VirtualFrame frame);
 
         public boolean isInstrumentable() {
@@ -671,5 +764,5 @@ class InstrumentableNodeSnippets {
             return child.execute(frame) + 1;
         }
     }
-    // END: com.oracle.truffle.api.instrumentation.InstrumentableNodeSnippets.ExpressionNode
+    // @end region="com.oracle.truffle.api.instrumentation.InstrumentableNodeSnippets.ExpressionNode"
 }

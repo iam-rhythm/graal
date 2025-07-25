@@ -24,43 +24,47 @@
  */
 package com.oracle.graal.pointsto.flow;
 
-import org.graalvm.compiler.nodes.ValueNode;
-import com.oracle.graal.pointsto.BigBang;
+import com.oracle.graal.pointsto.PointsToAnalysis;
 import com.oracle.graal.pointsto.meta.AnalysisType;
 import com.oracle.graal.pointsto.typestate.TypeState;
 
-public class NullCheckTypeFlow extends TypeFlow<ValueNode> {
+import jdk.vm.ci.code.BytecodePosition;
+
+public class NullCheckTypeFlow extends TypeFlow<BytecodePosition> {
 
     /** If true, lets anything but null pass through. If false only null passes through. */
-    private final boolean filterNull;
+    private final boolean blockNull;
 
-    public NullCheckTypeFlow(ValueNode node, AnalysisType inputType, boolean filterNull) {
+    public NullCheckTypeFlow(BytecodePosition position, AnalysisType inputType, boolean blockNull) {
         /*
          * OffsetLoadTypeFlow reflects the state of the receiver array or unsafe read object. Null
          * check type flow filters based on the values that can be written to the object.
          */
-        super(node, inputType);
-        this.filterNull = filterNull;
+        super(position, inputType);
+        this.blockNull = blockNull;
     }
 
     public NullCheckTypeFlow(MethodFlowsGraph methodFlows, NullCheckTypeFlow original) {
         super(original, methodFlows);
-        this.filterNull = original.filterNull;
+        this.blockNull = original.blockNull;
     }
 
     @Override
-    public TypeFlow<ValueNode> copy(BigBang bb, MethodFlowsGraph methodFlows) {
+    public TypeFlow<BytecodePosition> copy(PointsToAnalysis bb, MethodFlowsGraph methodFlows) {
         return new NullCheckTypeFlow(methodFlows, this);
     }
 
     /** If true, lets anything but null pass through. If false only null passes through. */
-    public boolean isFilterNull() {
-        return filterNull;
+    public boolean isBlockingNull() {
+        return blockNull;
     }
 
+    /**
+     * Filters the incoming type state by performing a null check.
+     */
     @Override
-    public TypeState filter(BigBang bb, TypeState newState) {
-        if (filterNull) {
+    protected TypeState processInputState(PointsToAnalysis bb, TypeState newState) {
+        if (blockNull) {
             return newState.forNonNull(bb);
         } else if (newState.canBeNull()) {
             return TypeState.forNull();
@@ -70,14 +74,8 @@ public class NullCheckTypeFlow extends TypeFlow<ValueNode> {
     }
 
     @Override
-    public boolean addState(BigBang bb, TypeState add) {
-        assert this.isClone();
-        return super.addState(bb, add);
-    }
-
-    @Override
     public String toString() {
-        return "NullCheckTypeFlow<" + (getDeclaredType() != null ? getDeclaredType().toJavaName(false) : "null") + " : " + getState() + ">";
+        return "NullCheckTypeFlow<" + (getDeclaredType() != null ? getDeclaredType().toJavaName(false) : "null") + " : " + getStateDescription() + ">";
     }
 
 }

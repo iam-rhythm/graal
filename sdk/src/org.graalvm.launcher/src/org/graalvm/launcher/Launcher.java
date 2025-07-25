@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,17 +40,19 @@
  */
 package org.graalvm.launcher;
 
-import static java.lang.Integer.max;
 import static java.nio.file.StandardOpenOption.APPEND;
 import static java.nio.file.StandardOpenOption.CREATE;
 import static java.nio.file.StandardOpenOption.CREATE_NEW;
 import static java.nio.file.StandardOpenOption.WRITE;
 
 import java.io.BufferedOutputStream;
+import java.io.Console;
 import java.io.File;
 import java.io.IOException;
 import java.io.OutputStream;
-import java.lang.ref.WeakReference;
+import java.io.PrintStream;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.nio.channels.FileChannel;
 import java.nio.channels.OverlappingFileLockException;
 import java.nio.file.AccessDeniedException;
@@ -60,11 +62,9 @@ import java.nio.file.LinkOption;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.AbstractMap;
 import java.util.ArrayList;
+import java.util.BitSet;
 import java.util.Collections;
-import java.util.Comparator;
-import java.util.EnumSet;
 import java.util.Formatter;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -77,28 +77,32 @@ import java.util.SortedMap;
 import java.util.TreeMap;
 import java.util.logging.Level;
 
+import org.graalvm.collections.Pair;
+import org.graalvm.home.HomeFinder;
+import org.graalvm.nativeimage.ImageInfo;
+import org.graalvm.nativeimage.ProcessProperties;
 import org.graalvm.nativeimage.RuntimeOptions;
-import org.graalvm.nativeimage.RuntimeOptions.OptionClass;
 import org.graalvm.nativeimage.VMRuntime;
-import org.graalvm.nativeimage.c.type.CTypeConversion;
 import org.graalvm.options.OptionCategory;
 import org.graalvm.options.OptionDescriptor;
-import org.graalvm.options.OptionDescriptors;
 import org.graalvm.options.OptionStability;
-import org.graalvm.options.OptionType;
-import org.graalvm.polyglot.Engine;
-import org.graalvm.polyglot.Instrument;
-import org.graalvm.polyglot.Language;
-import org.graalvm.polyglot.PolyglotException;
+import org.graalvm.shadowed.org.jline.terminal.Terminal;
+import org.graalvm.shadowed.org.jline.terminal.TerminalBuilder;
 
 public abstract class Launcher {
     private static final boolean STATIC_VERBOSE = Boolean.getBoolean("org.graalvm.launcher.verbose");
+    private static final boolean SHELL_SCRIPT_LAUNCHER = Boolean.getBoolean("org.graalvm.launcher.shell");
+
+    /**
+     * Default option description indentation.
+     */
+    public static final int LAUNCHER_OPTIONS_INDENT = 45;
+
     static final boolean IS_AOT = Boolean.getBoolean("com.oracle.graalvm.isaot");
+    @Deprecated(since = "22.2", forRemoval = true) private static final String HELP_INTERNAL = "--help:internal";
+    @Deprecated(since = "22.2", forRemoval = true) private static final String HELP_EXPERT = "--help:expert";
 
-    // Temporary to help languages transition, see GR-13740
-    private static final boolean CHECK_EXPERIMENTAL_OPTIONS = Boolean.parseBoolean(System.getenv("GRAALVM_CHECK_EXPERIMENTAL_OPTIONS"));
-
-    private Engine tempEngine;
+    private static final String EXECUTABLE_NAME_PROPERTY = "org.graalvm.launcher.executablename";
 
     public enum VMType {
         Native,
@@ -107,17 +111,30 @@ public abstract class Launcher {
 
     final Native nativeAccess;
     private final boolean verbose;
+    private PrintStream out = System.out;
+    private PrintStream err = System.err;
 
-    private boolean help;
-    private boolean helpInternal;
-    private boolean helpExpert;
-    private boolean helpTools;
-    private boolean helpLanguages;
-    private boolean seenPolyglot;
-    private boolean experimentalOptions = false;
+    String helpArg = null;
+    boolean helpInternal;
+    boolean helpPrinted;
+
+    /**
+     * Path to the desired log file, or {@code null} if no log redirection is required.
+     */
     private Path logFile;
 
-    private VersionAction versionAction = VersionAction.None;
+    /**
+     * Number of spaces reserved for the options column. Can be set separately for each option
+     * block.
+     */
+    private int optionIndent = LAUNCHER_OPTIONS_INDENT;
+
+    /**
+     * Accumulates help categories and their relevant options.
+     *
+     * @see #printOtherHelpCategory
+     */
+    private List<String> kindAndCategory = new ArrayList<>();
 
     protected enum VersionAction {
         None,
@@ -125,8 +142,8 @@ public abstract class Launcher {
         PrintAndContinue
     }
 
-    Launcher() {
-        verbose = STATIC_VERBOSE || Boolean.valueOf(System.getenv("VERBOSE_GRAALVM_LAUNCHERS"));
+    protected Launcher() {
+        verbose = STATIC_VERBOSE || Boolean.parseBoolean(System.getenv("VERBOSE_GRAALVM_LAUNCHERS"));
         if (IS_AOT) {
             nativeAccess = new Native();
         } else {
@@ -134,32 +151,55 @@ public abstract class Launcher {
         }
     }
 
-    final boolean isPolyglot() {
-        return seenPolyglot;
-    }
-
-    final void setPolyglot(boolean polyglot) {
-        seenPolyglot = polyglot;
-    }
-
-    final boolean allowExperimentalOptions() {
-        return experimentalOptions;
-    }
-
-    final Path getLogFile() {
+    /**
+     * Provides the name of the log file, if specified on the command line.
+     *
+     * @return log file Path. {@code null} if unspecified.
+     * @since 20.0
+     */
+    protected final Path getLogFile() {
         return logFile;
     }
 
-    private Engine getTempEngine() {
-        if (tempEngine == null) {
-            tempEngine = Engine.create();
-        }
-        return tempEngine;
+    /**
+     * Uses the defined output to print messages.
+     *
+     * @param ps printStream to use as out
+     * @since 20.0
+     */
+    protected final void setOutput(PrintStream ps) {
+        this.out = ps;
     }
 
-    static void handleAbortException(AbortException e) {
+    /**
+     * Uses the defined output to print error messages.
+     *
+     * @param ps printStream to use as err
+     * @since 20.0
+     */
+    protected final void setError(PrintStream ps) {
+        this.err = ps;
+    }
+
+    /**
+     * @return the stream for regular output. Defaults to {@link System#out}
+     * @since 20.0
+     */
+    protected final PrintStream getOutput() {
+        return out;
+    }
+
+    /**
+     * @return the stream for errors. Defaults to {@link System#err}
+     * @since 20.0
+     */
+    protected final PrintStream getError() {
+        return err;
+    }
+
+    void handleAbortException(AbortException e) {
         if (e.getMessage() != null) {
-            System.err.println("ERROR: " + e.getMessage());
+            err.println("ERROR: " + e.getMessage());
         }
         if (e.getCause() != null) {
             e.printStackTrace();
@@ -167,21 +207,13 @@ public abstract class Launcher {
         System.exit(e.getExitCode());
     }
 
-    static void handlePolyglotException(PolyglotException e) {
-        if (e.getMessage() != null) {
-            System.err.println("ERROR: " + e.getMessage());
-        }
-        if (e.isInternalError()) {
-            e.printStackTrace();
-        }
-        if (e.isExit()) {
-            System.exit(e.getExitStatus());
-        } else {
-            System.exit(1);
-        }
-    }
-
-    protected static class AbortException extends RuntimeException {
+    /**
+     * Exception which shall abort the launcher execution. Thrown by this class in the case of
+     * unhandled internal exception, malformed arguments or unknown options, or deliberate exit.
+     *
+     * @since 20.0
+     */
+    protected static final class AbortException extends RuntimeException {
         static final long serialVersionUID = 4681646279864737876L;
         private final int exitCode;
 
@@ -195,13 +227,13 @@ public abstract class Launcher {
             this.exitCode = exitCode;
         }
 
-        int getExitCode() {
+        public int getExitCode() {
             return exitCode;
         }
 
         @SuppressWarnings("sync-override")
         @Override
-        public final Throwable fillInStackTrace() {
+        public Throwable fillInStackTrace() {
             return this;
         }
     }
@@ -275,7 +307,7 @@ public abstract class Launcher {
         if (t.getCause() instanceof IOException && t.getClass() == RuntimeException.class) {
             String message = t.getMessage();
             if (message != null && !message.startsWith(t.getCause().getClass().getName() + ": ")) {
-                System.err.println(message);
+                err.println(message);
             }
             throw abort((IOException) t.getCause(), exitCode);
         }
@@ -309,7 +341,7 @@ public abstract class Launcher {
         String message = e.getMessage();
         if (message != null) {
             if (e instanceof NoSuchFileException) {
-                throw abort("Not such file: " + message, exitCode);
+                throw abort("No such file: " + message, exitCode);
             } else if (e instanceof AccessDeniedException) {
                 throw abort("Access denied: " + message, exitCode);
             } else {
@@ -317,6 +349,16 @@ public abstract class Launcher {
             }
         }
         throw abort((Throwable) e, exitCode);
+    }
+
+    /**
+     * This is called to abort execution when an argument can neither be recognized by the launcher
+     * or as an option for the polyglot engine.
+     *
+     * @param argument the argument that was not recognized.
+     */
+    protected AbortException abortUnrecognizedArgument(String argument) {
+        throw abortInvalidArgument(argument, "Unrecognized argument: '" + argument + "'. Use --help for usage instructions.");
     }
 
     /**
@@ -382,14 +424,29 @@ public abstract class Launcher {
     }
 
     protected void warn(String message) {
-        System.err.println("Warning: " + message);
+        err.println("Warning: " + message);
     }
 
     protected void warn(String message, Object... args) {
         StringBuilder sb = new StringBuilder("Warning: ");
         new Formatter(sb).format(message, args);
         sb.append(System.lineSeparator());
-        System.err.print(sb.toString());
+        err.print(sb.toString());
+    }
+
+    /**
+     * Sets the indentation for option descriptions. Sets number of spaces in the first column
+     * reserved for option names. Defaults to {@link #LAUNCHER_OPTIONS_INDENT}.
+     *
+     * @param indent the new indent.
+     * @since 20.0
+     */
+    protected final void setOptionIndent(int indent) {
+        if (indent < 0) {
+            optionIndent = LAUNCHER_OPTIONS_INDENT;
+        } else {
+            optionIndent = indent;
+        }
     }
 
     /**
@@ -412,30 +469,50 @@ public abstract class Launcher {
      */
     protected abstract void collectArguments(Set<String> options);
 
-    private String executableName(String basename) {
+    /**
+     * Finds the a descriptor for the option.
+     *
+     * @param group option group
+     * @param key the option name (including the group)
+     * @return descriptor or {@code null}.
+     * @since 20.0
+     */
+    protected abstract OptionDescriptor findOptionDescriptor(String group, String key);
+
+    /**
+     * Determines if the tool supports polyglot. Returns true, if {@code --polyglot} option is valid
+     * for this tool and polyglot launcher works for it. The default implementation returns false
+     * only when {@link #isStandalone()} is true.
+     *
+     * @return {@code true}, if polyglot is relevant in this launcher.
+     * @since 20.0
+     */
+    protected boolean canPolyglot() {
+        return !isStandalone();
+    }
+
+    /**
+     * Should print tool-specific help. Regular languages print info on the installed tools and
+     * languages. The default implementation prints nothing.
+     *
+     * @param helpCategory category of options to print
+     * @since 20.0
+     */
+    protected void maybePrintAdditionalHelp(OptionCategory helpCategory) {
+        // no op, no additional help printed.
+    }
+
+    private String[] executableNames(String basename) {
         switch (OS.current) {
             case Linux:
             case Darwin:
             case Solaris:
-                return basename;
+                return new String[]{basename};
+            case Windows:
+                return new String[]{basename + ".exe", basename + ".cmd"};
             default:
                 throw abort("executableName: OS not supported: " + OS.current);
         }
-    }
-
-    /**
-     * Prints version information about all known {@linkplain Language languages} and
-     * {@linkplain Instrument instruments} on {@linkplain System#out stdout}.
-     */
-    protected static void printPolyglotVersions() {
-        Engine engine = Engine.create();
-        System.out.println("GraalVM Polyglot Engine Version " + engine.getVersion());
-        Path graalVMHome = Engine.findHome();
-        if (graalVMHome != null) {
-            System.out.println("GraalVM Home " + graalVMHome);
-        }
-        printLanguages(engine, true);
-        printInstruments(engine, true);
     }
 
     /**
@@ -472,308 +549,350 @@ public abstract class Launcher {
     }
 
     protected boolean isGraalVMAvailable() {
-        return nativeAccess != null && nativeAccess.getGraalVMHome() != null;
+        return getGraalVMHome() != null;
     }
 
-    @SuppressWarnings("fallthrough")
-    final boolean runPolyglotAction() {
-        OptionCategory helpCategory = helpInternal ? OptionCategory.INTERNAL : (helpExpert ? OptionCategory.EXPERT : OptionCategory.USER);
+    protected boolean isStandalone() {
+        return !isGraalVMAvailable();
+    }
 
-        switch (versionAction) {
-            case PrintAndContinue:
-                printPolyglotVersions();
-                // fall through
-            case None:
+    private Path home;
+
+    protected Path getGraalVMHome() {
+        if (home == null) {
+            home = HomeFinder.getInstance().getHomeFolder();
+        }
+        return home;
+    }
+
+    /**
+     * Returns filename of the binary, depending on OS. Binary will be searched in {@code bin}
+     * directory.
+     *
+     * @param binaryName binary name, without path.
+     * @return OS-dependent binary filename.
+     */
+    protected final Path getGraalVMBinaryPath(String binaryName) {
+        String[] executableNames = executableNames(binaryName);
+        Path graalVMHome = getGraalVMHome();
+        if (graalVMHome == null) {
+            throw abort("Cannot exec to GraalVM binary: could not find GraalVM home");
+        }
+        for (String executableName : executableNames) {
+            Path execPath = graalVMHome.resolve("bin").resolve(executableName);
+            if (Files.exists(execPath)) {
+                return execPath;
+            }
+        }
+        throw abort("Cannot exec to GraalVM binary: could not find a '" + binaryName + "' executable");
+    }
+
+    /**
+     * Runs launcher's action as version print or help. Returns {@code true}, if the execution
+     * should terminate, e.g. after printing help. {@link #parseCommonOption} should be called for
+     * commandline argument(s) prior to this method to set up flags to display help etc.
+     *
+     * @return {@code true} when execution should be terminated.
+     * @since 20.0
+     */
+    protected boolean runLauncherAction() {
+        if (helpArg == null) {
+            return false;
+        }
+        if ("".equals(helpArg)) {
+            helpPrinted = true;
+            printDefaultHelp(OptionCategory.EXPERT);
+        }
+        maybePrintAdditionalHelp(OptionCategory.EXPERT);
+        if ("all".equals(helpArg) || "vm".equals(helpArg)) {
+            helpPrinted = true;
+            out.println("");
+            if (nativeAccess == null) {
+                printJvmHelp();
+            } else {
+                nativeAccess.printNativeHelp();
+            }
+        }
+        if (!helpPrinted) {
+            printDefaultHelp(OptionCategory.USER);
+        }
+        out.println("");
+        out.println("See http://www.graalvm.org for more information.");
+        return true;
+    }
+
+    /**
+     * Prints default help text. Prints options, starting with tool specific options. Launcher
+     * implementations can override to provide launcher-specific intro / summary.
+     *
+     * @param printCategory options category to print.
+     * @since 20.0
+     */
+    protected void printDefaultHelp(OptionCategory printCategory) {
+        final VMType defaultVMType = SHELL_SCRIPT_LAUNCHER ? VMType.JVM : this.getDefaultVMType();
+
+        printHelp(printCategory);
+        out.println();
+        out.println("Runtime options:");
+
+        setOptionIndent(45);
+        if (canPolyglot()) {
+            launcherOption("--polyglot", "Run with all other guest languages accessible.");
+        }
+        if (!SHELL_SCRIPT_LAUNCHER) {
+            launcherOption("--native", "Run using the native launcher with limited access to Java libraries" + (defaultVMType == VMType.Native ? " (default)" : "") + ".");
+        }
+        if (!isStandalone()) {
+            launcherOption("--jvm", "Run on the Java Virtual Machine with access to Java libraries" + (defaultVMType == VMType.JVM ? " (default)" : "") + ".");
+        }
+        // @formatter:off
+        launcherOption("--vm.[option]",                 "Pass options to the host VM. To see available options, use '--help:vm'.");
+        launcherOption("--log.file=<String>",           "Redirect guest languages logging into a given file.");
+        launcherOption("--log.[logger].level=<String>", "Set language log level to OFF, SEVERE, WARNING, INFO, CONFIG, FINE, FINER, FINEST or ALL.");
+        launcherOption("--help",                        "Print this help message.");
+        launcherOption("--help:vm",                     "Print options for the host VM.");
+        // @formatter:on
+    }
+
+    /**
+     * Instructs that information about other help categories should be printed.
+     *
+     * @param kind category kind name
+     * @param option the option to print the category
+     * @since 20.0
+     */
+    protected void printOtherHelpCategory(String kind, String option) {
+        kindAndCategory.add(kind);
+        kindAndCategory.add(option);
+    }
+
+    static String optionsTitle(String kind, OptionCategory optionCategory) {
+        if (optionCategory == null) {
+            return kind + " options:";
+        }
+        String category;
+        switch (optionCategory) {
+            case USER:
+                category = "User ";
                 break;
-            case PrintAndExit:
-                printPolyglotVersions();
-                return true;
+            case EXPERT:
+                category = "Expert ";
+                break;
+            case INTERNAL:
+                category = "Internal ";
+                break;
+            default:
+                category = "";
+                break;
         }
-        boolean printDefaultHelp = help || ((helpExpert || helpInternal) && !helpTools && !helpLanguages);
-        if (printDefaultHelp) {
-            printHelp(helpCategory);
-            // @formatter:off
-            System.out.println();
-            System.out.println("Runtime options:");
-            if (isGraalVMAvailable()) {
-                printOption("--polyglot", "Run with all other guest languages accessible.");
-            }
-            printOption("--native", "Run using the native launcher with limited Java access" + (this.getDefaultVMType() == VMType.Native ? " (default)" : "") + ".");
-            if (isGraalVMAvailable()) {
-                printOption("--jvm", "Run on the Java Virtual Machine with Java access" + (this.getDefaultVMType() == VMType.JVM ? " (default)" : "") + ".");
-            }
-            printOption("--vm.[option]",                 "Pass options to the host VM. To see available options, use '--vm.help'.");
-            printOption("--help",                        "Print this help message.");
-            printOption("--help:languages",              "Print options for all installed languages.");
-            printOption("--help:tools",                  "Print options for all installed tools.");
-            printOption("--help:expert",                 "Print additional options for experts.");
-            if (helpExpert || helpInternal) {
-                printOption("--help:internal",           "Print internal options for debugging language implementations and instruments.");
-            }
-            printOption("--version:graalvm",             "Print GraalVM version information and exit.");
-            printOption("--show-version:graalvm",        "Print GraalVM version information and continue execution.");
-            printOption("--log.file=<String>",           "Redirect guest languages logging into a given file.");
-            printOption("--log.[logger].level=<String>", "Set language log level. Can be 'OFF', 'SEVERE', 'WARNING', 'INFO', 'CONFIG', 'FINE', 'FINER', 'FINEST' or 'ALL'.");
-            // @formatter:on
-            List<PrintableOption> engineOptions = new ArrayList<>();
-            for (OptionDescriptor descriptor : getTempEngine().getOptions()) {
-                if (!descriptor.getName().startsWith("engine.") && !descriptor.getName().startsWith("compiler.")) {
-                    continue;
-                }
-                if (!descriptor.isDeprecated() && sameCategory(descriptor, helpCategory)) {
-                    engineOptions.add(asPrintableOption(descriptor));
-                }
-            }
-            if (!engineOptions.isEmpty()) {
-                printOptions(engineOptions, "Engine options:", 2);
+        return category + kind + " options:";
+    }
+
+    /**
+     * Parses otherwise unrecognized options. Terminates the application if an option is not among
+     * the generic launcher / VM ones.
+     *
+     * @param defaultOptionPrefix (language) prefix for the options
+     * @param polyglotOptions options being built for the polyglot launcher
+     * @param unrecognizedArgs arguments (options) to evaluate
+     * @since 20.0
+     */
+    protected final void parseUnrecognizedOptions(String defaultOptionPrefix, Map<String, String> polyglotOptions, List<String> unrecognizedArgs) {
+        boolean experimentalOptions = false;
+        // First, check if --experimental-options is passed
+        for (String arg : unrecognizedArgs) {
+            switch (arg) {
+                case "--experimental-options":
+                case "--experimental-options=true":
+                    experimentalOptions = true;
+                    break;
+                case "--experimental-options=false":
+                    experimentalOptions = false;
+                    break;
             }
         }
 
-        if (helpLanguages) {
-            printLanguageOptions(getTempEngine(), helpCategory);
+        // Parse the arguments, now that we know whether experimental options are allowed
+        for (String arg : unrecognizedArgs) {
+            if (!parseCommonOption(defaultOptionPrefix, polyglotOptions, experimentalOptions, arg)) {
+                parsePolyglotOption(defaultOptionPrefix, polyglotOptions, experimentalOptions, arg);
+            }
         }
+    }
 
-        if (helpTools) {
-            printInstrumentOptions(getTempEngine(), helpCategory);
-        }
-
-        if (printDefaultHelp || helpLanguages || helpTools) {
-            System.out.println("\nSee http://www.graalvm.org for more information.");
+    /**
+     * Parses an option, returning success. The method is called to parse `arg` option from the
+     * commandline, not recognized by the application. The method may contribute to the
+     * `polyglotOptions` (in/out parameter, modifiable) to alter polyglot behaviour. If the option
+     * is recognized, the method must return {@code true}.
+     *
+     * @param defaultOptionPrefix default prefix for the option names, derived from the launching
+     *            application.
+     * @param polyglotOptions options for polyglot engine
+     * @param experimentalOptions true, if experimental options are explicitly allowed
+     * @param arg argument to parse
+     * @return true, if the option was recognized.
+     * @since 20.0
+     */
+    protected boolean parseCommonOption(String defaultOptionPrefix, Map<String, String> polyglotOptions, boolean experimentalOptions, String arg) {
+        // Ignore, these were already parsed before
+        if ("--experimental-options".equals(arg) || "--experimental-options=false".equals(arg) || "--experimental-options=true".equals(arg)) {
             return true;
         }
-
+        if (arg.startsWith("--help")) {
+            parseHelpArg(arg);
+            return true;
+        }
         return false;
     }
 
-    private static void printInstrumentOptions(Engine engine, OptionCategory optionCategory) {
-        Map<Instrument, List<PrintableOption>> instrumentsOptions = new HashMap<>();
-        List<Instrument> instruments = sortedInstruments(engine);
-        for (Instrument instrument : instruments) {
-            List<PrintableOption> options = new ArrayList<>();
-            for (OptionDescriptor descriptor : instrument.getOptions()) {
-                if (!descriptor.isDeprecated() && sameCategory(descriptor, optionCategory)) {
-                    options.add(asPrintableOption(descriptor));
-                }
+    private void parseHelpArg(String arg) {
+        // TODO: GR-38305 Remove legacy behaviour support
+        if (HELP_EXPERT.equals(arg)) {
+            out.println("");
+            out.println("NOTE: The " + HELP_EXPERT + " option is deprecated without replacement and will be removed.");
+            out.println("");
+            if (helpArg == null) {
+                helpArg = "";
             }
-            if (!options.isEmpty()) {
-                instrumentsOptions.put(instrument, options);
-            }
+            return;
         }
-        if (!instrumentsOptions.isEmpty()) {
-            System.out.println();
-            System.out.println("Tool options:");
-            for (Instrument instrument : instruments) {
-                List<PrintableOption> options = instrumentsOptions.get(instrument);
-                if (options != null) {
-                    printOptions(options, "  " + instrument.getName() + ":", 4);
-                }
+        if (HELP_INTERNAL.equals(arg)) {
+            out.println("");
+            out.println("NOTE: The " + HELP_INTERNAL + " option is deprecated and will be removed. Use --help:[id]:internal instead.");
+            out.println("");
+            if (helpArg == null) {
+                helpArg = "";
             }
+            helpInternal = true;
+            return;
         }
-    }
-
-    private static void printLanguageOptions(Engine engine, OptionCategory optionCategory) {
-        Map<Language, List<PrintableOption>> languagesOptions = new HashMap<>();
-        List<Language> languages = sortedLanguages(engine);
-        for (Language language : languages) {
-            List<PrintableOption> options = new ArrayList<>();
-            for (OptionDescriptor descriptor : language.getOptions()) {
-                if (!descriptor.isDeprecated() && sameCategory(descriptor, optionCategory)) {
-                    options.add(asPrintableOption(descriptor));
-                }
-            }
-            if (!options.isEmpty()) {
-                languagesOptions.put(language, options);
-            }
+        int index = arg.indexOf(':');
+        if (index < 0) {
+            helpArg = "";
+            return;
         }
-        if (!languagesOptions.isEmpty()) {
-            System.out.println();
-            System.out.println("Language options:");
-            for (Language language : languages) {
-                List<PrintableOption> options = languagesOptions.get(language);
-                if (options != null) {
-                    printOptions(options, "  " + language.getName() + ":", 4);
-                }
-            }
+        String helpArgCandidate = arg.substring(index + 1);
+        index = helpArgCandidate.indexOf(':');
+        if (index < 0) {
+            helpArg = helpArgCandidate;
+            return;
+        }
+        helpArg = helpArgCandidate.substring(0, index);
+        if (helpArgCandidate.endsWith(":internal")) {
+            helpInternal = true;
         }
     }
 
-    @SuppressWarnings("deprecation")
-    private static boolean sameCategory(OptionDescriptor descriptor, OptionCategory optionCategory) {
-        return descriptor.getCategory().ordinal() == optionCategory.ordinal() ||
-                        (optionCategory.ordinal() == OptionCategory.INTERNAL.ordinal() &&
-                                        descriptor.getCategory().ordinal() == OptionCategory.DEBUG.ordinal());
-    }
+    /**
+     * Parses polyglot options and already-processed --jvm/--native/--vm.* options. For any other
+     * argument, it will abort(). For parameter description see
+     * {@link #parseCommonOption(java.lang.String, java.util.Map, boolean, java.lang.String)}.
+     */
+    void parsePolyglotOption(String defaultOptionPrefix, Map<String, String> polyglotOptions, boolean experimentalOptions, String arg) {
+        if (arg.equals("--jvm")) {
+            if (isAOT()) {
+                throw abort("should not reach here: jvm option failed to switch to JVM");
+            }
+            return;
+        } else if (arg.equals("--native")) {
+            if (!isAOT()) {
+                throw abort("native options are not supported on the JVM");
+            }
+            return;
+        } else if (arg.startsWith("--vm.") && arg.length() > "--vm.".length()) {
+            /*
+             * Ignore those, they should already be applied by now. They can come from 2 source:
+             * from the Bash/Batch launchers, but those launchers remove all such arguments. Or from
+             * a native launcher which switched from native to jvm, in which case we reuse all
+             * original arguments for correctness and already applied the --vm options by passing
+             * them to the JVM directly.
+             */
+            return;
+        }
+        // getLanguageId() or null?
+        if (arg.length() <= 2 || !arg.startsWith("--")) {
+            throw abortUnrecognizedArgument(arg);
+        }
+        int eqIdx = arg.indexOf('=');
+        String key;
+        String value;
+        if (eqIdx < 0) {
+            key = arg.substring(2);
+            value = null;
+        } else {
+            key = arg.substring(2, eqIdx);
+            value = arg.substring(eqIdx + 1);
+        }
 
-    boolean parsePolyglotOption(String defaultOptionPrefix, Map<String, String> options, String arg) {
-        switch (arg) {
-            case "--help":
-                help = true;
-                return true;
-            case "--help:debug":
-                warn("--help:debug is deprecated, use --help:internal instead.");
-                helpInternal = true;
-                return true;
-            case "--help:internal":
-                helpInternal = true;
-                return true;
-            case "--help:expert":
-                helpExpert = true;
-                return true;
-            case "--help:tools":
-                helpTools = true;
-                return true;
-            case "--help:languages":
-                helpLanguages = true;
-                return true;
-            case "--version:graalvm":
-                versionAction = VersionAction.PrintAndExit;
-                return true;
-            case "--show-version:graalvm":
-                versionAction = VersionAction.PrintAndContinue;
-                return true;
-            case "--polyglot":
-                seenPolyglot = true;
-                return true;
-            case "--experimental-options":
-            case "--experimental-options=true":
-                experimentalOptions = true;
-                return true;
-            case "--experimental-options=false":
-                experimentalOptions = false;
-                return true;
-            default:
-                if ((arg.startsWith("--jvm.") && arg.length() > "--jvm.".length()) || arg.equals("--jvm")) {
-                    if (isAOT()) {
-                        throw abort("should not reach here: jvm option failed to switch to JVM");
-                    }
-                    return true;
-                } else if ((arg.startsWith("--native.") && arg.length() > "--native.".length()) || arg.equals("--native")) {
-                    if (!isAOT()) {
-                        throw abort("native options are not supported on the JVM");
-                    }
-                    return true;
-                } else if (arg.startsWith("--vm.") && arg.length() > "--vm.".length()) {
-                    return true;
-                }
-                // getLanguageId() or null?
-                if (arg.length() <= 2 || !arg.startsWith("--")) {
-                    return false;
-                }
-                int eqIdx = arg.indexOf('=');
-                String key;
-                String value;
-                if (eqIdx < 0) {
-                    key = arg.substring(2);
-                    value = null;
-                } else {
-                    key = arg.substring(2, eqIdx);
-                    value = arg.substring(eqIdx + 1);
-                }
-
-                if (value == null) {
-                    value = "true";
-                }
-                int index = key.indexOf('.');
-                String group = key;
-                if (index >= 0) {
-                    group = group.substring(0, index);
-                }
-                if ("log".equals(group)) {
-                    if (key.endsWith(".level")) {
-                        try {
-                            Level.parse(value);
-                            options.put(key, value);
-                            return true;
-                        } catch (IllegalArgumentException e) {
-                            throw abort(String.format("Invalid log level %s specified. %s'", arg, e.getMessage()));
-                        }
-                    } else if (key.equals("log.file")) {
-                        logFile = Paths.get(value);
-                        return true;
-                    }
-                }
-                OptionDescriptor descriptor = findPolyglotOptionDescriptor(group, key);
-                if (descriptor == null) {
-                    if (defaultOptionPrefix != null) {
-                        descriptor = findPolyglotOptionDescriptor(defaultOptionPrefix, defaultOptionPrefix + "." + key);
-                    }
-                    if (descriptor == null) {
-                        return false;
-                    }
-                }
+        if (value == null) {
+            value = "true";
+        }
+        int index = key.indexOf('.');
+        String group = key;
+        if (index >= 0) {
+            group = group.substring(0, index);
+        }
+        if ("log".equals(group)) {
+            if (key.endsWith(".level")) {
                 try {
-                    descriptor.getKey().getType().convert(value);
+                    Level.parse(value);
+                    polyglotOptions.put(key, value);
                 } catch (IllegalArgumentException e) {
-                    throw abort(String.format("Invalid argument %s specified. %s'", arg, e.getMessage()));
+                    throw abort(String.format("Invalid log level %s specified. %s'", arg, e.getMessage()));
                 }
-                if (descriptor.isDeprecated()) {
-                    warn("Option '" + descriptor.getName() + "' is deprecated and might be removed from future versions.");
-                }
-                if (CHECK_EXPERIMENTAL_OPTIONS && !allowExperimentalOptions() && descriptor.getStability() == OptionStability.EXPERIMENTAL) {
-                    throw abort(String.format("Option '%s' is experimental and must be enabled via '--experimental-options'%n" +
-                                    "Do not use experimental options in production environments.", arg));
-                }
-                // use the full name of the found descriptor
-                options.put(descriptor.getName(), value);
-                return true;
+                return;
+            } else if (key.equals("log.file")) {
+                logFile = Paths.get(value);
+                return;
+            }
         }
-    }
-
-    private OptionDescriptor findPolyglotOptionDescriptor(String group, String key) {
-        OptionDescriptors descriptors = null;
-        switch (group) {
-            case "compiler":
-            case "engine":
-                descriptors = getTempEngine().getOptions();
-                break;
-            default:
-                Engine engine = getTempEngine();
-                if (engine.getLanguages().containsKey(group)) {
-                    descriptors = engine.getLanguages().get(group).getOptions();
-                } else if (engine.getInstruments().containsKey(group)) {
-                    descriptors = engine.getInstruments().get(group).getOptions();
-                }
-                break;
+        OptionDescriptor descriptor = findOptionDescriptor(group, key);
+        if (descriptor == null) {
+            if (defaultOptionPrefix != null) {
+                key = defaultOptionPrefix + "." + key;
+                descriptor = findOptionDescriptor(defaultOptionPrefix, key);
+            }
+            if (descriptor == null) {
+                throw abortUnrecognizedArgument(arg);
+            }
         }
-        if (descriptors == null) {
-            return null;
+        try {
+            descriptor.getKey().getType().convert(value);
+        } catch (IllegalArgumentException e) {
+            throw abort(String.format("Invalid argument %s specified. %s", arg, e.getMessage()));
         }
-        return descriptors.get(key);
-
+        if (descriptor.isDeprecated()) {
+            String messageFormat = "Option '%s' is deprecated and might be removed from future versions.";
+            String deprecationMessage = descriptor.getDeprecationMessage();
+            String message;
+            if (deprecationMessage != null) {
+                message = String.format(messageFormat + "%n%s", descriptor.getName(), deprecationMessage);
+            } else {
+                message = String.format(messageFormat, descriptor.getName());
+            }
+            warn(message);
+        }
+        if (!experimentalOptions && descriptor.getStability() == OptionStability.EXPERIMENTAL) {
+            throw abort(String.format("Option '%s' is experimental and must be enabled via '--experimental-options'%n" +
+                            "Do not use experimental options in production environments.", arg));
+        }
+        polyglotOptions.put(key, value);
     }
 
     private Set<String> collectAllArguments() {
-        Engine engine = getTempEngine();
         Set<String> options = new LinkedHashSet<>();
         collectArguments(options);
-        if (isGraalVMAvailable()) {
-            options.add("--polylgot");
+        if (canPolyglot()) {
+            options.add("--polyglot");
+        }
+        if (!isStandalone()) {
             options.add("--jvm");
         }
         options.add("--native");
         options.add("--help");
-        options.add("--help:languages");
-        options.add("--help:tools");
-        options.add("--help:expert");
-        options.add("--version:graalvm");
-        options.add("--show-version:graalvm");
-        if (helpExpert || helpInternal) {
-            options.add("--help:internal");
-        }
-        addOptions(engine.getOptions(), options);
-        for (Language language : engine.getLanguages().values()) {
-            addOptions(language.getOptions(), options);
-        }
-        for (Instrument instrument : engine.getInstruments().values()) {
-            addOptions(instrument.getOptions(), options);
-        }
+        options.add("--help:vm");
         return options;
-    }
-
-    private static void addOptions(OptionDescriptors descriptors, Set<String> target) {
-        for (OptionDescriptor descriptor : descriptors) {
-            target.add("--" + descriptor.getName());
-        }
     }
 
     /**
@@ -808,120 +927,188 @@ public abstract class Launcher {
         return 2.0f * hit / (str1.length() + str2.length());
     }
 
-    static List<Language> sortedLanguages(Engine engine) {
-        List<Language> languages = new ArrayList<>(engine.getLanguages().values());
-        languages.sort(Comparator.comparing(Language::getId));
-        return languages;
-    }
-
-    static List<Instrument> sortedInstruments(Engine engine) {
-        List<Instrument> instruments = new ArrayList<>();
-        for (Instrument instrument : engine.getInstruments().values()) {
-            // no options not accessible to the user.
-            if (!instrument.getOptions().iterator().hasNext()) {
-                continue;
-            }
-            instruments.add(instrument);
-        }
-        instruments.sort(Comparator.comparing(Instrument::getId));
-        return instruments;
-    }
-
-    static void printOption(OptionCategory optionCategory, OptionDescriptor descriptor) {
-        if (!descriptor.isDeprecated() && sameCategory(descriptor, optionCategory)) {
-            printOption(asPrintableOption(descriptor));
-        }
-    }
-
-    private static PrintableOption asPrintableOption(OptionDescriptor descriptor) {
-        StringBuilder key = new StringBuilder("--");
-        key.append(descriptor.getName());
-        Object defaultValue = descriptor.getKey().getDefaultValue();
-        if (defaultValue instanceof Boolean && defaultValue == Boolean.FALSE) {
-            // nothing to print
-        } else {
-            key.append("=<");
-            key.append(descriptor.getKey().getType().getName());
-            key.append(">");
-        }
-        return new PrintableOption(key.toString(), descriptor.getHelp());
-    }
-
-    static void printOption(String option, String description) {
-        printOption(option, description, 2);
+    /**
+     * Prints a line for a launcher option. Uses indentation set by {@link #setOptionIndent} to
+     * align option's description. If option name is too long, description is printed on the next
+     * line, indented.
+     *
+     * @param option option name, including dash(es)
+     * @param description description
+     * @since 20.0
+     */
+    protected void launcherOption(String option, String description) {
+        printOption(option, description, 2, optionIndent);
     }
 
     private static String spaces(int length) {
         return new String(new char[length]).replace('\0', ' ');
     }
 
-    private static String wrap(String s) {
-        final int width = 120;
-        StringBuilder sb = new StringBuilder(s);
-        int cursor = 0;
-        while (cursor + width < sb.length()) {
-            int i = sb.lastIndexOf(" ", cursor + width);
-            if (i == -1 || i < cursor) {
-                i = sb.indexOf(" ", cursor + width);
+    @SuppressWarnings("hiding")
+    private String wrap(String s, String indent) {
+        final int terminalWidth = Math.max(getTerminalWidth(), indent.length() + 10);
+        final int width = terminalWidth - indent.length();
+
+        String rest = s.strip();
+        if (rest.length() <= width) {
+            return rest;
+        }
+
+        StringBuilder builder = new StringBuilder();
+        while (rest.length() > width) {
+            // NOTE: may return width, which is fine, we cut just before i
+            int i = rest.lastIndexOf(' ', width);
+
+            if (i == -1) { // Can't find any space in rest[0 < i <= width]
+                // take the next space (will exceed the width)
+                i = rest.indexOf(' ', width);
             }
+
             if (i != -1) {
-                sb.replace(i, i + 1, System.lineSeparator());
-                cursor = i;
+                builder.append(rest, 0, i);
+                builder.append(System.lineSeparator());
+                builder.append(indent);
+                rest = rest.substring(i + 1).stripLeading(); // + 1 to skip the space
             } else {
-                break;
+                break; // No space left in rest
             }
         }
-        return sb.toString();
+        builder.append(rest);
+        return builder.toString();
     }
 
-    private static void printOption(String option, String description, int indentation) {
-        String indent = spaces(indentation);
-        String desc = wrap(description != null ? description : "");
+    private static final Method IS_TERMINAL_METHOD = getIsTerminalMethod();
+
+    private static Method getIsTerminalMethod() {
+        try {
+            return Console.class.getMethod("isTerminal");
+        } catch (NoSuchMethodException e) {
+            return null;
+        }
+    }
+
+    /**
+     * Returns true if stdin and stdout are both TTY, false otherwise.
+     *
+     * @since 24.0
+     */
+    protected static boolean isTTY() {
+        Console console = System.console();
+        if (console == null) {
+            return false;
+        }
+        if (IS_TERMINAL_METHOD != null) {
+            try {
+                return (boolean) IS_TERMINAL_METHOD.invoke(console);
+            } catch (IllegalAccessException | InvocationTargetException e) {
+                throw new Error(e);
+            }
+        } else {
+            return true;
+        }
+    }
+
+    private static final int FALLBACK_TERMINAL_WIDTH = 120;
+    private int terminalWidth = -1;
+
+    int getTerminalWidth() {
+        if (terminalWidth == -1) {
+            int width;
+            if (isTTY()) {
+                try (Terminal terminal = createSystemTerminal()) {
+                    width = terminal.getWidth();
+                } catch (IOException exception) {
+                    width = FALLBACK_TERMINAL_WIDTH;
+                }
+            } else {
+                width = FALLBACK_TERMINAL_WIDTH;
+            }
+
+            if (width <= 0) { // Dumb terminal
+                width = FALLBACK_TERMINAL_WIDTH;
+            }
+            terminalWidth = width;
+        }
+        return terminalWidth;
+    }
+
+    static Terminal createSystemTerminal() throws IOException {
+        // Create a system Terminal. JNA is not shipped in the SDK JLINE3 jar.
+        return TerminalBuilder.builder().jansi(Launcher.OS.getCurrent() == Launcher.OS.Windows).jna(false).system(true).signalHandler(Terminal.SignalHandler.SIG_IGN).build();
+    }
+
+    private void printOption(String option, String description, int indentStart, int optionWidth) {
+        String indent = spaces(indentStart);
+        String desc = description != null ? description : "";
         String nl = System.lineSeparator();
         String[] descLines = desc.split(nl);
-        int optionWidth = 45;
+        for (int i = 0; i < descLines.length; i++) {
+            descLines[i] = wrap(descLines[i], indent + spaces(optionWidth));
+        }
         if (option.length() >= optionWidth && description != null) {
-            System.out.println(indent + option + nl + indent + spaces(optionWidth) + descLines[0]);
+            out.println(indent + option + nl + indent + spaces(optionWidth) + descLines[0]);
         } else {
-            System.out.println(indent + option + spaces(optionWidth - option.length()) + descLines[0]);
+            out.println(indent + option + spaces(optionWidth - option.length()) + descLines[0]);
         }
         for (int i = 1; i < descLines.length; i++) {
-            System.out.println(indent + spaces(optionWidth) + descLines[i]);
+            out.println(indent + spaces(optionWidth) + descLines[i]);
         }
     }
 
-    private static void printOption(PrintableOption option) {
-        printOption(option, 2);
+    void printOption(PrintableOption option, int indentation) {
+        printOption(option.option, option.description, indentation, optionIndent);
     }
 
-    private static void printOption(PrintableOption option, int indentation) {
-        printOption(option.option, option.description, indentation);
-    }
-
-    private static final class PrintableOption implements Comparable<PrintableOption> {
+    static final class PrintableOption implements Comparable<PrintableOption> {
+        final String name;
         final String option;
         final String description;
+        final boolean experimental;
 
-        private PrintableOption(String option, String description) {
+        protected PrintableOption(String name, String option, String description, boolean experimental) {
+            this.name = name;
             this.option = option;
             this.description = description;
+            this.experimental = experimental;
         }
 
         @Override
         public int compareTo(PrintableOption o) {
-            return this.option.compareTo(o.option);
+            return this.name.compareTo(o.name);
         }
     }
 
-    private static void printOptions(List<PrintableOption> options, String title, int indentation) {
-        Collections.sort(options);
-        System.out.println(title);
+    void printOptions(List<PrintableOption> options, String title, int indentation) {
+        final List<PrintableOption> stableOptions = new ArrayList<>();
+        final List<PrintableOption> experimentalOptions = new ArrayList<>();
         for (PrintableOption option : options) {
-            printOption(option, indentation);
+            if (option.experimental) {
+                experimentalOptions.add(option);
+            } else {
+                stableOptions.add(option);
+            }
+        }
+
+        out.println(spaces(indentation) + title);
+
+        if (!stableOptions.isEmpty()) {
+            out.println(spaces(indentation + 1) + "[Stable]");
+            Collections.sort(stableOptions);
+            for (PrintableOption option : stableOptions) {
+                printOption(option, indentation + 2);
+            }
+        }
+
+        if (!experimentalOptions.isEmpty()) {
+            out.println(spaces(indentation + 1) + "[Experimental]");
+            Collections.sort(experimentalOptions);
+            for (PrintableOption option : experimentalOptions) {
+                printOption(option, indentation + 2);
+            }
         }
     }
 
-    enum OS {
+    protected enum OS {
         Darwin,
         Linux,
         Solaris,
@@ -951,257 +1138,258 @@ public abstract class Launcher {
         }
     }
 
-    private static void serializePolyglotOptions(Map<String, String> polyglotOptions, List<String> args) {
-        if (polyglotOptions == null) {
-            return;
-        }
-        for (Entry<String, String> entry : polyglotOptions.entrySet()) {
-            args.add("--" + entry.getKey() + '=' + entry.getValue());
+    /**
+     * Prints a single line to the output stream, terminated with newline.
+     *
+     * @param l line text.
+     * @since 20.0
+     */
+    protected final void println(String l) {
+        out.println(l);
+    }
+
+    /**
+     * Prints sequence of lines to the output stream. Each argument will be printed as a whole line,
+     * terminated by a newline.
+     *
+     * @param lines lines
+     * @since 20.0
+     */
+    protected final void println(String... lines) {
+        for (String l : lines) {
+            out.println(l);
         }
     }
 
-    private static void printLanguages(Engine engine, boolean printWhenEmpty) {
-        if (engine.getLanguages().isEmpty()) {
-            if (printWhenEmpty) {
-                System.out.println("  Installed Languages: none");
-            }
-        } else {
-            System.out.println("  Installed Languages:");
-            List<Language> languages = new ArrayList<>(engine.getLanguages().size());
-            int nameLength = 0;
-            for (Language language : engine.getLanguages().values()) {
-                languages.add(language);
-                nameLength = max(nameLength, language.getName().length());
-            }
-            languages.sort(Comparator.comparing(Language::getId));
-            String langFormat = "    %-" + nameLength + "s%s version %s%n";
-            for (Language language : languages) {
-                String host;
-                host = "";
-                String version = language.getVersion();
-                if (version == null || version.length() == 0) {
-                    version = "";
-                }
-                System.out.printf(langFormat, language.getName().isEmpty() ? "Unnamed" : language.getName(), host, version);
-            }
-        }
+    private void printJvmHelp() {
+        println("JVM options:");
+        String classpathHelp = "Manage the classpath for Java libraries that you can access from guest languages ('" + File.pathSeparator + "' separated list)";
+        launcherOption("--vm.classpath=<path>[" + File.pathSeparator + "path...]", classpathHelp);
+        launcherOption("--vm.cp=<path>[" + File.pathSeparator + "path...]", classpathHelp);
+        launcherOption("--vm.D<name>=<value>", "Set a system property");
+        launcherOption("--vm.esa", "Enable system assertions");
+        launcherOption("--vm.ea[:<packagename>...|:<classname>]", "Enable assertions with specified granularity");
+        launcherOption("--vm.agentlib:<libname>[=<options>]", "Load native agent library <libname>");
+        launcherOption("--vm.agentpath:<pathname>[=<options>]", "Load native agent library by full pathname");
+        launcherOption("--vm.javaagent:<jarpath>[=<options>]", "Load Java programming language agent");
+        launcherOption("--vm.Xbootclasspath/a:<path>[" + File.pathSeparator + "path...]", "Append classpath entries to the JVM's boot classpath ('" + File.pathSeparator + "' separated list)");
+        launcherOption("--vm.Xmx<size>", "Set maximum Java heap size");
+        launcherOption("--vm.Xms<size>", "Set initial Java heap size");
+        launcherOption("--vm.Xss<size>", "Set java thread stack size");
     }
 
-    private static void printInstruments(Engine engine, boolean printWhenEmpty) {
-        if (engine.getInstruments().isEmpty()) {
-            if (printWhenEmpty) {
-                System.out.println("  Installed Tools: none");
-            }
-        } else {
-            System.out.println("  Installed Tools:");
-            List<Instrument> instruments = sortedInstruments(engine);
-            int nameLength = 0;
-            for (Instrument instrument : instruments) {
-                nameLength = max(nameLength, instrument.getName().length());
-            }
-            String instrumentFormat = "    %-" + nameLength + "s version %s%n";
-            for (Instrument instrument : instruments) {
-                String version = instrument.getVersion();
-                if (version == null || version.length() == 0) {
-                    version = "";
-                }
-                System.out.printf(instrumentFormat, instrument.getName().isEmpty() ? instrument.getId() : instrument.getName(), version);
-            }
-        }
+    private void printBasicNativeHelp() {
+        launcherOption("--vm.D<property>=<value>", "Sets a system property");
+        launcherOption("--vm.Xmn<value>", "Sets the maximum size of the young generation, in bytes.");
+        launcherOption("--vm.Xmx<value>", "Sets the maximum size of the heap, in bytes.");
+        launcherOption("--vm.Xms<value>", "Sets the minimum size of the heap, in bytes.");
+        launcherOption("--vm.Xss<value>", "Sets the size of each thread stack, in bytes.");
     }
 
     private static final String CLASSPATH = System.getProperty("org.graalvm.launcher.classpath");
 
-    class Native {
-        void maybeExec(List<String> args, boolean isPolyglot, Map<String, String> polyglotOptions, VMType defaultVmType) {
-            assert isAOT();
-            VMType vmType = null;
-            boolean polyglot = false;
-            List<String> jvmArgs = new ArrayList<>();
-            List<String> remainingArgs = new ArrayList<>(args.size());
+    /**
+     * Returns what is an equivalent of {@code argv[0]}}, i.e., the command that executed the
+     * launcher. If the launcher was executed via a symlink, this returns the symlink. If the
+     * launcher was executed via a command resolved via the user's PATH environment variable, this
+     * returns that command.
+     *
+     * @return The program name or {@code null} if not available.
+     */
+    protected static String getProgramName() {
+        // For thin launchers this system property should always be available in both JVM and native
+        // mode. Bash launchers set this property explicitly.
+        String executableName = System.getProperty(EXECUTABLE_NAME_PROPERTY);
+        if (executableName != null) {
+            return executableName;
+        }
+        // What remains are non-thin native launchers
+        if (ImageInfo.inImageRuntimeCode()) {
+            if (ProcessProperties.getArgumentVectorBlockSize() > 0) {
+                return ProcessProperties.getArgumentVectorProgramName();
+            }
+        }
+        return null;
+    }
 
-            // move jvm polyglot options to jvmArgs
-            Iterator<Entry<String, String>> polyglotOptionsIterator = polyglotOptions.entrySet().iterator();
-            while (polyglotOptionsIterator.hasNext()) {
-                Map.Entry<String, String> entry = polyglotOptionsIterator.next();
-                if (entry.getKey().startsWith("jvm.")) {
-                    jvmArgs.add('-' + entry.getKey().substring(4));
-                    if (entry.getValue() != null && !entry.getValue().isEmpty()) {
-                        jvmArgs.add(entry.getValue());
-                    }
-                    vmType = VMType.JVM;
-                    polyglotOptionsIterator.remove();
+    @SuppressWarnings("unused")
+    @Deprecated(since = "20.3")
+    protected final void maybeNativeExec(List<String> args, boolean isPolyglotLauncher, Map<String, String> polyglotOptions) {
+        maybeNativeExec(args, args, isPolyglotLauncher);
+    }
+
+    /**
+     * Possibly re-executes the launcher when JVM or polyglot mode is requested; call only if
+     * {@link #isAOT()} is true. If the result is to run native, then it applies VM options on the
+     * current process.
+     *
+     * The method parses the {@code unrecognizedArgs} for --jvm/--native/--polyglot flags and --vm.*
+     * options. If JVM mode is requested, it execs a Java process configured with supported JVM
+     * parameters and system properties over this process - in this case, the method does not return
+     * (except errors).
+     *
+     * @param originalArgs the original arguments from main(), unmodified.
+     * @param unrecognizedArgs a subset of {@code originalArgs} that was not recognized by
+     *            {@link AbstractLanguageLauncher#preprocessArguments(List, Map)}. All arguments
+     *            recognized by maybeExec are removed from the list.
+     * @param isPolyglotLauncher whether this is the {@link PolyglotLauncher} (bin/polyglot)
+     * @since 20.0
+     */
+    protected final void maybeNativeExec(List<String> originalArgs, List<String> unrecognizedArgs, boolean isPolyglotLauncher) {
+        if (!IS_AOT) {
+            return;
+        }
+        maybeExec(originalArgs, unrecognizedArgs, isPolyglotLauncher, getDefaultVMType(), false);
+    }
+
+    void maybeExec(List<String> originalArgs, List<String> unrecognizedArgs, boolean isPolyglotLauncher, VMType defaultVmType, boolean thinLauncher) {
+        assert isAOT();
+        VMType vmType = null;
+        boolean polyglot = false;
+        List<String> jvmArgs = new ArrayList<>();
+        List<String> applicationArgs = new ArrayList<>(originalArgs);
+
+        Iterator<String> iterator = unrecognizedArgs.iterator();
+        List<String> vmOptions = new ArrayList<>();
+        while (iterator.hasNext()) {
+            String arg = iterator.next();
+            if (arg.equals("--jvm")) {
+                if (vmType == VMType.Native) {
+                    throw abort("'--jvm' and '--native' options can not be used together.");
                 }
-            }
-
-            boolean jvmDotWarned = false;
-
-            Iterator<String> iterator = args.iterator();
-            List<String> vmOptions = new ArrayList<>();
-            while (iterator.hasNext()) {
-                String arg = iterator.next();
-                if ((arg.startsWith("--jvm.") && arg.length() > "--jvm.".length()) || arg.equals("--jvm")) {
-                    if (vmType == VMType.Native) {
-                        throw abort("'--jvm' and '--native' options can not be used together.");
-                    }
-                    if (!isGraalVMAvailable()) {
-                        throw abort("'--jvm.*' options are deprecated and only supported when this launcher is part of a GraalVM.");
-                    }
-                    if (arg.equals("--jvm.help")) {
-                        if (defaultVmType == VMType.JVM) {
-                            warn("'--jvm.help' is deprecated, use '--vm.help' instead.");
-                        } else {
-                            warn("'--jvm.help' is deprecated, use '--jvm --vm.help' instead.");
-                        }
-                        printJvmHelp();
-                        throw exit();
-                    }
-                    vmType = VMType.JVM;
-                    if (arg.startsWith("--jvm.")) {
-                        if (!jvmDotWarned) {
-                            warn("'--jvm.*' options are deprecated, use '--vm.*' instead.");
-                            jvmDotWarned = true;
-                        }
-                        String jvmArg = arg.substring("--jvm.".length());
-                        if (jvmArg.equals("classpath")) {
-                            throw abort("'--jvm.classpath' argument must be of the form '--jvm.classpath=<classpath>', not two separate arguments");
-                        }
-                        if (jvmArg.equals("cp")) {
-                            throw abort("'--jvm.cp' argument must be of the form '--jvm.cp=<classpath>', not two separate arguments");
-                        }
-                        if (jvmArg.startsWith("classpath=") || jvmArg.startsWith("cp=")) {
-                            int eqIndex = jvmArg.indexOf('=');
-                            jvmArgs.add('-' + jvmArg.substring(0, eqIndex));
-                            jvmArgs.add(jvmArg.substring(eqIndex + 1));
-                        } else {
-                            jvmArgs.add('-' + jvmArg);
-                        }
-                    }
-                    iterator.remove();
-                } else if ((arg.startsWith("--native.") && arg.length() > "--native.".length()) || arg.equals("--native")) {
-                    if (vmType == VMType.JVM) {
-                        throw abort("'--jvm' and '--native' options can not be used together.");
-                    }
-                    vmType = VMType.Native;
-                    if (arg.equals("--native.help")) {
-                        if (defaultVmType == VMType.Native) {
-                            warn("'--native.help' is deprecated, use '--vm.help' instead.");
-                        } else {
-                            warn("'--native.help' is deprecated, use '--native --vm.help' instead.");
-                        }
-                        printNativeHelp();
-                        throw exit();
-                    }
-                    if (arg.startsWith("--native.")) {
-                        if (!jvmDotWarned) {
-                            warn("'--native.*' options are deprecated, use '--vm.*' instead.");
-                            jvmDotWarned = true;
-                        }
-                        setNativeOption(arg.substring("--native.".length()));
-                    }
-                    iterator.remove();
-                } else if (arg.startsWith("--vm.") && arg.length() > "--vm.".length()) {
-                    if (arg.equals("--vm.help")) {
-                        VMType helpType = vmType != null ? vmType : defaultVmType;
-                        if (helpType == VMType.JVM) {
-                            printJvmHelp();
-                        } else {
-                            assert helpType == VMType.Native;
-                            printNativeHelp();
-                        }
-                        throw exit();
-                    }
-                    String vmArg = arg.substring("--vm.".length());
-                    if (vmArg.equals("classpath")) {
-                        throw abort("'--vm.classpath' argument must be of the form '--vm.classpath=<classpath>', not two separate arguments");
-                    }
-                    if (vmArg.equals("cp")) {
-                        throw abort("'--vm.cp' argument must be of the form '--vm.cp=<classpath>', not two separate arguments");
-                    }
-                    if (vmArg.startsWith("classpath=") || vmArg.startsWith("cp=")) {
-                        int eqIndex = vmArg.indexOf('=');
-                        jvmArgs.add('-' + vmArg.substring(0, eqIndex));
-                        jvmArgs.add(vmArg.substring(eqIndex + 1));
-                    } else {
-                        vmOptions.add(vmArg);
-                    }
-                    iterator.remove();
-                } else if (arg.equals("--polyglot")) {
-                    polyglot = true;
-                } else {
-                    remainingArgs.add(arg);
+                if (isStandalone()) {
+                    throw abort("'--jvm' is only supported when this launcher is part of a GraalVM.");
                 }
-            }
-
-            if (vmType == null) {
-                vmType = defaultVmType;
-            }
-
-            for (String vmOption : vmOptions) {
+                vmType = VMType.JVM;
+                iterator.remove();
+            } else if (arg.equals("--native")) {
                 if (vmType == VMType.JVM) {
-                    jvmArgs.add('-' + vmOption);
-                } else {
-                    assert vmType == VMType.Native;
-                    setNativeOption(vmOption);
+                    throw abort("'--jvm' and '--native' options can not be used together.");
                 }
+                vmType = VMType.Native;
+                iterator.remove();
+            } else if (arg.startsWith("--vm.") && arg.length() > "--vm.".length()) {
+                String vmArg = arg.substring("--vm.".length());
+                if (vmArg.equals("classpath")) {
+                    throw abort("'--vm.classpath' argument must be of the form '--vm.classpath=<classpath>', not two separate arguments");
+                }
+                if (vmArg.equals("cp")) {
+                    throw abort("'--vm.cp' argument must be of the form '--vm.cp=<classpath>', not two separate arguments");
+                }
+                if (vmArg.startsWith("classpath=") || vmArg.startsWith("cp=")) {
+                    int eqIndex = vmArg.indexOf('=');
+                    jvmArgs.add('-' + vmArg.substring(0, eqIndex));
+                    jvmArgs.add(vmArg.substring(eqIndex + 1));
+                } else {
+                    vmOptions.add(vmArg);
+                }
+                iterator.remove();
+            } else if (arg.equals("--polyglot")) {
+                polyglot = true;
+            }
+        }
+        boolean isDefaultVMType = false;
+        if (vmType == null) {
+            vmType = defaultVmType;
+            isDefaultVMType = true;
+        }
+
+        if (vmType == VMType.JVM) {
+            for (String vmOption : vmOptions) {
+                jvmArgs.add('-' + vmOption);
             }
 
+            if (!isPolyglotLauncher && polyglot) {
+                applicationArgs.add(0, "--polyglot");
+            }
+            assert !isStandalone();
+            if (thinLauncher) {
+                Map<String, String> env = new HashMap<>();
+                env.put("GRAALVM_LAUNCHER_FORCE_JVM", "true");
+                env.put("GRAALVM_LAUNCHER_EXECUTABLE_NAME", System.getProperty(EXECUTABLE_NAME_PROPERTY));
+                nativeAccess.reExec(originalArgs, env);
+            } else {
+                executeJVM(nativeAccess == null ? System.getProperty("java.class.path") : nativeAccess.getClasspath(jvmArgs), jvmArgs, applicationArgs, Collections.emptyMap());
+            }
+        } else {
+            assert vmType == VMType.Native;
+
+            /*
+             * If the VM args have already been applied (e.g. by the thin launcher), there is no
+             * need to set them again at runtime
+             */
+            if (!thinLauncher) {
+                for (String vmOption : vmOptions) {
+                    nativeAccess.setNativeOption(vmOption);
+                }
+            }
             /*
              * All options are processed, now we can run the startup hooks that can depend on the
              * option values.
              */
             VMRuntime.initialize();
-            if (vmType == VMType.JVM) {
-                if (!isPolyglot && polyglot) {
-                    remainingArgs.add(0, "--polyglot");
-                }
-                assert isGraalVMAvailable();
-                execJVM(jvmArgs, remainingArgs, polyglotOptions);
-            } else if (!isPolyglot && polyglot) {
+
+            if (!isPolyglotLauncher && polyglot) {
                 assert jvmArgs.isEmpty();
-                if (!isGraalVMAvailable()) {
+                if (isStandalone()) {
                     throw abort("--polyglot option is only supported when this launcher is part of a GraalVM.");
                 }
-                execNativePolyglot(remainingArgs, polyglotOptions);
+                executePolyglot(applicationArgs, Collections.emptyMap(), !isDefaultVMType);
             }
         }
+    }
 
-        private WeakReference<OptionDescriptors> compilerOptionDescriptors;
-        private WeakReference<OptionDescriptors> vmOptionDescriptors;
+    @SuppressWarnings("unused")
+    @Deprecated(since = "20.3")
+    protected void executeJVM(String classpath, List<String> jvmArgs, List<String> remainingArgs, Map<String, String> polyglotOptions) {
+        executeJVM(classpath, jvmArgs, remainingArgs);
+    }
 
-        private OptionDescriptors getCompilerOptions() {
-            OptionDescriptors descriptors = null;
-            if (compilerOptionDescriptors != null) {
-                descriptors = compilerOptionDescriptors.get();
-            }
-            if (descriptors == null) {
-                descriptors = RuntimeOptions.getOptions(EnumSet.of(OptionClass.Compiler));
-                compilerOptionDescriptors = new WeakReference<>(descriptors);
-            }
-            return descriptors;
-        }
+    /**
+     * Called if a JVM has to be started instead of AOT binary. The method is only called in AOT
+     * mode. Subclasses may override to apply different options or launch mechanism
+     *
+     * @param classpath class path to be used with the JVM
+     * @param jvmArgs arguments for the VM
+     * @param remainingArgs main arguments
+     */
+    protected void executeJVM(String classpath, List<String> jvmArgs, List<String> remainingArgs) {
+        nativeAccess.execJVM(classpath, jvmArgs, remainingArgs);
+    }
 
-        private OptionDescriptors getVMOptions() {
-            OptionDescriptors descriptors = null;
-            if (vmOptionDescriptors != null) {
-                descriptors = vmOptionDescriptors.get();
-            }
-            if (descriptors == null) {
-                descriptors = RuntimeOptions.getOptions(EnumSet.of(OptionClass.VM));
-                vmOptionDescriptors = new WeakReference<>(descriptors);
-            }
-            return descriptors;
-        }
+    @SuppressWarnings("unused")
+    @Deprecated(since = "20.3")
+    protected void executePolyglot(List<String> mainArgs, Map<String, String> polyglotOptions, boolean forceNative) {
+        executePolyglot(mainArgs, forceNative);
+    }
+
+    /**
+     * Called to execute the bin/polyglot launcher with the supplied options. Subclasses may
+     * eventually override and implement in a different way.
+     *
+     * @param mainArgs program arguments
+     */
+    protected void executePolyglot(List<String> mainArgs, boolean forceNative) {
+        nativeAccess.executePolyglot(mainArgs, forceNative);
+    }
+
+    class Native {
+        // execve() to JVM/polyglot from native if needed.
+        // Only parses --jvm/--native to find the VMType and --vm.* to pass/set the VM options.
 
         private void setNativeOption(String arg) {
-            if (arg.startsWith("Dgraal.")) {
-                setGraalStyleRuntimeOption(arg.substring("Dgraal.".length()));
+            if (arg.startsWith("Djdk.graal.")) {
+                setGraalStyleRuntimeOption(arg.substring("Djdk.graal.".length()));
             } else if (arg.startsWith("D")) {
                 setSystemProperty(arg.substring("D".length()));
             } else if (arg.startsWith("XX:")) {
                 setRuntimeOption(arg.substring("XX:".length()));
-            } else if (arg.startsWith("X") && isXOption(arg)) {
-                setXOption(arg.substring("X".length()));
+            } else if (arg.startsWith("X")) {
+                if (isXOption(arg)) {
+                    setXOption(arg.substring("X".length()));
+                } else {
+                    throw abort("Unrecognized vm option: '--vm." + arg + "'. Some VM options may be only supported in --jvm mode.");
+                }
             } else {
                 throw abort("Unrecognized vm option: '--vm." + arg + "'. Such arguments should start with '--vm.D', '--vm.XX:', or '--vm.X'");
             }
@@ -1221,24 +1409,12 @@ public abstract class Launcher {
                 key = arg.substring(0, eqIdx);
                 value = arg.substring(eqIdx + 1);
             }
-            OptionDescriptor descriptor = getCompilerOptions().get(key);
-            if (descriptor == null) {
-                descriptor = getVMOptions().get(key);
-                if (descriptor != null) {
-                    if (isBooleanOption(descriptor)) {
-                        warn("VM options such as '%s' should be set with '--vm.XX:\u00b1%<s'.%n" +
-                                        "Support for setting them with '--vm.Dgraal.%<s=<value>' is deprecated and will be removed.%n", key);
-                    } else {
-                        warn("VM options such as '%s' should be set with '--vm.XX:%<s=<value>'.%n" +
-                                        "Support for setting them with '--vm.Dgraal.%<s=<value>' is deprecated and will be removed.%n", key);
-                    }
-                }
-            }
+            RuntimeOptions.Descriptor descriptor = RuntimeOptions.getDescriptor(key);
             if (descriptor == null) {
                 throw unknownOption(key);
             }
             try {
-                RuntimeOptions.set(key, descriptor.getKey().getType().convert(value));
+                RuntimeOptions.set(key, descriptor.convertValue(value));
             } catch (IllegalArgumentException iae) {
                 throw abort("Invalid argument: '--vm." + arg + "': " + iae.getMessage());
             }
@@ -1267,19 +1443,19 @@ public abstract class Launcher {
                 if (eqIdx >= 0) {
                     throw abort("Invalid argument: '--vm." + arg + "': Use either +/- or =, but not both");
                 }
-                OptionDescriptor descriptor = getVMOptionDescriptor(key);
+                RuntimeOptions.Descriptor descriptor = getVMOptionDescriptor(key);
                 if (!isBooleanOption(descriptor)) {
                     throw abort("Invalid argument: " + key + " is not a boolean option, set it with --vm.XX:" + key + "=<value>.");
                 }
                 value = arg.startsWith("+");
             } else if (eqIdx > 0) {
                 key = arg.substring(0, eqIdx);
-                OptionDescriptor descriptor = getVMOptionDescriptor(key);
+                RuntimeOptions.Descriptor descriptor = getVMOptionDescriptor(key);
                 if (isBooleanOption(descriptor)) {
                     throw abort("Boolean option '" + key + "' must be set with +/- prefix, not <name>=<value> format.");
                 }
                 try {
-                    value = descriptor.getKey().getType().convert(arg.substring(eqIdx + 1));
+                    value = descriptor.convertValue(arg.substring(eqIdx + 1));
                 } catch (IllegalArgumentException iae) {
                     throw abort("Invalid argument: '--vm." + arg + "': " + iae.getMessage());
                 }
@@ -1289,15 +1465,8 @@ public abstract class Launcher {
             RuntimeOptions.set(key, value);
         }
 
-        private OptionDescriptor getVMOptionDescriptor(String key) {
-            OptionDescriptor descriptor = getVMOptions().get(key);
-            if (descriptor == null) {
-                descriptor = getCompilerOptions().get(key);
-                if (descriptor != null) {
-                    warn("compiler options such as '%s' should be set with '--vm.Dgraal.%<s=<value>'.%n" +
-                                    "Support for setting them with '--vm.XX:...' is deprecated and will be removed.%n", key);
-                }
-            }
+        private RuntimeOptions.Descriptor getVMOptionDescriptor(String key) {
+            RuntimeOptions.Descriptor descriptor = RuntimeOptions.getDescriptor(key);
             if (descriptor == null) {
                 throw unknownOption(key);
             }
@@ -1318,40 +1487,27 @@ public abstract class Launcher {
             }
         }
 
-        private boolean isBooleanOption(OptionDescriptor descriptor) {
-            return descriptor.getKey().getType().equals(OptionType.defaultType(Boolean.class));
+        private boolean isBooleanOption(RuntimeOptions.Descriptor descriptor) {
+            return descriptor.valueType() == Boolean.class;
         }
 
         private AbortException unknownOption(String key) {
-            throw abort("Unknown native option: " + key + ". Use --vm.help to list available options.");
-        }
-
-        private void printJvmHelp() {
-            System.out.println("JVM options:");
-            printOption("--vm.classpath <...>", "A " + File.pathSeparator + " separated list of classpath entries that will be added to the JVM's classpath");
-            printOption("--vm.D<name>=<value>", "Set a system property");
-            printOption("--vm.esa", "Enable system assertions");
-            printOption("--vm.ea[:<packagename>...|:<classname>]", "Enable assertions with specified granularity");
-            printOption("--vm.agentlib:<libname>[=<options>]", "Load native agent library <libname>");
-            printOption("--vm.agentpath:<pathname>[=<options>]", "Load native agent library by full pathname");
-            printOption("--vm.javaagent:<jarpath>[=<options>]", "Load Java programming language agent");
-            printOption("--vm.Xbootclasspath/a:<...>", "A " + File.pathSeparator + " separated list of classpath entries that will be added to the JVM's boot classpath");
-            printOption("--vm.Xmx<size>", "Set maximum Java heap size");
-            printOption("--vm.Xms<size>", "Set initial Java heap size");
-            printOption("--vm.Xss<size>", "Set java thread stack size");
+            throw abort("Unknown native option: " + key + ". Use --help:vm to list available options.");
         }
 
         private void printNativeHelp() {
             System.out.println("Native VM options:");
-            SortedMap<String, OptionDescriptor> sortedOptions = new TreeMap<>();
-            for (OptionDescriptor descriptor : getVMOptions()) {
-                sortedOptions.put(descriptor.getName(), descriptor);
+            SortedMap<String, RuntimeOptions.Descriptor> sortedOptions = new TreeMap<>();
+            for (RuntimeOptions.Descriptor descriptor : RuntimeOptions.listDescriptors()) {
+                if (!descriptor.deprecated()) {
+                    sortedOptions.put(descriptor.name(), descriptor);
+                }
             }
-            for (Entry<String, OptionDescriptor> entry : sortedOptions.entrySet()) {
-                OptionDescriptor descriptor = entry.getValue();
-                String helpMsg = descriptor.getHelp();
+            for (Entry<String, RuntimeOptions.Descriptor> entry : sortedOptions.entrySet()) {
+                RuntimeOptions.Descriptor descriptor = entry.getValue();
+                String helpMsg = descriptor.help();
                 if (isBooleanOption(descriptor)) {
-                    Boolean val = (Boolean) descriptor.getKey().getDefaultValue();
+                    Boolean val = (Boolean) descriptor.defaultValue();
                     if (helpMsg.length() != 0) {
                         helpMsg += ' ';
                     }
@@ -1360,64 +1516,40 @@ public abstract class Launcher {
                     } else {
                         helpMsg += "Default: + (enabled).";
                     }
-                    printOption("--vm.XX:\u00b1" + entry.getKey(), helpMsg);
+                    launcherOption("--vm.XX:\u00b1" + entry.getKey(), helpMsg);
                 } else {
-                    Object def = descriptor.getKey().getDefaultValue();
+                    Object def = descriptor.defaultValue();
                     if (def instanceof String) {
                         def = "\"" + def + "\"";
                     }
-                    printOption("--vm.XX:" + entry.getKey() + "=" + def, helpMsg);
+                    launcherOption("--vm.XX:" + entry.getKey() + "=" + def, helpMsg);
                 }
             }
-            printCompilerOptions();
-            printOption("--vm.D<property>=<value>", "Sets a system property");
-            /* The default values are *copied* from com.oracle.svm.core.genscavenge.HeapPolicy */
-            printOption("--vm.Xmn<value>", "Sets the maximum size of the young generation, in bytes. Default: 256MB.");
-            printOption("--vm.Xmx<value>", "Sets the maximum size of the heap, in bytes. Default: MaximumHeapSizePercent * physical memory.");
-            printOption("--vm.Xms<value>", "Sets the minimum size of the heap, in bytes. Default: 2 * maximum young generation size.");
-            printOption("--vm.Xss<value>", "Sets the size of each thread stack, in bytes. Default: OS-dependent.");
+            printBasicNativeHelp();
         }
 
-        private void printCompilerOptions() {
-            System.out.println("Compiler options:");
-            SortedMap<String, OptionDescriptor> sortedOptions = new TreeMap<>();
-            for (OptionDescriptor descriptor : getCompilerOptions()) {
-                sortedOptions.put(descriptor.getName(), descriptor);
-            }
-            for (Entry<String, OptionDescriptor> entry : sortedOptions.entrySet()) {
-                OptionDescriptor descriptor = entry.getValue();
-                String helpMsg = descriptor.getHelp();
-                Object def = descriptor.getKey().getDefaultValue();
-                if (def instanceof String) {
-                    def = '"' + (String) def + '"';
-                }
-                printOption("--vm.Dgraal." + entry.getKey() + "=" + def, helpMsg);
-            }
-        }
-
-        private void execNativePolyglot(List<String> args, Map<String, String> polyglotOptions) {
-            List<String> command = new ArrayList<>(args.size() + (polyglotOptions == null ? 0 : polyglotOptions.size()) + 3);
+        private void executePolyglot(List<String> args, boolean forceNative) {
+            List<String> command = new ArrayList<>(args.size() + 3);
             Path executable = getGraalVMBinaryPath("polyglot");
-            command.add("--native");
-            serializePolyglotOptions(polyglotOptions, command);
+            if (forceNative) {
+                command.add("--native");
+            }
             command.add("--use-launcher");
             command.add(getMainClass());
             command.addAll(args);
             exec(executable, command);
         }
 
-        private void execJVM(List<String> jvmArgs, List<String> args, Map<String, String> polyglotOptions) {
+        private void execJVM(String classpath, List<String> jvmArgs, List<String> args) {
             // TODO use String[] for command to avoid a copy later
-            List<String> command = new ArrayList<>(jvmArgs.size() + args.size() + (polyglotOptions == null ? 0 : polyglotOptions.size()) + 4);
+            List<String> command = new ArrayList<>(jvmArgs.size() + args.size() + 4);
             Path executable = getGraalVMBinaryPath("java");
-            String classpath = getClasspath(jvmArgs);
             if (classpath != null) {
                 command.add("-classpath");
                 command.add(classpath);
             }
             command.addAll(jvmArgs);
             command.add(getMainClass());
-            serializePolyglotOptions(polyglotOptions, command);
             command.addAll(args);
             exec(executable, command);
         }
@@ -1432,11 +1564,25 @@ public abstract class Launcher {
                     throw abort("Can not resolve classpath: could not get GraalVM home");
                 }
                 for (String entry : CLASSPATH.split(File.pathSeparator)) {
-                    Path resolved = graalVMHome.resolve(entry);
+                    // On Windows, Path.resolve will throw an error on * character in path.
+                    boolean endsWithStar = entry.endsWith("*");
+                    Path resolved;
+
+                    if (endsWithStar) {
+                        resolved = graalVMHome.resolve(entry.substring(0, entry.length() - 1));
+                    } else {
+                        resolved = graalVMHome.resolve(entry);
+                    }
                     if (isVerbose() && !Files.exists(resolved)) {
                         warn("%s does not exist", resolved);
                     }
                     sb.append(resolved);
+                    if (endsWithStar) {
+                        if (!resolved.endsWith(File.separator)) {
+                            sb.append(File.separator);
+                        }
+                        sb.append("*");
+                    }
                     sb.append(File.pathSeparatorChar);
                 }
             }
@@ -1467,27 +1613,35 @@ public abstract class Launcher {
             return sb.substring(0, sb.length() - 1);
         }
 
-        private Path getGraalVMBinaryPath(String binaryName) {
-            String executableName = executableName(binaryName);
-            Path graalVMHome = getGraalVMHome();
-            if (graalVMHome == null) {
-                throw abort("Can not exec to GraalVM binary: could not find GraalVM home");
+        /**
+         * Re-rexecutes the launcher executable with the given arguments and additional environment.
+         *
+         * @param args launcher arguments
+         * @param env additional environment - the entries will be added to the existing environment
+         */
+        private void reExec(List<String> args, Map<String, String> env) {
+            assert isAOT();
+            String path = ProcessProperties.getExecutableName();
+            Path executable = Paths.get(path);
+            if (isVerbose()) {
+                StringBuilder sb = formatExec(executable, args);
+                err.print(sb.toString());
             }
-            Path jdkBin = graalVMHome.resolve("bin").resolve(executableName);
-            if (Files.exists(jdkBin)) {
-                return jdkBin;
-            }
-            return graalVMHome.resolve("jre").resolve("bin").resolve(executableName);
-        }
-
-        Path getGraalVMHome() {
-            return Engine.findHome();
+            Map<String, String> newEnv = new HashMap<>();
+            newEnv.putAll(System.getenv());
+            newEnv.putAll(env);
+            // for exec, arg 0 needs to be the name of the executable
+            List<String> execArgs = new ArrayList<>();
+            execArgs.add(path);
+            execArgs.addAll(args);
+            ProcessProperties.exec(executable, execArgs.toArray(new String[0]), newEnv);
         }
 
         private void exec(Path executable, List<String> command) {
             assert isAOT();
             if (isVerbose()) {
-                System.out.println(String.format("exec(%s, %s)", executable, command));
+                StringBuilder sb = formatExec(executable, command);
+                err.print(sb.toString());
             }
             String[] argv = new String[command.size() + 1];
             int i = 0;
@@ -1499,72 +1653,119 @@ public abstract class Launcher {
             for (String arg : command) {
                 argv[i++] = arg;
             }
-            if (execv(executable.toString(), argv) != 0) {
-                int errno = NativeInterface.errno();
-                throw abort(String.format("exec(%s, %s) failed: %s", executable, command, CTypeConversion.toJavaString(NativeInterface.strerror(errno))));
-            }
+            ProcessProperties.exec(executable, argv);
         }
 
-        private int execv(String executable, String[] argv) {
-            try (CTypeConversion.CCharPointerHolder pathHolder = CTypeConversion.toCString(executable);
-                            CTypeConversion.CCharPointerPointerHolder argvHolder = CTypeConversion.toCStrings(argv)) {
-                return NativeInterface.execv(pathHolder.get(), argvHolder.get());
+        private StringBuilder formatExec(Path executable, List<String> command) {
+            StringBuilder sb = new StringBuilder("exec: ");
+            sb.append(executable);
+            for (String arg : command) {
+                sb.append(' ');
+                sb.append(ShellQuotes.quote(arg));
             }
+            sb.append(System.lineSeparator());
+            return sb;
         }
     }
 
-    static OutputStream newLogStream(Path path) throws IOException {
-        Path usedPath = path;
-        Path lockFile = null;
-        FileChannel lockFileChannel = null;
-        for (int unique = 0;; unique++) {
-            StringBuilder lockFileNameBuilder = new StringBuilder();
-            lockFileNameBuilder.append(path.toString());
-            if (unique > 0) {
-                lockFileNameBuilder.append(unique);
-                usedPath = Paths.get(lockFileNameBuilder.toString());
+    private static final class ShellQuotes {
+        private static final BitSet safeChars;
+        static {
+            safeChars = new BitSet();
+            safeChars.set('a', 'z' + 1);
+            safeChars.set('A', 'Z' + 1);
+            safeChars.set('+', ':' + 1); // +,-./0..9:
+            safeChars.set('@');
+            safeChars.set('%');
+            safeChars.set('_');
+            safeChars.set('=');
+        }
+
+        private static String quote(String str) {
+            if (str.isEmpty()) {
+                return "''";
             }
-            lockFileNameBuilder.append(".lck");
-            lockFile = Paths.get(lockFileNameBuilder.toString());
-            Map.Entry<FileChannel, Boolean> openResult = openChannel(lockFile);
-            if (openResult != null) {
-                lockFileChannel = openResult.getKey();
-                if (lock(lockFileChannel, openResult.getValue())) {
-                    break;
-                } else {
-                    // Close and try next name
-                    lockFileChannel.close();
+            for (int i = 0; i < str.length(); i++) {
+                if (!safeChars.get(str.charAt(i))) {
+                    return "'" + str.replace("'", "'\"'\"'") + "'";
+                }
+            }
+            return str;
+        }
+    }
+
+    /**
+     * Creates a new log file. The method uses a supplemental lock file to determine the file is
+     * still opened for output; in that case, it creates a different file, named `path'1, `path`2,
+     * ... until it finds a free name. Files not locked (actively written to) are overwritten.
+     *
+     * @param path the desired output for log
+     * @return the OutputStream for logging
+     * @throws IOException in case of I/O error opening the file
+     * @since 20.0
+     */
+    public static OutputStream newLogStream(Path path) throws IOException {
+        Path usedPath = path;
+        Path parent = path.getParent();
+        if (parent != null) {
+            Files.createDirectories(parent);
+        }
+        Path fileNamePath = path.getFileName();
+        String fileName = fileNamePath == null ? "" : fileNamePath.toString();
+        OutputStream outputStream;
+        if (Files.exists(path) && !Files.isRegularFile(path)) {
+            // Don't try to lock device or named pipe.
+            outputStream = new BufferedOutputStream(Files.newOutputStream(usedPath, WRITE, CREATE, APPEND));
+        } else {
+            Path lockFile = null;
+            FileChannel lockFileChannel = null;
+            for (int unique = 0;; unique++) {
+                StringBuilder lockFileNameBuilder = new StringBuilder(fileName);
+                if (unique > 0) {
+                    lockFileNameBuilder.append(unique);
+                    usedPath = path.resolveSibling(lockFileNameBuilder.toString());
+                }
+                lockFileNameBuilder.append(".lck");
+                lockFile = path.resolveSibling(lockFileNameBuilder.toString());
+                Pair<FileChannel, Boolean> openResult = openChannel(lockFile);
+                if (openResult != null) {
+                    lockFileChannel = openResult.getLeft();
+                    if (lock(lockFileChannel, openResult.getRight())) {
+                        break;
+                    } else {
+                        // Close and try next name
+                        lockFileChannel.close();
+                    }
+                }
+            }
+            boolean success = false;
+            try {
+                outputStream = new LockableOutputStream(
+                                new BufferedOutputStream(Files.newOutputStream(usedPath, WRITE, CREATE, APPEND)),
+                                lockFile,
+                                lockFileChannel);
+                success = true;
+            } finally {
+                if (!success) {
+                    LockableOutputStream.unlock(lockFile, lockFileChannel);
                 }
             }
         }
-        assert lockFile != null && lockFileChannel != null;
-        boolean success = false;
-        try {
-            OutputStream stream = new LockableOutputStream(
-                            new BufferedOutputStream(Files.newOutputStream(usedPath, WRITE, CREATE, APPEND)),
-                            lockFile,
-                            lockFileChannel);
-            success = true;
-            return stream;
-        } finally {
-            if (!success) {
-                LockableOutputStream.unlock(lockFile, lockFileChannel);
-            }
-        }
+        return outputStream;
     }
 
-    private static Map.Entry<FileChannel, Boolean> openChannel(Path path) throws IOException {
-        FileChannel channel = null;
-        for (int retries = 0; channel == null && retries < 2; retries++) {
+    private static Pair<FileChannel, Boolean> openChannel(Path path) throws IOException {
+        FileChannel channel;
+        for (int retries = 0; retries < 2; retries++) {
             try {
                 channel = FileChannel.open(path, CREATE_NEW, WRITE);
-                return new AbstractMap.SimpleImmutableEntry<>(channel, true);
+                return Pair.create(channel, true);
             } catch (FileAlreadyExistsException faee) {
                 // Maybe a FS race showing a zombie file, try to reuse it
                 if (Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) && isParentWritable(path)) {
                     try {
                         channel = FileChannel.open(path, WRITE, APPEND);
-                        return new AbstractMap.SimpleImmutableEntry<>(channel, false);
+                        return Pair.create(channel, false);
                     } catch (NoSuchFileException x) {
                         // FS Race, next try we should be able to create with CREATE_NEW
                     } catch (IOException x) {

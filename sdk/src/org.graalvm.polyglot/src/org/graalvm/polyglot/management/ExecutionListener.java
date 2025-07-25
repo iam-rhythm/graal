@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,7 +40,7 @@
  */
 package org.graalvm.polyglot.management;
 
-import java.lang.reflect.Method;
+import java.util.Objects;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 
@@ -48,9 +48,8 @@ import org.graalvm.polyglot.Context;
 import org.graalvm.polyglot.Engine;
 import org.graalvm.polyglot.PolyglotException;
 import org.graalvm.polyglot.Source;
-import org.graalvm.polyglot.impl.AbstractPolyglotImpl;
-import org.graalvm.polyglot.impl.AbstractPolyglotImpl.AbstractExecutionListenerImpl;
-import org.graalvm.polyglot.impl.AbstractPolyglotImpl.MonitoringAccess;
+import org.graalvm.polyglot.impl.AbstractPolyglotImpl.AbstractExecutionListenerDispatch;
+import org.graalvm.polyglot.impl.AbstractPolyglotImpl.APIAccess;
 
 /**
  * Execution listeners allow to instrument the execution of guest languages. For example, it is
@@ -68,7 +67,7 @@ import org.graalvm.polyglot.impl.AbstractPolyglotImpl.MonitoringAccess;
  *                  e.getLocation().getCharacters()))
  *          .statements(true)
  *          .attach(context.getEngine());
- * context.eval("js", "for (var i = 0; i < 2; i++);");
+ * context.eval("js", "for (var i = 0; i &lt; 2; i++);");
  * listener.close();
  * </pre>
  * </code>
@@ -77,11 +76,11 @@ import org.graalvm.polyglot.impl.AbstractPolyglotImpl.MonitoringAccess;
  *
  * <pre>
  * i = 0
- * i < 2
+ * i &lt; 2
  * i++
- * i < 2
+ * i &lt; 2
  * i++
- * i < 2
+ * i &lt; 2
  * </pre>
  *
  * <h3>Creation and Closing</h3>
@@ -190,15 +189,29 @@ import org.graalvm.polyglot.impl.AbstractPolyglotImpl.MonitoringAccess;
  * <a href="http://www.graalvm.org/docs/graalvm-as-a-platform/implement-instrument/">Truffle
  * instrumentation framework</a> should be used for that purpose instead.
  *
- * @since 1.0
+ * @since 19.0
  */
 public final class ExecutionListener implements AutoCloseable {
 
-    private static final ExecutionListener EMPTY = new ExecutionListener(null);
-    private final Object impl;
+    private static final ExecutionListener EMPTY = new ExecutionListener();
+    final AbstractExecutionListenerDispatch dispatch;
+    final Object receiver;
+    /**
+     * Strong reference to {@link Engine} to prevent it from being garbage collected and closed
+     * while {@link ExecutionListener} is still reachable.
+     */
+    final Engine creatorEngine;
 
-    private ExecutionListener(Object impl) {
-        this.impl = impl;
+    ExecutionListener(AbstractExecutionListenerDispatch dispatch, Object receiver, Engine creatorEngine) {
+        this.dispatch = dispatch;
+        this.receiver = receiver;
+        this.creatorEngine = Objects.requireNonNull(creatorEngine);
+    }
+
+    private ExecutionListener() {
+        this.dispatch = null;
+        this.receiver = null;
+        this.creatorEngine = null;
     }
 
     /**
@@ -212,10 +225,10 @@ public final class ExecutionListener implements AutoCloseable {
      * close with the engine.
      *
      * @see Builder#attach(Engine)
-     * @since 1.0
+     * @since 19.0
      */
     public void close() {
-        IMPL.closeExecutionListener(impl);
+        dispatch.closeExecutionListener(receiver);
     }
 
     /**
@@ -234,7 +247,7 @@ public final class ExecutionListener implements AutoCloseable {
      * </code>
      *
      * @see ExecutionListener
-     * @since 1.0
+     * @since 19.0
      */
     public static Builder newBuilder() {
         return EMPTY.new Builder();
@@ -245,17 +258,17 @@ public final class ExecutionListener implements AutoCloseable {
      * not be used from multiple threads at the same time.
      *
      * @see ExecutionEvent For further details.
-     * @since 1.0
+     * @since 19.0
      */
     public final class Builder {
 
-        private Consumer<ExecutionEvent> onReturn;
-        private Consumer<ExecutionEvent> onEnter;
+        private Consumer<?> onReturn;
+        private Consumer<?> onEnter;
 
         private boolean expressions;
         private boolean statements;
         private boolean roots;
-        private Predicate<Source> sourceFilter;
+        private Predicate<?> sourceFilter;
         private Predicate<String> rootNameFilter;
         private boolean collectInputValues;
         private boolean collectReturnValues;
@@ -267,7 +280,7 @@ public final class ExecutionListener implements AutoCloseable {
         /**
          * Set a listener that is notified when an execution of an element is entered.
          *
-         * @since 1.0
+         * @since 19.0
          */
         public Builder onEnter(Consumer<ExecutionEvent> listener) {
             this.onEnter = listener;
@@ -278,7 +291,7 @@ public final class ExecutionListener implements AutoCloseable {
          * Set a listener that is notified when an execution of an element was entered and
          * completed.
          *
-         * @since 1.0
+         * @since 19.0
          */
         public Builder onReturn(Consumer<ExecutionEvent> listener) {
             this.onReturn = listener;
@@ -292,7 +305,7 @@ public final class ExecutionListener implements AutoCloseable {
          *
          * @param predicate the source predicate that returns <code>true</code> for a source to be
          *            included and <code>false</code> otherwise.
-         * @since 1.0
+         * @since 19.0
          */
         public Builder sourceFilter(Predicate<Source> predicate) {
             this.sourceFilter = predicate;
@@ -304,7 +317,7 @@ public final class ExecutionListener implements AutoCloseable {
          * included. Root name predicates must be stable and always return the same result for
          * source. The filter predicate may be invoked on multiple threads at the same time.
          *
-         * @since 1.0
+         * @since 19.0
          */
         public Builder rootNameFilter(Predicate<String> predicate) {
             this.rootNameFilter = predicate;
@@ -318,7 +331,7 @@ public final class ExecutionListener implements AutoCloseable {
          * @param enabled <code>true</code> if enabled, else <code>false</code>
          * @see #expressions(boolean)
          * @see #statements(boolean)
-         * @since 1.0
+         * @since 19.0
          */
         public Builder roots(boolean enabled) {
             this.roots = enabled;
@@ -332,7 +345,7 @@ public final class ExecutionListener implements AutoCloseable {
          * @param enabled <code>true</code> if enabled, else <code>false</code>
          * @see #expressions(boolean)
          * @see #roots(boolean)
-         * @since 1.0
+         * @since 19.0
          */
         public Builder statements(boolean enabled) {
             this.statements = enabled;
@@ -346,7 +359,7 @@ public final class ExecutionListener implements AutoCloseable {
          * @param enabled <code>true</code> if enabled, else <code>false</code>
          * @see #statements(boolean)
          * @see #roots(boolean)
-         * @since 1.0
+         * @since 19.0
          */
         public Builder expressions(boolean enabled) {
             this.expressions = enabled;
@@ -363,7 +376,7 @@ public final class ExecutionListener implements AutoCloseable {
          * running production workloads.
          *
          * @param enabled <code>true</code> if enabled, else <code>false</code>
-         * @since 1.0
+         * @since 19.0
          */
         public Builder collectInputValues(boolean enabled) {
             this.collectInputValues = enabled;
@@ -380,7 +393,7 @@ public final class ExecutionListener implements AutoCloseable {
          * running production workloads.
          *
          * @param enabled <code>true</code> if enabled, else <code>false</code>
-         * @since 1.0
+         * @since 19.0
          */
         public Builder collectReturnValue(boolean enabled) {
             this.collectReturnValues = enabled;
@@ -396,7 +409,7 @@ public final class ExecutionListener implements AutoCloseable {
          * running production workloads.
          *
          * @param enabled <code>true</code> if enabled, else <code>false</code>
-         * @since 1.0
+         * @since 19.0
          */
         public Builder collectExceptions(boolean enabled) {
             this.collectExceptions = enabled;
@@ -423,33 +436,16 @@ public final class ExecutionListener implements AutoCloseable {
          * @throws PolyglotException if one of the provided filter predicate fails.
          * @param engine the engine to attach to
          * @return the attached closable execution listener.
-         * @since 1.0
+         * @since 19.0
          */
+        @SuppressWarnings({"unchecked", "cast"})
         public ExecutionListener attach(Engine engine) {
-            return new ExecutionListener(
-                            IMPL.attachExecutionListener(engine, onEnter, onReturn, expressions, statements, roots,
-                                            sourceFilter, rootNameFilter, collectInputValues, collectReturnValues, collectExceptions));
-        }
-    }
-
-    static final AbstractExecutionListenerImpl IMPL = initImpl();
-
-    private static AbstractExecutionListenerImpl initImpl() {
-        try {
-            Method method = Engine.class.getDeclaredMethod("getImpl");
-            method.setAccessible(true);
-            AbstractPolyglotImpl impl = (AbstractPolyglotImpl) method.invoke(null);
-            impl.setMonitoring(new MonitoringAccessImpl());
-            return impl.getExecutionListenerImpl();
-        } catch (Exception e) {
-            throw new IllegalStateException("Failed to initialize execution listener class.", e);
-        }
-    }
-
-    private static class MonitoringAccessImpl extends MonitoringAccess {
-        @Override
-        public ExecutionEvent newExecutionEvent(Object event) {
-            return new ExecutionEvent(event);
+            APIAccess apiAccess = Management.ImplHolder.IMPL.getAPIAccess();
+            return (ExecutionListener) apiAccess.getEngineDispatch(engine).attachExecutionListener(apiAccess.getEngineReceiver(engine),
+                            (Consumer<Object>) onEnter,
+                            (Consumer<Object>) onReturn,
+                            expressions, statements, roots,
+                            (Predicate<Object>) sourceFilter, rootNameFilter, collectInputValues, collectReturnValues, collectExceptions);
         }
     }
 

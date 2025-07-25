@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, Oracle and/or its affiliates.
+ * Copyright (c) 2018, 2020, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -30,23 +30,36 @@
 package com.oracle.truffle.llvm.runtime.debug.value;
 
 import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
+import com.oracle.truffle.api.interop.InteropLibrary;
 import com.oracle.truffle.api.interop.TruffleObject;
+import com.oracle.truffle.api.interop.UnsupportedMessageException;
+import com.oracle.truffle.api.library.ExportLibrary;
+import com.oracle.truffle.api.library.ExportMessage;
 import com.oracle.truffle.llvm.runtime.debug.LLVMDebuggerValue;
 import com.oracle.truffle.llvm.runtime.pointer.LLVMManagedPointer;
+import com.oracle.truffle.llvm.runtime.types.VectorType;
 import com.oracle.truffle.llvm.runtime.vector.LLVMVector;
 
+@ExportLibrary(InteropLibrary.class)
 public abstract class LLVMDebugManagedValue extends LLVMDebuggerValue {
 
-    private final Object llvmType;
+    final Object llvmType;
 
     private LLVMDebugManagedValue(Object llvmType) {
         this.llvmType = llvmType;
     }
 
-    @Override
-    @TruffleBoundary
-    public Object getMetaObject() {
-        return llvmType != null ? String.valueOf(llvmType) : "";
+    @ExportMessage
+    public final Object getMetaObject() throws UnsupportedMessageException {
+        if (llvmType == null) {
+            throw UnsupportedMessageException.create();
+        }
+        return new LLVMDebugManagedType(llvmType);
+    }
+
+    @ExportMessage
+    public final boolean hasMetaObject() {
+        return llvmType != null;
     }
 
     public static LLVMDebugManagedValue create(Object llvmType, Object value) {
@@ -126,7 +139,11 @@ public abstract class LLVMDebugManagedValue extends LLVMDebuggerValue {
         @Override
         @TruffleBoundary
         public String toString() {
-            return String.format("< %d x %s >", vector.length, elementType);
+            if (llvmType instanceof VectorType && ((VectorType) llvmType).getNumberOfElements() != 0 && vector.length == 0) {
+                return "(optimized away)";
+            }
+
+            return "< " + vector.length + " x " + elementType + " >";
         }
 
         @Override
@@ -142,7 +159,7 @@ public abstract class LLVMDebugManagedValue extends LLVMDebuggerValue {
             }
             final String[] keys = new String[vector.length];
             for (int i = 0; i < vector.length; i++) {
-                keys[i] = String.valueOf(i);
+                keys[i] = String.format("[%d]", i);
             }
             return keys;
         }
@@ -153,8 +170,8 @@ public abstract class LLVMDebugManagedValue extends LLVMDebuggerValue {
             int i;
 
             try {
-                i = Integer.parseInt(key);
-            } catch (NumberFormatException nfe) {
+                i = Integer.parseInt(key.substring(1, key.length() - 1));
+            } catch (NumberFormatException | StringIndexOutOfBoundsException e) {
                 throw new IllegalArgumentException("Vector has no member named " + key);
             }
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -43,10 +43,10 @@ package org.graalvm.nativeimage;
 import org.graalvm.word.ComparableWord;
 
 /**
- * The opaque representation of a handle to a Java object given out to C code. Clients must not
- * interpret or dereference the value.
+ * The opaque representation of a handle to a Java object given out to unmanaged code. Clients must
+ * not interpret or dereference the value.
  *
- * @since 1.0
+ * @since 19.0
  */
 public interface ObjectHandle extends ComparableWord {
 }

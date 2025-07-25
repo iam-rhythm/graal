@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -44,16 +44,19 @@ import java.util.AbstractMap;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashSet;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
+
+import org.graalvm.polyglot.Context;
 import org.graalvm.polyglot.PolyglotException;
 import org.graalvm.polyglot.SourceSection;
 import org.graalvm.polyglot.Value;
@@ -72,15 +75,22 @@ final class TestUtil {
         throw new IllegalStateException("No instance allowed.");
     }
 
+    static void assertNoCurrentContext() {
+        try {
+            Context ctx = Context.getCurrent();
+            throw new AssertionError(String.format(
+                            "Context cannot be explicitly entered while running TCK tests. Entered context: 0x%x", ctx.hashCode()));
+        } catch (IllegalStateException e) {
+            // No context entered.
+        }
+    }
+
     static Set<? extends String> getRequiredLanguages(final TestContext context) {
-        return filterLanguages(
-                        context,
-                        LANGUAGE == null ? null : new Predicate<String>() {
-                            @Override
-                            public boolean test(String lang) {
-                                return LANGUAGE.equals(lang);
-                            }
-                        });
+        Set<String> installedProviders = context.getInstalledProviders().keySet();
+        if (LANGUAGE != null && !installedProviders.contains(LANGUAGE)) {
+            throw providerNotFound("tck.language", Collections.singleton(LANGUAGE), installedProviders);
+        }
+        return filterLanguages(context, LANGUAGE == null ? null : LANGUAGE::equals);
     }
 
     static Set<? extends String> getRequiredValueLanguages(final TestContext context) {
@@ -88,12 +98,12 @@ final class TestUtil {
         if (VALUES != null) {
             final Set<String> requiredValues = new HashSet<>();
             Collections.addAll(requiredValues, VALUES.split(","));
-            predicate = new Predicate<String>() {
-                @Override
-                public boolean test(String lang) {
-                    return requiredValues.contains(lang);
-                }
-            };
+            Set<String> installedProviders = context.getInstalledProviders().keySet();
+            if (!installedProviders.containsAll(requiredValues)) {
+                requiredValues.removeAll(installedProviders);
+                throw providerNotFound("tck.values", requiredValues, installedProviders);
+            }
+            predicate = requiredValues::contains;
         } else {
             predicate = null;
         }
@@ -109,7 +119,7 @@ final class TestUtil {
                     final Set<? extends String> requiredValueLanguages,
                     final Function<String, ? extends Collection<? extends Snippet>> snippetsProvider,
                     final Function<String, ? extends Collection<? extends Snippet>> valuesProvider) {
-        final Collection<TestRun> testRuns = new LinkedHashSet<>();
+        final Collection<TestRun> testRuns = new TreeSet<>(Comparator.comparing(TestRun::toString));
         for (String opLanguage : requiredLanguages) {
             for (Snippet operator : snippetsProvider.apply(opLanguage)) {
                 for (String parLanguage : requiredValueLanguages) {
@@ -120,7 +130,7 @@ final class TestUtil {
                     final List<List<Map.Entry<String, ? extends Snippet>>> applicableParams = findApplicableParameters(operator, valueConstructors);
                     boolean canBeInvoked = true;
                     for (List<Map.Entry<String, ? extends Snippet>> param : applicableParams) {
-                        canBeInvoked &= !param.isEmpty();
+                        canBeInvoked = !param.isEmpty();
                         if (!canBeInvoked) {
                             break;
                         }
@@ -134,26 +144,34 @@ final class TestUtil {
         return testRuns;
     }
 
-    static void validateResult(
-                    final TestRun testRun,
-                    final Value result,
-                    final PolyglotException exception) {
+    static void validateResult(TestRun testRun, Value result, boolean fastAssertions) {
         ResultVerifier verifier = testRun.getSnippet().getResultVerifier();
-        validateResult(verifier, testRun, result, exception);
+        validateResult(verifier, testRun, result, fastAssertions);
     }
 
-    static void validateResult(
-                    final ResultVerifier verifier,
-                    final TestRun testRun,
-                    final Value result,
-                    final PolyglotException exception) {
-        if (exception == null) {
-            verifier.accept(ResultVerifier.SnippetRun.create(testRun.getSnippet(), testRun.getActualParameters(), result));
-            verifyToString(testRun, result);
-            verifyMetaObject(testRun, result, 10);
-            verifyInterop(result);
+    static void validateResult(TestRun testRun, PolyglotException exception) {
+        ResultVerifier verifier = testRun.getSnippet().getResultVerifier();
+        validateResult(verifier, testRun, exception);
+    }
+
+    static void validateResult(ResultVerifier verifier, TestRun testRun, Value result, boolean fastAssertions) {
+        verifier.accept(ResultVerifier.SnippetRun.create(testRun.getSnippet(), testRun.getActualParameters(), result));
+        assertValue(result, fastAssertions);
+    }
+
+    static void validateResult(ResultVerifier verifier, TestRun testRun, PolyglotException polyglotException) {
+        verifier.accept(ResultVerifier.SnippetRun.create(testRun.getSnippet(), testRun.getActualParameters(), polyglotException));
+        Value exceptionObject = polyglotException.getGuestObject();
+        if (exceptionObject != null) {
+            assertValue(exceptionObject, true);
+        }
+    }
+
+    private static void assertValue(final Value result, boolean fastAssertions) {
+        if (fastAssertions) {
+            ValueAssert.assertValueFast(result);
         } else {
-            verifier.accept(ResultVerifier.SnippetRun.create(testRun.getSnippet(), testRun.getActualParameters(), exception));
+            ValueAssert.assertValue(result);
         }
     }
 
@@ -184,7 +202,9 @@ final class TestUtil {
     static String formatErrorMessage(
                     final String errorMessage,
                     final TestRun testRun,
-                    final TestContext testContext) {
+                    final TestContext testContext,
+                    final Value resultValue,
+                    final PolyglotException exception) {
         final String language = testRun.getID();
         final Snippet snippet = testRun.getSnippet();
         final StringBuilder message = new StringBuilder();
@@ -208,12 +228,16 @@ final class TestUtil {
         message.append("failed:\n");
         message.append(errorMessage);
         message.append('\n');
+        message.append("Result: ").append(resultValue).append('\n');
+        message.append("Exception: ").append(exception).append('\n');
         message.append("Snippet: ").append(getSource(snippet.getExecutableValue())).append('\n');
-        int i = 0;
-        for (Map.Entry<String, ? extends Snippet> langAndparamSnippet : testRun.getActualParameterSnippets()) {
-            final Snippet paramSnippet = langAndparamSnippet.getValue();
-            message.append(String.format("Parameter %d Snippet: ", i++)).append(getSource(paramSnippet.getExecutableValue())).append('\n');
+        for (int i = 0; i < actualParameterSnippets.size(); i++) {
+            final Snippet paramSnippet = actualParameterSnippets.get(i).getValue();
+            message.append(String.format("Parameter %d Snippet: ", i)).append(getSource(paramSnippet.getExecutableValue())).append('\n');
+            message.append(String.format("Parameter %d Declared Return Type: %s%n", i, paramSnippet.getReturnType()));
+            message.append(String.format("Parameter %d Returned Value Type: %s%n", i, TypeDescriptor.forValue(actualParameters.get(i))));
         }
+
         return message.toString();
     }
 
@@ -250,88 +274,13 @@ final class TestUtil {
         return predicte == null ? installedLangs : installedLangs.stream().filter(predicte).collect(Collectors.toSet());
     }
 
-    private static void verifyToString(final TestRun testRun, final Value result) {
-        try {
-            result.toString();
-        } catch (Exception e) {
-            throw new AssertionError(
-                            String.format("The result's toString of : %s failed.", testRun),
-                            e);
-        }
-    }
-
-    private static void verifyMetaObject(final TestRun testRun, final Value result, int maxMetaCalls) {
-        Value metaObject;
-        try {
-            metaObject = result.getMetaObject();
-        } catch (Exception e) {
-            throw new AssertionError(
-                            String.format("The result's meta object of : %s failed.", testRun),
-                            e);
-        }
-        if (metaObject != null) {
-            verifyToString(testRun, metaObject);
-            if (maxMetaCalls > 0) {
-                verifyMetaObject(testRun, metaObject, maxMetaCalls - 1);
-            }
-        }
-    }
-
-    private static void verifyInterop(final Value result) {
-        if (result.isBoolean()) {
-            verifyBoolean(result);
-        }
-        if (result.isNumber()) {
-            verifyNumber(result);
-        }
-        if (result.isString()) {
-            verifyString(result);
-        }
-        if (result.hasArrayElements()) {
-            verifyArray(result);
-        }
-        if (result.hasMembers()) {
-            verifyObject(result);
-        }
-    }
-
-    private static void verifyBoolean(final Value result) {
-        result.asBoolean();
-    }
-
-    private static void verifyNumber(final Value result) {
-        if (result.fitsInByte()) {
-            result.asByte();
-        }
-        if (result.fitsInInt()) {
-            result.asInt();
-        }
-        if (result.fitsInLong()) {
-            result.asLong();
-        }
-        if (result.fitsInFloat()) {
-            result.asFloat();
-        }
-        if (result.fitsInDouble()) {
-            result.asDouble();
-        }
-    }
-
-    private static void verifyString(final Value result) {
-        result.asString();
-    }
-
-    private static void verifyArray(final Value value) {
-        final long size = value.getArraySize();
-        if (size > 0) {
-            value.getArrayElement(0);
-        }
-    }
-
-    private static void verifyObject(final Value value) {
-        for (String key : value.getMemberKeys()) {
-            value.getMember(key);
-        }
+    private static IllegalStateException providerNotFound(String property, Set<String> providerIds, Set<String> installedProviders) {
+        throw new IllegalStateException(String.format(
+                        "Following providers %s required by the '%s' property are not installed.%n" +
+                                        "Installed providers are %s",
+                        String.join(", ", providerIds),
+                        property,
+                        String.join(", ", installedProviders)));
     }
 
     abstract static class CollectingMatcher<T> extends BaseMatcher<T> implements Consumer<Map.Entry<T, Boolean>> {

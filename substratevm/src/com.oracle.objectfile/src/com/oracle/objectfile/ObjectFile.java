@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -25,11 +25,12 @@
 package com.oracle.objectfile;
 
 import java.io.IOException;
-import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileChannel.MapMode;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -42,13 +43,16 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.function.Consumer;
 import java.util.stream.StreamSupport;
 
+import com.oracle.objectfile.debuginfo.DebugInfoProvider;
 import com.oracle.objectfile.elf.ELFObjectFile;
 import com.oracle.objectfile.macho.MachOObjectFile;
 import com.oracle.objectfile.pecoff.PECoffObjectFile;
 
-import sun.misc.Unsafe;
+import jdk.graal.compiler.debug.DebugContext;
+import sun.nio.ch.DirectBuffer;
 
 /**
  * Abstract superclass for object files. An object file is a binary container for sections,
@@ -58,6 +62,7 @@ import sun.misc.Unsafe;
  * contents; layout decisions (offsets, ordering) are modelled separately (see
  * {@link LayoutDecision}), being computed on write-out (see {@link WriteLayout}).
  */
+@SuppressWarnings("this-escape")
 public abstract class ObjectFile {
 
     /*
@@ -100,7 +105,8 @@ public abstract class ObjectFile {
     public enum Format {
         ELF,
         MACH_O,
-        PECOFF
+        PECOFF,
+        LLVM
     }
 
     public abstract Format getFormat();
@@ -113,6 +119,13 @@ public abstract class ObjectFile {
      */
     public interface ValueEnum {
         long value();
+    }
+
+    private final int pageSize;
+
+    public ObjectFile(int pageSize) {
+        assert pageSize > 0 : "Invalid page size";
+        this.pageSize = pageSize;
     }
 
     /*
@@ -156,8 +169,6 @@ public abstract class ObjectFile {
 
     public abstract void setByteOrder(ByteOrder byteOrder);
 
-    public abstract void setMainEntryPoint(String name);
-
     // FIXME: replace OS string with enum (or just get rid of the concept,
     // perhaps merging with getFilenameSuffix).
     private static String getHostOS() {
@@ -169,7 +180,7 @@ public abstract class ObjectFile {
         } else if (osName.startsWith("Windows")) {
             return "Windows";
         } else {
-            throw new IllegalStateException("unsupported OS: " + osName);
+            throw new IllegalStateException("Unsupported OS: " + osName);
         }
     }
 
@@ -183,15 +194,15 @@ public abstract class ObjectFile {
     }
 
     public static String getFilenameSuffix() {
-        switch (ObjectFile.getNativeFormat()) {
-            case ELF:
-            case MACH_O:
-                return ".o";
-            case PECOFF:
-                return ".obj";
-            default:
-                throw new AssertionError("unreachable");
-        }
+        return getFilenameSuffix(getNativeFormat());
+    }
+
+    public static String getFilenameSuffix(Format format) {
+        return switch (format) {
+            case ELF, MACH_O -> ".o";
+            case PECOFF -> ".obj";
+            case LLVM -> ".bc";
+        };
     }
 
     public static Format getNativeFormat() {
@@ -203,29 +214,25 @@ public abstract class ObjectFile {
             case "Windows":
                 return Format.PECOFF;
             default:
-                throw new AssertionError("unreachable"); // we must handle any output of getHostOS()
+                throw new AssertionError("Unreachable"); // we must handle any output of getHostOS()
         }
     }
 
-    private static ObjectFile getNativeObjectFile(boolean runtimeDebugInfoGeneration) {
-        switch (ObjectFile.getNativeFormat()) {
-            case ELF:
-                return new ELFObjectFile(runtimeDebugInfoGeneration);
-            case MACH_O:
-                return new MachOObjectFile();
-            case PECOFF:
-                return new PECoffObjectFile();
-            default:
-                throw new AssertionError("unreachable");
-        }
+    private static ObjectFile getNativeObjectFile(int pageSize, boolean runtimeDebugInfoGeneration) {
+        return switch (ObjectFile.getNativeFormat()) {
+            case ELF -> new ELFObjectFile(pageSize, runtimeDebugInfoGeneration);
+            case MACH_O -> new MachOObjectFile(pageSize);
+            case PECOFF -> new PECoffObjectFile(pageSize);
+            case LLVM -> throw new AssertionError("Unsupported NativeObjectFile for format " + ObjectFile.getNativeFormat());
+        };
     }
 
-    public static ObjectFile getNativeObjectFile() {
-        return getNativeObjectFile(false);
+    public static ObjectFile getNativeObjectFile(int pageSize) {
+        return getNativeObjectFile(pageSize, true);
     }
 
-    public static ObjectFile createRuntimeDebugInfo() {
-        return getNativeObjectFile(true);
+    public static ObjectFile createRuntimeDebugInfo(int pageSize) {
+        return getNativeObjectFile(pageSize, true);
     }
 
     /*
@@ -238,41 +245,149 @@ public abstract class ObjectFile {
          * The relocation's symbol provides an address whose absolute value (plus addend) supplies
          * the fixup bytes.
          */
-        DIRECT,
+        DIRECT_1,
+        DIRECT_2,
+        DIRECT_4,
+        DIRECT_8,
         /**
-         * The relocation's symbol provides high fixup bytes.
+         * The relocation's symbol provides an address whose image-base-relative value (plus addend)
+         * supplies the fixup bytes.
          */
-        DIRECT_HI,
+        ADDR32NB_4,
         /**
-         * The relocation's symbol provides low fixup bytes.
+         * The index of the object file section containing the relocation's symbol supplies the
+         * fixup bytes. (used in CodeView debug information)
          */
-        DIRECT_LO,
+        SECTION_2,
+        /**
+         * The address of the object file section containing the relocation's symbol (plus addend)
+         * supplies the fixup bytes. (used in CodeView debug information)
+         */
+        SECREL_4,
         /**
          * The relocation's symbol provides an address whose PC-relative value (plus addend)
          * supplies the fixup bytes.
          */
-        PC_RELATIVE,
+        PC_RELATIVE_1,
+        PC_RELATIVE_2,
+        PC_RELATIVE_4,
+        PC_RELATIVE_8,
         /**
-         * The relocation's symbol is ignored; the load-time offset of the program (FIXME: or shared
-         * object), plus addend, supplies the fixup bytes.
+         * AArch64-specific relocation types.
          */
-        PROGRAM_BASE {
+        AARCH64_R_MOVW_UABS_G0,
+        AARCH64_R_MOVW_UABS_G0_NC,
+        AARCH64_R_MOVW_UABS_G1,
+        AARCH64_R_MOVW_UABS_G1_NC,
+        AARCH64_R_MOVW_UABS_G2,
+        AARCH64_R_MOVW_UABS_G2_NC,
+        AARCH64_R_MOVW_UABS_G3,
+        AARCH64_R_AARCH64_ADR_PREL_PG_HI21,
+        AARCH64_R_AARCH64_ADD_ABS_LO12_NC,
+        AARCH64_R_LD_PREL_LO19,
+        AARCH64_R_GOT_LD_PREL19,
+        AARCH64_R_AARCH64_LDST128_ABS_LO12_NC,
+        AARCH64_R_AARCH64_LDST64_ABS_LO12_NC,
+        AARCH64_R_AARCH64_LDST32_ABS_LO12_NC,
+        AARCH64_R_AARCH64_LDST16_ABS_LO12_NC,
+        AARCH64_R_AARCH64_LDST8_ABS_LO12_NC;
 
-            @Override
-            public boolean usesSymbolValue() {
-                return false;
+        public static RelocationKind getDirect(int relocationSize) {
+            switch (relocationSize) {
+                case 1:
+                    return DIRECT_1;
+                case 2:
+                    return DIRECT_2;
+                case 4:
+                    return DIRECT_4;
+                case 8:
+                    return DIRECT_8;
+                default:
+                    return UNKNOWN;
             }
-        };
+        }
 
-        /**
-         * Generally, relocation records come with symbols whose value is used to compute the
-         * fixed-up bytes at the relocation site. In some cases, though, no such symbol is needed.
-         *
-         * @return Whether the value of any symbol attached to the relocation record affects the
-         *         fixed-up contents of the relocation site.
-         */
-        public boolean usesSymbolValue() {
-            return true;
+        public static RelocationKind getPCRelative(int relocationSize) {
+            switch (relocationSize) {
+                case 1:
+                    return PC_RELATIVE_1;
+                case 2:
+                    return PC_RELATIVE_2;
+                case 4:
+                    return PC_RELATIVE_4;
+                case 8:
+                    return PC_RELATIVE_8;
+                default:
+                    return UNKNOWN;
+            }
+        }
+
+        public static boolean isPCRelative(RelocationKind kind) {
+            switch (kind) {
+                case PC_RELATIVE_1:
+                case PC_RELATIVE_2:
+                case PC_RELATIVE_4:
+                case PC_RELATIVE_8:
+                case AARCH64_R_AARCH64_ADR_PREL_PG_HI21:
+                case AARCH64_R_AARCH64_ADD_ABS_LO12_NC:
+                case AARCH64_R_LD_PREL_LO19:
+                case AARCH64_R_GOT_LD_PREL19:
+                case AARCH64_R_AARCH64_LDST128_ABS_LO12_NC:
+                case AARCH64_R_AARCH64_LDST64_ABS_LO12_NC:
+                case AARCH64_R_AARCH64_LDST32_ABS_LO12_NC:
+                case AARCH64_R_AARCH64_LDST16_ABS_LO12_NC:
+                case AARCH64_R_AARCH64_LDST8_ABS_LO12_NC:
+                    return true;
+            }
+            return false;
+        }
+
+        public static boolean isDirect(RelocationKind kind) {
+            switch (kind) {
+                case DIRECT_1:
+                case DIRECT_2:
+                case DIRECT_4:
+                case DIRECT_8:
+                case AARCH64_R_MOVW_UABS_G0:
+                case AARCH64_R_MOVW_UABS_G0_NC:
+                case AARCH64_R_MOVW_UABS_G1:
+                case AARCH64_R_MOVW_UABS_G1_NC:
+                case AARCH64_R_MOVW_UABS_G2:
+                case AARCH64_R_MOVW_UABS_G2_NC:
+                case AARCH64_R_MOVW_UABS_G3:
+                    return true;
+            }
+            return false;
+        }
+
+        public static int getRelocationSize(RelocationKind kind) {
+            switch (kind) {
+                case DIRECT_1:
+                case PC_RELATIVE_1:
+                    return 1;
+                case DIRECT_2:
+                case PC_RELATIVE_2:
+                case SECTION_2:
+                    return 2;
+                case DIRECT_4:
+                case PC_RELATIVE_4:
+                case ADDR32NB_4:
+                case SECREL_4:
+                    return 4;
+                case AARCH64_R_AARCH64_ADR_PREL_PG_HI21:
+                case AARCH64_R_AARCH64_LDST64_ABS_LO12_NC:
+                case AARCH64_R_AARCH64_LDST32_ABS_LO12_NC:
+                case AARCH64_R_AARCH64_LDST16_ABS_LO12_NC:
+                case AARCH64_R_AARCH64_LDST8_ABS_LO12_NC:
+                case AARCH64_R_AARCH64_ADD_ABS_LO12_NC:
+                    // AArch64 instructions are 4 bytes
+                    return 4;
+                case DIRECT_8:
+                case PC_RELATIVE_8:
+                    return 8;
+            }
+            // other types should not be queried
+            throw new IllegalArgumentException("Invalid RelocationKind provided: " + kind);
         }
     }
 
@@ -280,15 +395,6 @@ public abstract class ObjectFile {
      * Interface implemented by objects implementing a specific relocation method and size.
      */
     public interface RelocationMethod {
-
-        RelocationKind getKind();
-
-        boolean canUseImplicitAddend();
-
-        boolean canUseExplicitAddend();
-
-        int getRelocatedByteSize();
-
         /*
          * If we were implementing a linker, we'd have a method something like
          *
@@ -303,10 +409,6 @@ public abstract class ObjectFile {
     public interface RelocationSiteInfo {
 
         long getOffset();
-
-        int getRelocatedByteSize();
-
-        RelocationKind getKind();
     }
 
     /**
@@ -337,17 +439,14 @@ public abstract class ObjectFile {
          * this is true of our native native image code.
          *
          * @param offset the offset into the section contents of the beginning of the fixed-up bytes
-         * @param length the length of byte sequence to be fixed up
          * @param bb the byte buffer representing the encoded section contents, at least as far as
          *            offset + length bytes
          * @param k the kind of fixup to be applied
          * @param symbolName the name of the symbol whose value is used to compute the fixed-up
          *            bytes
-         * @param useImplicitAddend whether the current bytes are to be used as an addend
-         * @param explicitAddend a full-width addend, or null if useImplicitAddend is true
-         * @return the relocation record created (or found, if it exists already)
+         * @param addend a full-width addend, or 0 if unneeded
          */
-        RelocationRecord markRelocationSite(int offset, int length, ByteBuffer bb, RelocationKind k, String symbolName, boolean useImplicitAddend, Long explicitAddend);
+        void markRelocationSite(int offset, ByteBuffer bb, RelocationKind k, String symbolName, long addend);
 
         /**
          * Force the creation of a relocation section/element for this section, and return it. This
@@ -355,13 +454,12 @@ public abstract class ObjectFile {
          * which leads to unpredictable results (e.g. not appearing in the ELF SHT, if the SHT was
          * written before the section was created).
          *
-         * @param useImplicitAddend whether the relocation section of interest is for implicit
-         *            addends
+         * @param addend whether a full-width addend, or 0 if unneeded
          *
          * @return the element which will hold relocation records (of the argument-specified kind)
          *         for this section
          */
-        Element getOrCreateRelocationElement(boolean useImplicitAddend);
+        Element getOrCreateRelocationElement(long addend);
     }
 
     /**
@@ -378,7 +476,7 @@ public abstract class ObjectFile {
          * passed a buffer. It uses the byte array accessed by {@link #getContent} and
          * {@link #setContent}.
          */
-        RelocationRecord markRelocationSite(int offset, int length, RelocationKind k, String symbolName, boolean useImplicitAddend, Long explicitAddend);
+        void markRelocationSite(int offset, RelocationKind k, String symbolName, long addend);
     }
 
     public interface NobitsSectionImpl extends ElementImpl {
@@ -425,10 +523,13 @@ public abstract class ObjectFile {
     // convenience overrides when specifying neither segment nor segment name
 
     public Section newUserDefinedSection(String name, ElementImpl impl) {
-        final Segment segment = getOrCreateSegment(null, name, false, false);
         final int alignment = getWordSizeInBytes();
-        final Section result = newUserDefinedSection(segment, name, alignment, impl);
-        return result;
+        return newUserDefinedSection(name, alignment, impl);
+    }
+
+    public Section newUserDefinedSection(String name, int alignment, ElementImpl impl) {
+        Segment segment = getOrCreateSegment(null, name, false, false);
+        return newUserDefinedSection(segment, name, alignment, impl);
     }
 
     public Section newDebugSection(String name, ElementImpl impl) {
@@ -911,7 +1012,7 @@ public abstract class ObjectFile {
 
         @Override
         public String toString() {
-            return getClass().getSimpleName() + "(" + name + ")";
+            return getClass().getName() + "(" + name + ")";
         }
 
         @Override
@@ -1064,6 +1165,17 @@ public abstract class ObjectFile {
         // flag compatibility
     }
 
+    /**
+     * API method provided to allow a native image generator to provide details of types, code and
+     * heap data inserted into a native image.
+     *
+     * @param debugInfoProvider an implementation of the provider interface that communicates
+     *            details of the relevant types, code and heap data.
+     */
+    public void installDebugInfo(@SuppressWarnings("unused") DebugInfoProvider debugInfoProvider) {
+        // do nothing by default
+    }
+
     protected static Iterable<LayoutDecision> allDecisions(final Map<Element, LayoutDecisionMap> decisions) {
         return () -> StreamSupport.stream(decisions.values().spliterator(), false)
                         .flatMap(layoutDecisionMap -> StreamSupport.stream(layoutDecisionMap.spliterator(), false)).iterator();
@@ -1159,9 +1271,9 @@ public abstract class ObjectFile {
             }
         }
         if (headers.size() == 0) {
-            throw new IllegalStateException("file has no header");
+            throw new IllegalStateException("File has no header");
         } else if (headers.size() > 1) {
-            throw new IllegalStateException("file has multiple headers");
+            throw new IllegalStateException("File has multiple headers");
         } else {
             assert headers.size() == 1;
         }
@@ -1186,13 +1298,26 @@ public abstract class ObjectFile {
     private final Map<Element, List<BuildDependency>> dependenciesByDependingElement = new IdentityHashMap<>();
     private final Map<Element, List<BuildDependency>> dependenciesByDependedOnElement = new IdentityHashMap<>();
 
+    public void write(DebugContext context, Path outputFile) throws IOException {
+        try (FileChannel channel = FileChannel.open(outputFile, StandardOpenOption.WRITE, StandardOpenOption.READ, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.CREATE)) {
+            withDebugContext(context, "ObjectFile.write", () -> {
+                write(channel);
+            });
+        }
+    }
+
+    @SuppressWarnings("try")
     public final void write(FileChannel outputChannel) {
         List<Element> sortedObjectFileElements = new ArrayList<>();
         int totalSize = bake(sortedObjectFileElements);
         try {
             ByteBuffer buffer = outputChannel.map(MapMode.READ_WRITE, 0, totalSize);
-            writeBuffer(sortedObjectFileElements, buffer);
-            outputChannel.close();
+            try {
+                writeBuffer(sortedObjectFileElements, buffer);
+            } finally {
+                // unmap immediately
+                ((DirectBuffer) buffer).cleaner().clean();
+            }
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
@@ -1235,13 +1360,13 @@ public abstract class ObjectFile {
     private String dependencyGraphAsDotString(Set<LayoutDecision> decisionsToInclude) {
         // null argument means "include all decisions"
         StringBuilder sb = new StringBuilder();
-        sb.append("digraph deps {\n");
+        sb.append("digraph deps {").append(System.lineSeparator());
         for (BuildDependency d : allDependencies) {
             if (decisionsToInclude == null || (decisionsToInclude.contains(d.depending) && decisionsToInclude.contains(d.dependedOn))) {
-                sb.append("\t\"" + d.depending + "\" -> \"" + d.dependedOn + "\";\n");
+                sb.append(String.format("\t\"%s\" -> \"%s\";%n", d.depending, d.dependedOn));
             }
         }
-        sb.append("}\n");
+        sb.append('}').append(System.lineSeparator());
         return sb.toString();
     }
 
@@ -1436,8 +1561,8 @@ public abstract class ObjectFile {
         Map<LayoutDecision, ArrayList<LayoutDecision>> removedEdgesDependingOn = new HashMap<>();
         Map<LayoutDecision, ArrayList<LayoutDecision>> removedEdgesDependedOnBy = new HashMap<>();
         for (LayoutDecision l : allDecisions) {
-            removedEdgesDependingOn.put(l, new ArrayList<LayoutDecision>());
-            removedEdgesDependedOnBy.put(l, new ArrayList<LayoutDecision>());
+            removedEdgesDependingOn.put(l, new ArrayList<>());
+            removedEdgesDependedOnBy.put(l, new ArrayList<>());
         }
 
         // 2. run Kahn's algorithm
@@ -1476,7 +1601,7 @@ public abstract class ObjectFile {
             Set<LayoutDecision> remainingDecisions = new HashSet<>();
             remainingDecisions.addAll(allDecisions);
             remainingDecisions.removeAll(reverseBuildOrder);
-            throw new IllegalStateException("cyclic build dependencies: " + dependencyGraphAsDotString(remainingDecisions));
+            throw new IllegalStateException("Cyclic build dependencies: " + dependencyGraphAsDotString(remainingDecisions));
         }
         assert reverseBuildOrder.get(0) == dummyFinalDecision; // it's the final one, innit
 
@@ -1549,7 +1674,7 @@ public abstract class ObjectFile {
                         assert valueDecided != null;
                         break;
                     default:
-                        throw new AssertionError("unreachable");
+                        throw new AssertionError("Unreachable");
                 }
                 d.setValue(valueDecided); // sets decision to "taken"
             }
@@ -1600,37 +1725,8 @@ public abstract class ObjectFile {
 
     protected abstract int getMinimumFileSize();
 
-    private static Unsafe getUnsafe() {
-        try {
-            return Unsafe.getUnsafe();
-        } catch (SecurityException e) {
-        }
-        try {
-            Field theUnsafeInstance = Unsafe.class.getDeclaredField("theUnsafe");
-            theUnsafeInstance.setAccessible(true);
-            return (Unsafe) theUnsafeInstance.get(Unsafe.class);
-        } catch (Exception e) {
-            throw new RuntimeException("exception while trying to get Unsafe.theUnsafe via reflection:", e);
-        }
-    }
-
-    private static int hostPageSize = getHostPageSize();
-
-    public static int getHostPageSize() {
-        try {
-            return getUnsafe().pageSize();
-        } catch (IllegalArgumentException e) {
-            return 4096;
-        }
-    }
-
-    private int pageSize = hostPageSize;
-
-    public void setPageSize(int pageSize) {
-        this.pageSize = pageSize;
-    }
-
     public int getPageSize() {
+        assert pageSize > 0 : "Must be initialized";
         return pageSize;
     }
 
@@ -1703,6 +1799,8 @@ public abstract class ObjectFile {
         long getDefinedAbsoluteValue();
 
         boolean isFunction();
+
+        boolean isGlobal();
     }
 
     public abstract Symbol createDefinedSymbol(String name, Element baseSection, long position, int size, boolean isCode, boolean isGlobal);
@@ -1719,6 +1817,52 @@ public abstract class ObjectFile {
             return t;
         } else {
             return createSymbolTable();
+        }
+    }
+
+    /**
+     * Temporary storage for a debug context installed in a nested scope under a call. to
+     * {@link #withDebugContext}
+     */
+    protected DebugContext debugContext = DebugContext.disabled(null);
+
+    /**
+     * Allows a task to be executed with a debug context in a named subscope bound to the object
+     * file and accessible to code executed during the lifetime of the task. Invoked code may obtain
+     * access to the debug context using method {@link #debugContext}.
+     *
+     * @param context a context to be bound to the object file for the duration of the task
+     *            execution.
+     * @param scopeName a name to be used to define a subscope current while the task is being
+     *            executed.
+     * @param task a task to be executed while the context is bound to the object file.
+     */
+    @SuppressWarnings("try")
+    public void withDebugContext(DebugContext context, String scopeName, Runnable task) {
+        try (DebugContext.Scope s = context.scope(scopeName)) {
+            this.debugContext = context;
+            task.run();
+        } catch (Throwable e) {
+            throw debugContext.handle(e);
+        } finally {
+            debugContext = null;
+        }
+    }
+
+    /**
+     * Allows a consumer to retrieve the debug context currently bound to this object file. This
+     * method must only called underneath an invocation of method {@link #withDebugContext}.
+     *
+     * @param scopeName a name to be used to define a subscope current while the consumer is active.
+     * @param action an action parameterised by the debug context.
+     */
+    @SuppressWarnings("try")
+    public void debugContext(String scopeName, Consumer<DebugContext> action) {
+        assert debugContext != null;
+        try (DebugContext.Scope s = debugContext.scope(scopeName)) {
+            action.accept(debugContext);
+        } catch (Throwable e) {
+            throw debugContext.handle(e);
         }
     }
 }

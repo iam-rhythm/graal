@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2018, Oracle and/or its affiliates.
+ * Copyright (c) 2016, 2024, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -91,7 +91,7 @@ public abstract class MDType extends MDName {
         }
     }
 
-    // @see: https://github.com/llvm-mirror/llvm/blob/master/include/llvm/BinaryFormat/Dwarf.def
+    // @see: https://github.com/llvm/llvm-project/blob/main/llvm/include/llvm/BinaryFormat/Dwarf.def
     public enum DwarfTag {
         UNKNOWN(-1),
 
@@ -111,6 +111,7 @@ public abstract class MDType extends MDName {
         DW_TAG_BASE_TYPE(0x24),          // MDBasicType
         DW_TAG_CONST_TYPE(0x26),         // MDDerivedType
         DW_TAG_FRIEND(0x2A),             // MDDerivedType
+        DW_TAG_VARIABLE(0x34),           // MDDerivedType
         DW_TAG_VOLATILE_TYPE(0x35),      // MDDerivedType
 
         // DWARF v3

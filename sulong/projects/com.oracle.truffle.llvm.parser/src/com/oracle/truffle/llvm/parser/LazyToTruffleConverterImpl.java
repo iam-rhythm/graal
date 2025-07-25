@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2019, Oracle and/or its affiliates.
+ * Copyright (c) 2017, 2023, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -29,60 +29,90 @@
  */
 package com.oracle.truffle.llvm.parser;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.BitSet;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 
 import com.oracle.truffle.api.CompilerAsserts;
 import com.oracle.truffle.api.RootCallTarget;
-import com.oracle.truffle.api.Truffle;
 import com.oracle.truffle.api.frame.FrameDescriptor;
-import com.oracle.truffle.api.frame.FrameSlot;
+import com.oracle.truffle.api.frame.FrameSlotKind;
 import com.oracle.truffle.api.nodes.RootNode;
 import com.oracle.truffle.api.source.Source;
 import com.oracle.truffle.llvm.parser.LLVMLivenessAnalysis.LLVMLivenessAnalysisResult;
 import com.oracle.truffle.llvm.parser.LLVMPhiManager.Phi;
 import com.oracle.truffle.llvm.parser.metadata.debuginfo.DebugInfoFunctionProcessor;
+import com.oracle.truffle.llvm.parser.metadata.debuginfo.SourceVariable;
+import com.oracle.truffle.llvm.parser.model.SymbolImpl;
 import com.oracle.truffle.llvm.parser.model.attributes.Attribute;
 import com.oracle.truffle.llvm.parser.model.attributes.Attribute.Kind;
 import com.oracle.truffle.llvm.parser.model.attributes.Attribute.KnownAttribute;
+import com.oracle.truffle.llvm.parser.model.attributes.Attribute.KnownTypedAttribute;
 import com.oracle.truffle.llvm.parser.model.blocks.InstructionBlock;
 import com.oracle.truffle.llvm.parser.model.functions.FunctionDefinition;
 import com.oracle.truffle.llvm.parser.model.functions.FunctionParameter;
 import com.oracle.truffle.llvm.parser.model.functions.LazyFunctionParser;
+import com.oracle.truffle.llvm.parser.model.symbols.instructions.DbgDeclareInstruction;
+import com.oracle.truffle.llvm.parser.model.symbols.instructions.DbgValueInstruction;
+import com.oracle.truffle.llvm.parser.model.symbols.instructions.Instruction;
+import com.oracle.truffle.llvm.parser.nodes.LLVMBitcodeInstructionVisitor;
+import com.oracle.truffle.llvm.parser.nodes.LLVMFunctionModifier;
+import com.oracle.truffle.llvm.parser.nodes.LLVMRuntimeDebugInformation;
 import com.oracle.truffle.llvm.parser.nodes.LLVMSymbolReadResolver;
+import com.oracle.truffle.llvm.runtime.CommonNodeFactory;
 import com.oracle.truffle.llvm.runtime.GetStackSpaceFactory;
-import com.oracle.truffle.llvm.runtime.LLVMFunctionDescriptor.LazyToTruffleConverter;
+import com.oracle.truffle.llvm.runtime.LLVMContext;
+import com.oracle.truffle.llvm.runtime.LLVMFunction;
+import com.oracle.truffle.llvm.runtime.LLVMFunctionCode.LazyToTruffleConverter;
+import com.oracle.truffle.llvm.runtime.LLVMLanguage;
+import com.oracle.truffle.llvm.runtime.LLVMNodeUtils;
+import com.oracle.truffle.llvm.runtime.LLVMNodeUtils.LambdaLineWriter;
+import com.oracle.truffle.llvm.runtime.NodeFactory;
+import com.oracle.truffle.llvm.runtime.datalayout.DataLayout;
 import com.oracle.truffle.llvm.runtime.debug.scope.LLVMSourceLocation;
 import com.oracle.truffle.llvm.runtime.debug.type.LLVMSourceFunctionType;
-import com.oracle.truffle.llvm.runtime.except.LLVMUserException;
-import com.oracle.truffle.llvm.runtime.memory.LLVMStack;
 import com.oracle.truffle.llvm.runtime.memory.LLVMStack.UniquesRegion;
 import com.oracle.truffle.llvm.runtime.nodes.api.LLVMExpressionNode;
 import com.oracle.truffle.llvm.runtime.nodes.api.LLVMStatementNode;
+import com.oracle.truffle.llvm.runtime.nodes.base.LLVMBasicBlockNode;
+import com.oracle.truffle.llvm.runtime.nodes.memory.LLVMUnpackVarargsNodeGen;
+import com.oracle.truffle.llvm.runtime.options.SulongEngineOption;
+import com.oracle.truffle.llvm.runtime.types.AggregateType;
+import com.oracle.truffle.llvm.runtime.types.ArrayType;
+import com.oracle.truffle.llvm.runtime.types.MetaType;
 import com.oracle.truffle.llvm.runtime.types.PointerType;
-import com.oracle.truffle.llvm.runtime.types.PrimitiveType;
 import com.oracle.truffle.llvm.runtime.types.StructureType;
 import com.oracle.truffle.llvm.runtime.types.Type;
+import com.oracle.truffle.llvm.runtime.types.symbols.SSAValue;
+
+import org.graalvm.options.OptionValues;
 
 public class LazyToTruffleConverterImpl implements LazyToTruffleConverter {
+
     private final LLVMParserRuntime runtime;
     private final FunctionDefinition method;
     private final Source source;
     private final LazyFunctionParser parser;
     private final DebugInfoFunctionProcessor diProcessor;
+    private final DataLayout dataLayout;
 
+    private boolean parsed;
     private RootCallTarget resolved;
+    private LLVMFunction rootFunction;
 
     LazyToTruffleConverterImpl(LLVMParserRuntime runtime, FunctionDefinition method, Source source, LazyFunctionParser parser,
-                    DebugInfoFunctionProcessor diProcessor) {
+                    DebugInfoFunctionProcessor diProcessor, DataLayout dataLayout) {
         this.runtime = runtime;
         this.method = method;
         this.source = source;
         this.parser = parser;
         this.diProcessor = diProcessor;
         this.resolved = null;
+        this.dataLayout = dataLayout;
     }
 
     @Override
@@ -97,108 +127,283 @@ public class LazyToTruffleConverterImpl implements LazyToTruffleConverter {
         }
     }
 
+    public void setRootFunction(LLVMFunction rootFunction) {
+        this.rootFunction = rootFunction;
+    }
+
+    private synchronized void doParse() {
+        if (!parsed) {
+            // parse the function block
+            parser.parse(diProcessor, source, runtime, LLVMLanguage.getContext());
+            parsed = true;
+        }
+    }
+
     private RootCallTarget generateCallTarget() {
-        // parse the function block
-        parser.parse(diProcessor, source, runtime);
+        LLVMContext context = LLVMLanguage.getContext();
+        NodeFactory nodeFactory = runtime.getNodeFactory();
+        OptionValues options = context.getEnv().getOptions();
+
+        boolean printAST = false;
+        if (LLVMContext.printAstEnabled()) {
+            String printASTOption = options.get(SulongEngineOption.PRINT_AST_FILTER);
+            if (!printASTOption.isEmpty()) {
+                String[] regexes = printASTOption.split(",");
+                for (String regex : regexes) {
+                    if (method.getName().matches(regex)) {
+                        printAST = true;
+                        LLVMContext.printAstLog("========== " + method.getName());
+                        break;
+                    }
+                }
+            }
+        }
+
+        doParse();
 
         // prepare the phis
         final Map<InstructionBlock, List<Phi>> phis = LLVMPhiManager.getPhis(method);
 
-        // setup the frameDescriptor
-        final FrameDescriptor frame = StackManager.createFrame(method);
+        LLVMLivenessAnalysisResult liveness = LLVMLivenessAnalysis.computeLiveness(phis, method);
 
-        // setup the uniquesRegion
+        // setup the frameDescriptor
+        FrameDescriptor.Builder builder = FrameDescriptor.newBuilder();
+        nodeFactory.addStackSlots(builder);
         UniquesRegion uniquesRegion = new UniquesRegion();
         GetStackSpaceFactory getStackSpaceFactory = GetStackSpaceFactory.createGetUniqueStackSpaceFactory(uniquesRegion);
+        LLVMSymbolReadResolver symbols = new LLVMSymbolReadResolver(runtime, builder, getStackSpaceFactory, dataLayout, options.get(SulongEngineOption.LL_DEBUG));
 
-        LLVMLivenessAnalysisResult liveness = LLVMLivenessAnalysis.computeLiveness(frame, runtime.getContext(), phis, method);
-        LLVMSymbolReadResolver symbols = new LLVMSymbolReadResolver(runtime, frame, getStackSpaceFactory);
-        List<FrameSlot> notNullable = new ArrayList<>();
+        int exceptionSlot = builder.addSlot(FrameSlotKind.Object, null, null);
 
-        LLVMRuntimeDebugInformation dbgInfoHandler = new LLVMRuntimeDebugInformation(frame, runtime.getContext(), notNullable, symbols);
-        dbgInfoHandler.registerStaticDebugSymbols(method);
+        for (FunctionParameter parameter : method.getParameters()) {
+            symbols.findOrAddFrameSlot(parameter);
+        }
 
-        LLVMBitcodeFunctionVisitor visitor = new LLVMBitcodeFunctionVisitor(runtime.getContext(), runtime.getLibrary(), frame, uniquesRegion, phis, method.getParameters().size(), symbols, method,
-                        liveness, notNullable, dbgInfoHandler);
-        method.accept(visitor);
-        FrameSlot[][] nullableBeforeBlock = getNullableFrameSlots(liveness.getFrameSlots(), liveness.getNullableBeforeBlock(), notNullable);
-        FrameSlot[][] nullableAfterBlock = getNullableFrameSlots(liveness.getFrameSlots(), liveness.getNullableAfterBlock(), notNullable);
+        HashSet<SSAValue> neededForDebug = getDebugValues();
+
+        // create blocks and translate instructions
+        boolean initDebugValues = true;
+        LLVMRuntimeDebugInformation info = new LLVMRuntimeDebugInformation(method.getBlocks().size());
+        LLVMBasicBlockNode[] blockNodes = new LLVMBasicBlockNode[method.getBlocks().size()];
+        List<LLVMFunctionModifier> functionModifiers = new ArrayList<>();
+        for (InstructionBlock block : method.getBlocks()) {
+            List<Phi> blockPhis = phis.get(block);
+            ArrayList<LLVMLivenessAnalysis.NullerInformation> blockNullerInfos = liveness.getNullableWithinBlock()[block.getBlockIndex()];
+            LLVMBitcodeInstructionVisitor visitor = new LLVMBitcodeInstructionVisitor(exceptionSlot, uniquesRegion, blockPhis, method.getParameters().size(), symbols, context,
+                            blockNullerInfos, neededForDebug, dataLayout, nodeFactory, functionModifiers);
+
+            if (initDebugValues) {
+                for (SourceVariable variable : method.getSourceFunction().getVariables()) {
+                    if (variable.hasFragments()) {
+                        visitor.initializeAggregateLocalVariable(variable);
+                    }
+                }
+                initDebugValues = false;
+            }
+
+            for (int i = 0; i < block.getInstructionCount(); i++) {
+                visitor.setInstructionIndex(i);
+                block.getInstruction(i).accept(visitor);
+            }
+            LLVMStatementNode[] nodes = visitor.finish();
+            info.setBlockDebugInfo(block.getBlockIndex(), visitor.getDebugInfo());
+            blockNodes[block.getBlockIndex()] = LLVMBasicBlockNode.createBasicBlockNode(nodes, visitor.getControlFlowNode(), block.getBlockIndex(), block.getName());
+        }
+
+        for (LLVMFunctionModifier modifier : functionModifiers) {
+            modifier.modify(blockNodes);
+        }
+
+        for (int j = 0; j < blockNodes.length; j++) {
+            int[] nullableBeforeBlock = getNullableFrameSlots(liveness.getFrameSlots(), liveness.getNullableBeforeBlock()[j]);
+            int[] nullableAfterBlock = getNullableFrameSlots(liveness.getFrameSlots(), liveness.getNullableAfterBlock()[j]);
+            blockNodes[j].setNullableFrameSlots(nullableBeforeBlock, nullableAfterBlock);
+        }
+        info.setBlocks(blockNodes);
+
         LLVMSourceLocation location = method.getLexicalScope();
+        rootFunction.setSourceLocation(LLVMSourceLocation.orDefault(location));
+        LLVMStatementNode[] copyArgumentsToFrameArray = copyArgumentsToFrame(symbols).toArray(LLVMStatementNode.NO_STATEMENTS);
 
-        List<LLVMStatementNode> copyArgumentsToFrame = copyArgumentsToFrame(frame);
-        LLVMStatementNode[] copyArgumentsToFrameArray = copyArgumentsToFrame.toArray(LLVMStatementNode.NO_STATEMENTS);
-        LLVMExpressionNode body = runtime.getContext().getNodeFactory().createFunctionBlockNode(frame.findFrameSlot(LLVMUserException.FRAME_SLOT_ID), visitor.getBlocks(), uniquesRegion.build(),
-                        nullableBeforeBlock, nullableAfterBlock, location, copyArgumentsToFrameArray);
-
-        RootNode rootNode = runtime.getContext().getNodeFactory().createFunctionStartNode(body, frame, method.getName(), method.getSourceName(),
-                        method.getParameters().size(), source, location);
+        FrameDescriptor frame = builder.build();
+        RootNode rootNode = nodeFactory.createFunction(exceptionSlot, blockNodes, uniquesRegion, copyArgumentsToFrameArray, frame, info, method.getName(), method.getSourceName(),
+                        method.getParameters().size(), source, location, rootFunction);
         method.onAfterParse();
 
-        return Truffle.getRuntime().createCallTarget(rootNode);
+        if (printAST) {
+            LLVMNodeUtils.printNodeAST(new LambdaLineWriter(LLVMContext::printAstLog), rootNode);
+            LLVMContext.printAstLog("");
+        }
+
+        return rootNode.getCallTarget();
+    }
+
+    private HashSet<SSAValue> getDebugValues() {
+        HashSet<SSAValue> neededForDebug = new HashSet<>();
+        for (InstructionBlock block : method.getBlocks()) {
+            for (Instruction instruction : block.getInstructions()) {
+                SymbolImpl value;
+                if (instruction instanceof DbgValueInstruction) {
+                    value = ((DbgValueInstruction) instruction).getValue();
+                } else if (instruction instanceof DbgDeclareInstruction) {
+                    value = ((DbgDeclareInstruction) instruction).getValue();
+                } else {
+                    continue;
+                }
+                if (value instanceof SSAValue) {
+                    neededForDebug.add((SSAValue) value);
+                }
+            }
+        }
+        return neededForDebug;
     }
 
     @Override
     public LLVMSourceFunctionType getSourceType() {
-        convert();
+        CompilerAsserts.neverPartOfCompilation();
+        doParse();
+
         return method.getSourceFunction().getSourceType();
     }
 
-    private static FrameSlot[][] getNullableFrameSlots(FrameSlot[] frameSlots, BitSet[] nullablePerBlock, List<FrameSlot> notNullable) {
-        FrameSlot[][] result = new FrameSlot[nullablePerBlock.length][];
+    private static int[] getNullableFrameSlots(SSAValue[] values, BitSet nullable) {
+        int bitIndex = -1;
 
-        for (int i = 0; i < nullablePerBlock.length; i++) {
-            BitSet nullable = nullablePerBlock[i];
-            int bitIndex = -1;
-
-            ArrayList<FrameSlot> nullableSlots = new ArrayList<>();
-            while ((bitIndex = nullable.nextSetBit(bitIndex + 1)) >= 0) {
-                FrameSlot frameSlot = frameSlots[bitIndex];
-                if (!notNullable.contains(frameSlot)) {
-                    nullableSlots.add(frameSlot);
+        int count = 0;
+        int[] result = new int[8];
+        while ((bitIndex = nullable.nextSetBit(bitIndex + 1)) >= 0) {
+            int frameIdentifier = bitIndex;
+            if (SSAValue.isFrameSlotAllocated(values[frameIdentifier])) {
+                if (result.length < count + 1) {
+                    result = Arrays.copyOf(result, result.length * 2);
                 }
-            }
-            if (nullableSlots.size() > 0) {
-                result[i] = nullableSlots.toArray(LLVMBitcodeInstructionVisitor.NO_SLOTS);
-            } else {
-                assert result[i] == null;
+                result[count++] = SSAValue.getFrameSlot(values[frameIdentifier]);
             }
         }
-        return result;
+        if (count > 0) {
+            return Arrays.copyOf(result, count);
+        } else {
+            return null;
+        }
     }
 
-    private List<LLVMStatementNode> copyArgumentsToFrame(FrameDescriptor frame) {
-        List<FunctionParameter> parameters = method.getParameters();
-        List<LLVMStatementNode> formalParamInits = new ArrayList<>();
-        LLVMExpressionNode stackPointerNode = runtime.getContext().getNodeFactory().createFunctionArgNode(0, PrimitiveType.I64);
-        formalParamInits.add(runtime.getContext().getNodeFactory().createFrameWrite(PointerType.VOID, stackPointerNode, frame.findFrameSlot(LLVMStack.FRAME_ID), null));
-
-        int argIndex = 1;
-        if (method.getType().getReturnType() instanceof StructureType) {
-            argIndex++;
-        }
-        for (FunctionParameter parameter : parameters) {
-            LLVMExpressionNode parameterNode = runtime.getContext().getNodeFactory().createFunctionArgNode(argIndex++, parameter.getType());
-            FrameSlot slot = frame.findFrameSlot(parameter.getName());
-            if (isStructByValue(parameter)) {
-                Type type = ((PointerType) parameter.getType()).getPointeeType();
-                formalParamInits.add(
-                                runtime.getContext().getNodeFactory().createFrameWrite(parameter.getType(),
-                                                runtime.getContext().getNodeFactory().createCopyStructByValue(type, GetStackSpaceFactory.createAllocaFactory(), parameterNode), slot, null));
-            } else {
-                formalParamInits.add(runtime.getContext().getNodeFactory().createFrameWrite(parameter.getType(), parameterNode, slot, null));
-            }
-        }
-        return formalParamInits;
-    }
-
-    private static boolean isStructByValue(FunctionParameter parameter) {
-        if (parameter.getType() instanceof PointerType && parameter.getParameterAttribute() != null) {
+    /**
+     * Check whether the function parameter has an LLVM byval attribute attached to it. This usually
+     * is the case for value parameters (e.g. struct Point p) which the compiler decides to pass
+     * through a pointer instead (by creating a copy sometime between the caller and the callee and
+     * passing a pointer to that copy). In bitcode the copy's pointer is then tagged with a byval
+     * attribute.
+     *
+     * @return the type of the by-value parameter, or null if the parameter is not by-value
+     */
+    private static Type functionParameterFindByValueAttribute(FunctionParameter parameter) {
+        if (parameter.getParameterAttribute() != null) {
             for (Attribute a : parameter.getParameterAttribute().getAttributes()) {
                 if (a instanceof KnownAttribute && ((KnownAttribute) a).getAttr() == Kind.BYVAL) {
-                    return true;
+                    if (a instanceof KnownTypedAttribute) {
+                        return ((KnownTypedAttribute) a).getType();
+                    } else {
+                        /*
+                         * For dragonegg compatibility: GCC emits an untyped attribute. But on the
+                         * other hand, it won't emit opaque pointers.
+                         */
+                        PointerType parameterType = (PointerType) parameter.getType();
+                        assert parameterType.getPointeeType() != MetaType.UNKNOWN;
+                        return parameterType.getPointeeType();
+                    }
                 }
             }
         }
-        return false;
+        return null;
+    }
+
+    /**
+     * @param baseAddress Base address from which to calculate the offsets.
+     * @param sourceType Type to index into.
+     * @param indices List of indices to reach a member or element from the base address.
+     * @see CommonNodeFactory#getTargetAddress
+     */
+    private LLVMExpressionNode getTargetAddress(LLVMExpressionNode baseAddress, Type sourceType, ArrayDeque<Long> indices) {
+        return CommonNodeFactory.getTargetAddress(baseAddress, sourceType, indices, runtime.getNodeFactory(), dataLayout);
+    }
+
+    /**
+     * This function creates a list of statements that, together, copy a value of type
+     * {@code topLevelPointerType} from argument {@code argIndex} to the frame slot {@code
+     * slot} by recursing over the structure of {@code topLevelPointerType}.
+     *
+     * The recursive cases go over the elements (for arrays) and over the members (for structs). The
+     * base case is for everything else ("primitives"), where cascades of getelementptrs are created
+     * for reading from the source and writing into the target frame slot. The cascades of
+     * getelementptr nodes are created by the calls to
+     * {@link LazyToTruffleConverterImpl#getTargetAddress} and then used to load or store from the
+     * source and into the destination respectively.
+     *
+     * @param initializers The accumulator where copy statements are going to be inserted.
+     * @param slot Target frame slot.
+     * @param currentType Current member (for structs) or element (for arrays) type.
+     * @param indices List of indices to reach this member or element from the toplevel object.
+     */
+    private void copyStructArgumentsToFrame(List<LLVMStatementNode> initializers, NodeFactory nodeFactory, int slot, int argIndex, Type topLevelType, Type currentType,
+                    ArrayDeque<Long> indices) {
+        if (currentType instanceof StructureType || currentType instanceof ArrayType) {
+            AggregateType t = (AggregateType) currentType;
+
+            for (long i = 0; i < t.getNumberOfElements(); i++) {
+                indices.push(i);
+                copyStructArgumentsToFrame(initializers, nodeFactory, slot, argIndex, topLevelType, t.getElementType(i), indices);
+                indices.pop();
+            }
+        } else {
+            LLVMExpressionNode targetAddress = getTargetAddress(CommonNodeFactory.createFrameRead(PointerType.PTR, slot), topLevelType, indices);
+            /*
+             * In case the source is a varargs list (va_list), we need to create a node that would
+             * unpack it if it is, and do nothing if it isn't.
+             */
+            LLVMExpressionNode argMaybeUnpack = LLVMUnpackVarargsNodeGen.create(nodeFactory.createFunctionArgNode(argIndex, PointerType.PTR));
+            LLVMExpressionNode sourceAddress = getTargetAddress(argMaybeUnpack, topLevelType, indices);
+            LLVMExpressionNode sourceLoadNode = nodeFactory.createLoad(currentType, sourceAddress);
+            LLVMStatementNode storeNode = nodeFactory.createStore(targetAddress, sourceLoadNode, currentType);
+            initializers.add(storeNode);
+        }
+    }
+
+    /**
+     * Copies arguments to the current frame, handling normal "primitives" and byval pointers (e.g.
+     * for structs).
+     */
+    private List<LLVMStatementNode> copyArgumentsToFrame(LLVMSymbolReadResolver symbols) {
+        NodeFactory nodeFactory = runtime.getNodeFactory();
+        List<FunctionParameter> parameters = method.getParameters();
+        List<LLVMStatementNode> formalParamInits = new ArrayList<>();
+
+        // There's a struct return type.
+        int argIndex = 1;
+        Type retType = method.getType().getReturnType();
+        if (retType instanceof StructureType || retType instanceof ArrayType) {
+            argIndex++;
+        }
+
+        for (FunctionParameter parameter : parameters) {
+            int slot = symbols.findOrAddFrameSlot(parameter);
+
+            Type byValType = functionParameterFindByValueAttribute(parameter);
+            if (parameter.getType() instanceof PointerType && byValType != null) {
+                // It's a struct passed as a pointer but originally passed by value (because LLVM
+                // and/or ABI), treat it as such.
+                GetStackSpaceFactory allocaFactory = GetStackSpaceFactory.createAllocaFactory();
+                LLVMExpressionNode allocation = allocaFactory.createGetStackSpace(nodeFactory, byValType);
+
+                formalParamInits.add(CommonNodeFactory.createFrameWrite(PointerType.PTR, allocation, slot));
+
+                ArrayDeque<Long> indices = new ArrayDeque<>();
+                copyStructArgumentsToFrame(formalParamInits, nodeFactory, slot, argIndex++, byValType, byValType, indices);
+            } else {
+                LLVMExpressionNode parameterNode = nodeFactory.createFunctionArgNode(argIndex++, parameter.getType());
+                formalParamInits.add(CommonNodeFactory.createFrameWrite(parameter.getType(), parameterNode, slot));
+            }
+        }
+
+        return formalParamInits;
     }
 }

@@ -11,6 +11,7 @@ CLSS public java.lang.Object
 cons public init()
 meth protected java.lang.Object clone() throws java.lang.CloneNotSupportedException
 meth protected void finalize() throws java.lang.Throwable
+ anno 0 java.lang.Deprecated(boolean forRemoval=true, java.lang.String since="9")
 meth public boolean equals(java.lang.Object)
 meth public final java.lang.Class<?> getClass()
 meth public final void notify()
@@ -80,12 +81,15 @@ meth public abstract java.util.Collection<? extends org.graalvm.polyglot.tck.Sni
 meth public abstract java.util.Collection<? extends org.graalvm.polyglot.tck.Snippet> createValueConstructors(org.graalvm.polyglot.Context)
 meth public abstract org.graalvm.polyglot.Value createIdentityFunction(org.graalvm.polyglot.Context)
 meth public java.util.Collection<? extends org.graalvm.polyglot.tck.InlineSnippet> createInlineScripts(org.graalvm.polyglot.Context)
+meth public java.util.Map<java.lang.String,java.lang.String> additionalOptions()
+meth public org.graalvm.polyglot.tck.Snippet createIdentityFunctionSnippet(org.graalvm.polyglot.Context)
 
 CLSS public abstract interface org.graalvm.polyglot.tck.ResultVerifier
 innr public final static SnippetRun
 intf java.util.function.Consumer<org.graalvm.polyglot.tck.ResultVerifier$SnippetRun>
 meth public abstract void accept(org.graalvm.polyglot.tck.ResultVerifier$SnippetRun)
 meth public static org.graalvm.polyglot.tck.ResultVerifier getDefaultResultVerifier()
+meth public static org.graalvm.polyglot.tck.ResultVerifier getIdentityFunctionDefaultResultVerifier()
 
 CLSS public final static org.graalvm.polyglot.tck.ResultVerifier$SnippetRun
  outer org.graalvm.polyglot.tck.ResultVerifier
@@ -118,19 +122,32 @@ supr java.lang.Object
 hfds executableReturnType,executableValue,id,parameterTypes,verifier
 
 CLSS public final org.graalvm.polyglot.tck.TypeDescriptor
+fld public final static org.graalvm.polyglot.tck.TypeDescriptor ALL
 fld public final static org.graalvm.polyglot.tck.TypeDescriptor ANY
 fld public final static org.graalvm.polyglot.tck.TypeDescriptor ARRAY
 fld public final static org.graalvm.polyglot.tck.TypeDescriptor BOOLEAN
+fld public final static org.graalvm.polyglot.tck.TypeDescriptor DATE
+fld public final static org.graalvm.polyglot.tck.TypeDescriptor DURATION
+fld public final static org.graalvm.polyglot.tck.TypeDescriptor EXCEPTION
 fld public final static org.graalvm.polyglot.tck.TypeDescriptor EXECUTABLE
 fld public final static org.graalvm.polyglot.tck.TypeDescriptor EXECUTABLE_ANY
+fld public final static org.graalvm.polyglot.tck.TypeDescriptor HASH
 fld public final static org.graalvm.polyglot.tck.TypeDescriptor HOST_OBJECT
+fld public final static org.graalvm.polyglot.tck.TypeDescriptor INSTANTIABLE
+fld public final static org.graalvm.polyglot.tck.TypeDescriptor INSTANTIABLE_ANY
+fld public final static org.graalvm.polyglot.tck.TypeDescriptor ITERABLE
+fld public final static org.graalvm.polyglot.tck.TypeDescriptor ITERATOR
+fld public final static org.graalvm.polyglot.tck.TypeDescriptor META_OBJECT
 fld public final static org.graalvm.polyglot.tck.TypeDescriptor NATIVE_POINTER
 fld public final static org.graalvm.polyglot.tck.TypeDescriptor NULL
 fld public final static org.graalvm.polyglot.tck.TypeDescriptor NUMBER
 fld public final static org.graalvm.polyglot.tck.TypeDescriptor OBJECT
 fld public final static org.graalvm.polyglot.tck.TypeDescriptor STRING
+fld public final static org.graalvm.polyglot.tck.TypeDescriptor TIME
+fld public final static org.graalvm.polyglot.tck.TypeDescriptor TIME_ZONE
 meth public !varargs static org.graalvm.polyglot.tck.TypeDescriptor executable(org.graalvm.polyglot.tck.TypeDescriptor,boolean,org.graalvm.polyglot.tck.TypeDescriptor[])
 meth public !varargs static org.graalvm.polyglot.tck.TypeDescriptor executable(org.graalvm.polyglot.tck.TypeDescriptor,org.graalvm.polyglot.tck.TypeDescriptor[])
+meth public !varargs static org.graalvm.polyglot.tck.TypeDescriptor instantiable(org.graalvm.polyglot.tck.TypeDescriptor,boolean,org.graalvm.polyglot.tck.TypeDescriptor[])
 meth public !varargs static org.graalvm.polyglot.tck.TypeDescriptor intersection(org.graalvm.polyglot.tck.TypeDescriptor[])
 meth public !varargs static org.graalvm.polyglot.tck.TypeDescriptor union(org.graalvm.polyglot.tck.TypeDescriptor[])
 meth public boolean equals(java.lang.Object)
@@ -139,11 +156,13 @@ meth public boolean isIntersection()
 meth public boolean isUnion()
 meth public int hashCode()
 meth public java.lang.String toString()
+meth public org.graalvm.polyglot.tck.TypeDescriptor subtract(org.graalvm.polyglot.tck.TypeDescriptor)
 meth public static org.graalvm.polyglot.tck.TypeDescriptor array(org.graalvm.polyglot.tck.TypeDescriptor)
 meth public static org.graalvm.polyglot.tck.TypeDescriptor forValue(org.graalvm.polyglot.Value)
+meth public static org.graalvm.polyglot.tck.TypeDescriptor hash(org.graalvm.polyglot.tck.TypeDescriptor,org.graalvm.polyglot.tck.TypeDescriptor)
+meth public static org.graalvm.polyglot.tck.TypeDescriptor iterable(org.graalvm.polyglot.tck.TypeDescriptor)
+meth public static org.graalvm.polyglot.tck.TypeDescriptor iterator(org.graalvm.polyglot.tck.TypeDescriptor)
 supr java.lang.Object
 hfds NOTYPE,PREDEFINED_TYPES,impl
-hcls ArrayImpl,ExecutableImpl,IntersectionImpl,PrimitiveImpl,PrimitiveKind,TypeDescriptorImpl,UnionImpl
-
-CLSS abstract interface org.graalvm.polyglot.tck.package-info
+hcls ArrayImpl,ArrayValueIterator,CompositeTypeDescriptorImpl,ExecutableImpl,HashImpl,HashIterator,InstantiableImpl,IntersectionImpl,IterableImpl,IteratorImpl,IteratorValueIterator,ParameterizedTypeDescriptorImpl,PrimitiveImpl,PrimitiveKind,TypeDescriptorImpl,UnionImpl
 

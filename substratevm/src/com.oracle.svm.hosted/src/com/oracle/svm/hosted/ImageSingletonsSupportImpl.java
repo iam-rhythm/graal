@@ -24,29 +24,84 @@
  */
 package com.oracle.svm.hosted;
 
+import java.util.Collection;
+import java.util.Comparator;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 import org.graalvm.nativeimage.ImageSingletons;
 import org.graalvm.nativeimage.impl.ImageSingletonsSupport;
 
+import com.oracle.svm.core.imagelayer.ImageLayerBuildingSupport;
+import com.oracle.svm.core.layeredimagesingleton.ApplicationLayerOnlyImageSingleton;
+import com.oracle.svm.core.layeredimagesingleton.InitialLayerOnlyImageSingleton;
+import com.oracle.svm.core.layeredimagesingleton.LayeredImageSingleton;
+import com.oracle.svm.core.layeredimagesingleton.LayeredImageSingleton.PersistFlags;
+import com.oracle.svm.core.layeredimagesingleton.LayeredImageSingletonBuilderFlags;
+import com.oracle.svm.core.layeredimagesingleton.LayeredImageSingletonSupport;
+import com.oracle.svm.core.layeredimagesingleton.LoadedLayeredImageSingletonInfo;
+import com.oracle.svm.core.layeredimagesingleton.MultiLayeredImageSingleton;
+import com.oracle.svm.core.layeredimagesingleton.RuntimeOnlyWrapper;
 import com.oracle.svm.core.util.UserError;
+import com.oracle.svm.hosted.imagelayer.HostedImageLayerBuildingSupport;
+import com.oracle.svm.hosted.imagelayer.SVMImageLayerSingletonLoader;
 
-public final class ImageSingletonsSupportImpl extends ImageSingletonsSupport {
+import jdk.vm.ci.meta.JavaConstant;
+
+public final class ImageSingletonsSupportImpl extends ImageSingletonsSupport implements LayeredImageSingletonSupport {
 
     @Override
     public <T> void add(Class<T> key, T value) {
-        HostedManagement.get().doAdd(key, value);
+        HostedManagement.getAndAssertExists().doAdd(key, value);
     }
 
     @Override
     public <T> T lookup(Class<T> key) {
-        return HostedManagement.get().doLookup(key);
+        return HostedManagement.getAndAssertExists().doLookup(key, false, false);
+    }
+
+    @Override
+    public <T> T lookup(Class<T> key, boolean accessRuntimeOnly, boolean accessMultiLayer) {
+        return HostedManagement.getAndAssertExists().doLookup(key, accessRuntimeOnly, accessMultiLayer);
+    }
+
+    @Override
+    public Collection<Class<?>> getMultiLayeredImageSingletonKeys() {
+        return HostedManagement.getAndAssertExists().getMultiLayeredImageSingletonKeys();
+    }
+
+    @Override
+    public Collection<Class<?>> getFutureLayerAccessibleImageSingletonKeys() {
+        return HostedManagement.getAndAssertExists().getFutureLayerAccessibleImageSingletonKeys();
+    }
+
+    @Override
+    public void freezeLayeredImageSingletonMetadata() {
+        HostedManagement.getAndAssertExists().freezeLayeredImageSingletonMetadata();
+    }
+
+    @Override
+    public boolean isInitialLayerOnlyImageSingleton(Class<?> key) {
+        var loader = HostedImageLayerBuildingSupport.singleton().getSingletonLoader();
+        return loader.isInitialLayerOnlyImageSingleton(key);
+    }
+
+    @Override
+    public JavaConstant getInitialLayerOnlyImageSingleton(Class<?> key) {
+        var loader = HostedImageLayerBuildingSupport.singleton().getSingletonLoader();
+        return loader.loadInitialLayerOnlyImageSingleton(key);
     }
 
     @Override
     public boolean contains(Class<?> key) {
-        return HostedManagement.get().doContains(key);
+        HostedManagement hm = HostedManagement.get();
+        if (hm == null) {
+            return false;
+        } else {
+            return hm.doContains(key);
+        }
     }
 
     /**
@@ -59,62 +114,209 @@ public final class ImageSingletonsSupportImpl extends ImageSingletonsSupport {
         }
 
         /**
-         * Multiple image generators can run simultaneously in one hosting VM. Therefore, the
-         * {@link ImageSingletons} is not a singleton during image generation, i.e., we cannot store
-         * the {@link ImageSingletons} in a static field. Instead, we store it in a thread local
-         * variable. The image generator is responsible to {@link #installInThread install} the same
-         * configuration in all worker threads, and {@link #clearInThread clear} it when it is no
-         * longer needed.
+         * Marker for ImageSingleton keys which cannot have a value installed. This can happen when
+         * a {@link LayeredImageSingleton} specified {@link PersistFlags#FORBIDDEN}.
          */
-        private static final ThreadLocal<HostedManagement> hostedVMConfig = new ThreadLocal<>();
+        private static final Object SINGLETON_INSTALLATION_FORBIDDEN = new Object();
 
-        public static HostedManagement get() {
-            HostedManagement result = hostedVMConfig.get();
+        /**
+         * The {@link ImageSingletons} removes static state from the image generator, and in theory
+         * would allow multiple image builds to run at the same time in the same HotSpot VM. But in
+         * practice, this is not possible because JDK state would leak between image builds. So it
+         * is OK (and better for performance) to store all the {@link ImageSingletons} in a static
+         * field here.
+         */
+        private static HostedManagement singletonDuringImageBuild;
+
+        private static HostedManagement getAndAssertExists() {
+            HostedManagement result = get();
             assert result != null;
             return result;
         }
 
-        public static void installInThread(HostedManagement vmConfig) {
-            assert hostedVMConfig.get() == null;
-            hostedVMConfig.set(vmConfig);
+        public static HostedManagement get() {
+            return singletonDuringImageBuild;
         }
 
-        public static void clearInThread() {
-            assert hostedVMConfig.get() != null;
-            hostedVMConfig.set(null);
+        public static void install(HostedManagement vmConfig) {
+            install(vmConfig, null);
+        }
+
+        public static void install(HostedManagement vmConfig, HostedImageLayerBuildingSupport support) {
+            UserError.guarantee(singletonDuringImageBuild == null, "Only one native image build can run at a time");
+            singletonDuringImageBuild = vmConfig;
+
+            if (support != null) {
+                /*
+                 * Note we are intentionally adding this singleton early as build flags may depend
+                 * on it. We also intentionally do not mark this singleton as a LayerImageSingleton
+                 * to prevent circular dependency complications.
+                 */
+                singletonDuringImageBuild.doAddInternal(ImageLayerBuildingSupport.class, support);
+            } else {
+                /*
+                 * Create a placeholder ImageLayerBuilding support to indicate this is not a layered
+                 * build.
+                 */
+                singletonDuringImageBuild.doAddInternal(ImageLayerBuildingSupport.class, new ImageLayerBuildingSupport(false, false, false) {
+                });
+            }
+            if (support != null && support.getSingletonLoader() != null) {
+                /*
+                 * Note eventually this may need to be moved to a later point after the Options
+                 * Image Singleton is installed.
+                 */
+                singletonDuringImageBuild.installPriorSingletonInfo(support.getSingletonLoader());
+            } else {
+                singletonDuringImageBuild.doAddInternal(LoadedLayeredImageSingletonInfo.class, new LoadedLayeredImageSingletonInfo(Set.of()));
+            }
+        }
+
+        private void installPriorSingletonInfo(SVMImageLayerSingletonLoader info) {
+            var result = info.loadImageSingletons(SINGLETON_INSTALLATION_FORBIDDEN);
+            Set<Class<?>> installedKeys = new HashSet<>();
+            for (var entry : result.entrySet()) {
+                Object singletonToInstall = entry.getKey();
+                for (Class<?> key : entry.getValue()) {
+                    doAddInternal(key, singletonToInstall);
+                    installedKeys.add(key);
+                }
+            }
+
+            // document what was installed during loading
+            doAddInternal(LoadedLayeredImageSingletonInfo.class, new LoadedLayeredImageSingletonInfo(Set.copyOf(installedKeys)));
+        }
+
+        public static void clear() {
+            singletonDuringImageBuild = null;
+        }
+
+        private static Object stripRuntimeWrapper(Object singleton) {
+            if (singleton instanceof RuntimeOnlyWrapper r) {
+                return r.wrappedObject();
+            }
+            return singleton;
+        }
+
+        public static void persist() {
+            var list = singletonDuringImageBuild.configObjects.entrySet().stream().filter(e -> stripRuntimeWrapper(e.getValue()) instanceof LayeredImageSingleton)
+                            .sorted(Comparator.comparing(e -> e.getKey().getName()))
+                            .toList();
+            HostedImageLayerBuildingSupport.singleton().getWriter().writeImageSingletonInfo(list);
         }
 
         private final Map<Class<?>, Object> configObjects;
+        private final boolean checkUnsupported;
+        private Set<Class<?>> multiLayeredImageSingletonKeys;
+        private Set<Class<?>> futureLayerAccessibleImageSingletonKeys;
 
         public HostedManagement() {
+            this(false);
+        }
+
+        public HostedManagement(boolean checkUnsupported) {
             this.configObjects = new ConcurrentHashMap<>();
+            this.multiLayeredImageSingletonKeys = ConcurrentHashMap.newKeySet();
+            this.futureLayerAccessibleImageSingletonKeys = ConcurrentHashMap.newKeySet();
+            this.checkUnsupported = checkUnsupported;
         }
 
         <T> void doAdd(Class<T> key, T value) {
+            doAddInternal(key, value);
+        }
+
+        private void doAddInternal(Class<?> key, Object value) {
             checkKey(key);
             if (value == null) {
-                throw UserError.abort("ImageSingletons do not allow null value for key " + key.getTypeName());
+                throw UserError.abort("ImageSingletons do not allow null value for key %s", key.getTypeName());
             }
 
-            Object prevValue = configObjects.putIfAbsent(key, value);
+            Object storedValue = value;
+            if (value instanceof LayeredImageSingleton singleton) {
+                assert LayeredImageSingletonBuilderFlags.verifyImageBuilderFlags(singleton);
+
+                if (checkUnsupported && singleton.getImageBuilderFlags().contains(LayeredImageSingletonBuilderFlags.UNSUPPORTED)) {
+                    throw UserError.abort("Unsupported image singleton is being installed %s %s", key.getTypeName(), singleton);
+                }
+
+                if (singleton instanceof MultiLayeredImageSingleton || ApplicationLayerOnlyImageSingleton.isSingletonInstanceOf(singleton)) {
+
+                    if (singleton instanceof MultiLayeredImageSingleton && ApplicationLayerOnlyImageSingleton.isSingletonInstanceOf(singleton)) {
+                        throw UserError.abort("Singleton cannot implement both %s and %s. singleton: %s", MultiLayeredImageSingleton.class, ApplicationLayerOnlyImageSingleton.class, singleton);
+                    }
+
+                    if (ApplicationLayerOnlyImageSingleton.isSingletonInstanceOf(singleton) && !ImageLayerBuildingSupport.lastImageBuild()) {
+                        throw UserError.abort("Application layer only image singleton can only be installed in the final layer: %s", singleton);
+                    }
+
+                    if (singleton instanceof MultiLayeredImageSingleton) {
+                        multiLayeredImageSingletonKeys.add(key);
+                    }
+                }
+
+                if (singleton instanceof InitialLayerOnlyImageSingleton initial && initial.accessibleInFutureLayers()) {
+                    futureLayerAccessibleImageSingletonKeys.add(key);
+                }
+
+                if (!singleton.getImageBuilderFlags().contains(LayeredImageSingletonBuilderFlags.BUILDTIME_ACCESS)) {
+                    storedValue = new RuntimeOnlyWrapper(singleton);
+                }
+            }
+
+            Object prevValue = configObjects.putIfAbsent(key, storedValue);
 
             if (prevValue != null) {
-                throw UserError.abort("ImageSingletons.add must not overwrite existing key " + key.getTypeName() + "\nExisting value: " + prevValue + "\nNew value: " + value);
+                throw UserError.abort("ImageSingletons.add must not overwrite existing key %s%nExisting value: %s%nNew value: %s", key.getTypeName(), prevValue, value);
             }
         }
 
-        <T> T doLookup(Class<T> key) {
+        Collection<Class<?>> getMultiLayeredImageSingletonKeys() {
+            return multiLayeredImageSingletonKeys;
+        }
+
+        Collection<Class<?>> getFutureLayerAccessibleImageSingletonKeys() {
+            return futureLayerAccessibleImageSingletonKeys;
+        }
+
+        void freezeLayeredImageSingletonMetadata() {
+            multiLayeredImageSingletonKeys = Set.copyOf(multiLayeredImageSingletonKeys);
+            futureLayerAccessibleImageSingletonKeys = Set.copyOf(futureLayerAccessibleImageSingletonKeys);
+        }
+
+        <T> T doLookup(Class<T> key, boolean stripRuntimeOnly, boolean allowMultiLayered) {
             checkKey(key);
             Object result = configObjects.get(key);
             if (result == null) {
-                throw UserError.abort("ImageSingletons do not contain key " + key.getTypeName());
+                var others = configObjects.keySet().stream()//
+                                .filter(c -> c.getName().equals(key.getName()))//
+                                .map(c -> c.getClassLoader().getName() + "/" + c.getTypeName())//
+                                .toList();
+                if (others.isEmpty()) {
+                    throw UserError.abort("ImageSingletons do not contain key %s", key.getTypeName());
+                }
+                throw UserError.abort("ImageSingletons do not contain key %s/%s but does contain the following key(s): %s",
+                                key.getClassLoader().getName(), key.getTypeName(),
+                                String.join(", ", others));
+            } else if (result == SINGLETON_INSTALLATION_FORBIDDEN) {
+                throw UserError.abort("A LayeredImageSingleton was installed in a prior layer which forbids creating the singleton in a subsequent layer. Key %s", key.getTypeName());
+            } else if (result instanceof RuntimeOnlyWrapper wrapper) {
+                if (!stripRuntimeOnly) {
+                    throw UserError.abort("A LayeredImageSingleton was accessed during image building which does not have %s access. Key: %s, object %s",
+                                    LayeredImageSingletonBuilderFlags.BUILDTIME_ACCESS, key, wrapper.wrappedObject());
+                }
+                result = wrapper.wrappedObject();
+
+            }
+            if (!allowMultiLayered && result instanceof MultiLayeredImageSingleton) {
+                throw UserError.abort("Forbidden lookup of MultiLayeredImageSingleton. Use LayeredImageSingletonSupport.lookup if really necessary. Key: %s, object %s", key, result);
             }
             return key.cast(result);
         }
 
         boolean doContains(Class<?> key) {
             checkKey(key);
-            return configObjects.containsKey(key);
+            var value = configObjects.get(key);
+            return value != null && value != SINGLETON_INSTALLATION_FORBIDDEN;
         }
 
         private static void checkKey(Class<?> key) {

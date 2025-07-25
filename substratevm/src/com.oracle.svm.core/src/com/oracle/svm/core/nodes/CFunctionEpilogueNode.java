@@ -24,36 +24,89 @@
  */
 package com.oracle.svm.core.nodes;
 
-import static org.graalvm.compiler.nodeinfo.NodeCycles.CYCLES_8;
-import static org.graalvm.compiler.nodeinfo.NodeSize.SIZE_8;
+import static jdk.graal.compiler.nodeinfo.InputType.Memory;
+import static jdk.graal.compiler.nodeinfo.InputType.State;
+import static jdk.graal.compiler.nodeinfo.NodeCycles.CYCLES_8;
+import static jdk.graal.compiler.nodeinfo.NodeSize.SIZE_8;
 
-import org.graalvm.compiler.core.common.type.StampFactory;
-import org.graalvm.compiler.graph.NodeClass;
-import org.graalvm.compiler.nodeinfo.NodeInfo;
-import org.graalvm.compiler.nodes.FixedWithNextNode;
-import org.graalvm.compiler.nodes.memory.MemoryCheckpoint;
-import org.graalvm.compiler.nodes.spi.Lowerable;
-import org.graalvm.compiler.nodes.spi.LoweringTool;
 import org.graalvm.word.LocationIdentity;
 
-@NodeInfo(cycles = CYCLES_8, size = SIZE_8)
-public final class CFunctionEpilogueNode extends FixedWithNextNode implements Lowerable, MemoryCheckpoint.Single {
+import jdk.graal.compiler.core.common.type.StampFactory;
+import jdk.graal.compiler.graph.Node;
+import jdk.graal.compiler.graph.NodeClass;
+import jdk.graal.compiler.nodeinfo.NodeInfo;
+import jdk.graal.compiler.nodes.AbstractStateSplit;
+import jdk.graal.compiler.nodes.DeoptimizingNode;
+import jdk.graal.compiler.nodes.DeoptimizingNode.DeoptBefore;
+import jdk.graal.compiler.nodes.FrameState;
+import jdk.graal.compiler.nodes.debug.ControlFlowAnchored;
+import jdk.graal.compiler.nodes.memory.SingleMemoryKill;
+import jdk.graal.compiler.nodes.spi.Lowerable;
+
+/**
+ * See comments in {@link CFunctionPrologueNode} for details.
+ */
+@NodeInfo(cycles = CYCLES_8, size = SIZE_8, allowedUsageTypes = {Memory})
+public final class CFunctionEpilogueNode extends AbstractStateSplit implements Lowerable, SingleMemoryKill, ControlFlowAnchored, DeoptBefore, DeoptimizingNode.DeoptAfter {
     public static final NodeClass<CFunctionEpilogueNode> TYPE = NodeClass.create(CFunctionEpilogueNode.class);
 
-    public CFunctionEpilogueNode() {
+    private final int oldThreadStatus;
+    /**
+     * See comment in {@link CFunctionPrologueNode}.
+     */
+    private CFunctionEpilogueMarker marker;
+
+    public CFunctionEpilogueNode(int oldThreadStatus) {
         super(TYPE, StampFactory.forVoid());
+        this.oldThreadStatus = oldThreadStatus;
     }
 
     @Override
-    public void lower(LoweringTool tool) {
-        tool.getLowerer().lower(this, tool);
+    protected void afterClone(Node other) {
+        super.afterClone(other);
+        assert marker == null : "Marker must be unique";
+    }
+
+    public CFunctionEpilogueMarker getMarker() {
+        if (marker == null) {
+            marker = new CFunctionEpilogueMarker();
+        }
+        return marker;
     }
 
     @Override
-    public LocationIdentity getLocationIdentity() {
+    public LocationIdentity getKilledLocationIdentity() {
         return LocationIdentity.any();
     }
 
+    public int getOldThreadStatus() {
+        return oldThreadStatus;
+    }
+
     @NodeIntrinsic
-    public static native void cFunctionEpilogue();
+    public static native void cFunctionEpilogue(@ConstantNodeParameter int oldThreadStatus);
+
+    @OptionalInput(State) protected FrameState stateBefore;
+
+    @Override
+    public boolean canDeoptimize() {
+        return true;
+    }
+
+    @Override
+    public void setStateBefore(FrameState state) {
+        updateUsages(this.stateBefore, state);
+        this.stateBefore = state;
+    }
+
+    @Override
+    public FrameState stateBefore() {
+        return stateBefore;
+    }
+
+    @Override
+    public boolean canUseAsStateDuring() {
+        return true;
+    }
+
 }

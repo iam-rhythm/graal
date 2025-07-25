@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,18 +40,21 @@
  */
 package com.oracle.truffle.sl.nodes;
 
+import java.util.Collections;
 import java.util.Map;
 
 import com.oracle.truffle.api.CompilerDirectives;
 import com.oracle.truffle.api.CompilerDirectives.CompilationFinal;
+import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
 import com.oracle.truffle.api.RootCallTarget;
-import com.oracle.truffle.api.TruffleLanguage.ContextReference;
 import com.oracle.truffle.api.frame.VirtualFrame;
 import com.oracle.truffle.api.nodes.DirectCallNode;
 import com.oracle.truffle.api.nodes.RootNode;
+import com.oracle.truffle.api.strings.TruffleString;
 import com.oracle.truffle.sl.SLLanguage;
 import com.oracle.truffle.sl.runtime.SLContext;
 import com.oracle.truffle.sl.runtime.SLNull;
+import com.oracle.truffle.sl.runtime.SLStrings;
 
 /**
  * This class performs two additional tasks:
@@ -66,18 +69,24 @@ import com.oracle.truffle.sl.runtime.SLNull;
  */
 public final class SLEvalRootNode extends RootNode {
 
-    private final Map<String, RootCallTarget> functions;
+    private static final TruffleString ROOT_EVAL = SLStrings.constant("root eval");
+
+    private final Map<TruffleString, RootCallTarget> functions;
     @CompilationFinal private boolean registered;
 
-    private final ContextReference<SLContext> reference;
-
     @Child private DirectCallNode mainCallNode;
+    private final SLLanguage language;
 
-    public SLEvalRootNode(SLLanguage language, RootCallTarget rootFunction, Map<String, RootCallTarget> functions) {
-        super(null); // internal frame
-        this.functions = functions;
+    public SLEvalRootNode(SLLanguage language, RootCallTarget rootFunction, Map<TruffleString, RootCallTarget> functions) {
+        super(language);
+        this.language = language;
+        this.functions = Collections.unmodifiableMap(functions);
         this.mainCallNode = rootFunction != null ? DirectCallNode.create(rootFunction) : null;
-        this.reference = language.getContextReference();
+    }
+
+    @Override
+    public boolean isInternal() {
+        return true;
     }
 
     @Override
@@ -87,7 +96,11 @@ public final class SLEvalRootNode extends RootNode {
 
     @Override
     public String getName() {
-        return "root eval";
+        return ROOT_EVAL.toJavaStringUncached();
+    }
+
+    public static TruffleString getTSName() {
+        return ROOT_EVAL;
     }
 
     @Override
@@ -97,14 +110,27 @@ public final class SLEvalRootNode extends RootNode {
 
     @Override
     public Object execute(VirtualFrame frame) {
-        /* Lazy registrations of functions on first execution. */
-        if (!registered) {
-            /* Function registration is a slow-path operation that must not be compiled. */
-            CompilerDirectives.transferToInterpreterAndInvalidate();
-            reference.get().getFunctionRegistry().register(functions);
-            registered = true;
+        if (language.isSingleContext()) {
+            /*
+             * Lazy registrations of functions on first execution. This optimization only works in
+             * the single context case. Otherwise function registration needs to be repeated for
+             * every context on first execute.
+             */
+            if (!registered) {
+                /* Function registration is a slow-path operation that must not be compiled. */
+                CompilerDirectives.transferToInterpreterAndInvalidate();
+                registerFunctions();
+                registered = true;
+            }
+        } else {
+            /*
+             * In the multi context case we always want to ensure that functions are registered. The
+             * multi-context case is initialized with SLLanguage#initializeMultipleContexts. That
+             * typically happens when a polyglot Context was created with an explicit Engine or if
+             * an internal context was created. See Context.Builder#engine for details.
+             */
+            registerFunctions();
         }
-
         if (mainCallNode == null) {
             /* The source code did not have a "main" function, so nothing to execute. */
             return SLNull.SINGLETON;
@@ -117,4 +143,10 @@ public final class SLEvalRootNode extends RootNode {
             return mainCallNode.call(arguments);
         }
     }
+
+    @TruffleBoundary
+    private void registerFunctions() {
+        SLContext.get(this).getFunctionRegistry().register(functions);
+    }
+
 }

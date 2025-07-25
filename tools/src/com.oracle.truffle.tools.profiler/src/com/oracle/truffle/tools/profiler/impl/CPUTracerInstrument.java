@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,7 +24,9 @@
  */
 package com.oracle.truffle.tools.profiler.impl;
 
+import java.io.File;
 import java.io.PrintStream;
+import java.lang.reflect.Method;
 
 import org.graalvm.options.OptionDescriptors;
 import org.graalvm.polyglot.Engine;
@@ -39,7 +41,8 @@ import com.oracle.truffle.tools.profiler.CPUTracer;
  *
  * @since 0.30
  */
-@TruffleInstrument.Registration(id = CPUTracerInstrument.ID, name = "CPU Tracer", version = CPUTracerInstrument.VERSION, services = {CPUTracer.class})
+@TruffleInstrument.Registration(id = CPUTracerInstrument.ID, name = "CPU Tracer", version = CPUTracerInstrument.VERSION, services = {
+                CPUTracer.class}, website = "https://www.graalvm.org/tools/profiling/")
 public class CPUTracerInstrument extends TruffleInstrument {
 
     /**
@@ -56,31 +59,28 @@ public class CPUTracerInstrument extends TruffleInstrument {
      * @since 0.30
      */
     public static final String ID = "cputracer";
+    private static final ProfilerToolFactory<CPUTracer> factory = getDefaultFactory();
 
     static final String VERSION = "0.3.0";
+    private boolean enabled;
     private CPUTracer tracer;
-    private static ProfilerToolFactory<CPUTracer> factory;
-
-    /**
-     * Sets the factory which instantiates the {@link CPUTracer}.
-     *
-     * @param factory the factory which instantiates the {@link CPUTracer}.
-     * @since 0.30
+    /*
+     * Guest languages could change the working directory of the current process, The JVM assumes
+     * that the working directory does not change. When this assumption is broken relative file
+     * paths no longer work correctly. For this reason we save the absolute path to the output file
+     * at the very start so that we avoid issues of broken relative paths See GR-36526 for more
+     * context.
      */
-    public static void setFactory(ProfilerToolFactory<CPUTracer> factory) {
-        if (factory == null || !factory.getClass().getName().startsWith("com.oracle.truffle.tools.profiler")) {
-            throw new IllegalArgumentException("Wrong factory: " + factory);
-        }
-        CPUTracerInstrument.factory = factory;
-    }
+    String absoluteOutputPath;
 
-    static {
-        // Be sure that the factory is initialized:
+    @SuppressWarnings("unchecked")
+    private static ProfilerToolFactory<CPUTracer> getDefaultFactory() {
         try {
-            Class.forName(CPUTracer.class.getName(), true, CPUTracer.class.getClassLoader());
-        } catch (ClassNotFoundException ex) {
-            // Can not happen
-            throw new AssertionError();
+            Method createFactory = CPUTracer.class.getDeclaredMethod("createFactory");
+            createFactory.setAccessible(true);
+            return (ProfilerToolFactory<CPUTracer>) createFactory.invoke(null);
+        } catch (Exception ex) {
+            throw new AssertionError(ex);
         }
     }
 
@@ -108,17 +108,22 @@ public class CPUTracerInstrument extends TruffleInstrument {
     protected void onCreate(Env env) {
 
         tracer = factory.create(env);
-        if (env.getOptions().get(CPUTracerCLI.ENABLED)) {
+        enabled = env.getOptions().get(CPUTracerCLI.ENABLED);
+        if (enabled) {
             try {
                 tracer.setFilter(getSourceSectionFilter(env));
             } catch (IllegalArgumentException e) {
                 new PrintStream(env.err()).println(ID + " error: " + e.getMessage());
-                env.getOptions().set(CPUTracerCLI.ENABLED, false);
+                enabled = false;
                 tracer.setCollecting(false);
                 env.registerService(tracer);
                 return;
             }
             tracer.setCollecting(true);
+            if (CPUTracerCLI.OUTPUT_FILE.hasBeenSet(env.getOptions())) {
+                final String outputPath = CPUTracerCLI.OUTPUT_FILE.getValue(env.getOptions());
+                absoluteOutputPath = new File(outputPath).getAbsolutePath();
+            }
         }
         env.registerService(tracer);
     }
@@ -128,10 +133,11 @@ public class CPUTracerInstrument extends TruffleInstrument {
         final boolean statements = env.getOptions().get(CPUTracerCLI.TRACE_STATEMENTS);
         final boolean calls = env.getOptions().get(CPUTracerCLI.TRACE_CALLS);
         final boolean internals = env.getOptions().get(CPUTracerCLI.TRACE_INTERNAL);
-        final Object[] filterRootName = env.getOptions().get(CPUTracerCLI.FILTER_ROOT);
-        final Object[] filterFile = env.getOptions().get(CPUTracerCLI.FILTER_FILE);
+        final WildcardFilter filterRootName = env.getOptions().get(CPUTracerCLI.FILTER_ROOT);
+        final WildcardFilter filterFile = env.getOptions().get(CPUTracerCLI.FILTER_FILE);
+        final String filterMimeType = env.getOptions().get(CPUTracerCLI.FILTER_MIME_TYPE);
         final String filterLanguage = env.getOptions().get(CPUTracerCLI.FILTER_LANGUAGE);
-        return CPUTracerCLI.buildFilter(roots, statements, calls, internals, filterRootName, filterFile, filterLanguage);
+        return CPUTracerCLI.buildFilter(roots, statements, calls, internals, filterRootName, filterFile, filterMimeType, filterLanguage);
     }
 
     /**
@@ -150,9 +156,15 @@ public class CPUTracerInstrument extends TruffleInstrument {
      * @since 0.30
      */
     @Override
+    protected void onFinalize(Env env) {
+        if (enabled) {
+            CPUTracerCLI.handleOutput(env, tracer, absoluteOutputPath);
+        }
+    }
+
+    @Override
     protected void onDispose(Env env) {
-        if (env.getOptions().get(CPUTracerCLI.ENABLED)) {
-            CPUTracerCLI.handleOutput(env, tracer);
+        if (enabled) {
             tracer.close();
         }
     }

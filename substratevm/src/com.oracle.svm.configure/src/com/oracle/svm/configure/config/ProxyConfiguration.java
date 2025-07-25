@@ -27,50 +27,147 @@ package com.oracle.svm.configure.config;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.HashSet;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
-import com.oracle.svm.configure.json.JsonPrintable;
-import com.oracle.svm.configure.json.JsonWriter;
+import com.oracle.svm.configure.ConditionalElement;
+import com.oracle.svm.configure.ConfigurationBase;
+import com.oracle.svm.configure.ConfigurationParser;
+import com.oracle.svm.configure.ConfigurationParserOption;
+import com.oracle.svm.configure.ProxyConfigurationParser;
+import com.oracle.svm.configure.UnresolvedConfigurationCondition;
+import com.oracle.svm.configure.config.conditional.ConfigurationConditionResolver;
 
-public class ProxyConfiguration implements JsonPrintable {
-    private final Set<Set<String>> interfaceSets = new HashSet<>();
+import jdk.graal.compiler.util.json.JsonWriter;
 
-    public void add(Set<String> interfaceSet) {
-        interfaceSets.add(interfaceSet);
+public final class ProxyConfiguration extends ConfigurationBase<ProxyConfiguration, ProxyConfiguration.Predicate> {
+    private final Set<ConditionalElement<List<String>>> interfaceLists = ConcurrentHashMap.newKeySet();
+
+    public ProxyConfiguration() {
+    }
+
+    public ProxyConfiguration(ProxyConfiguration other) {
+        for (ConditionalElement<List<String>> interfaceList : other.interfaceLists) {
+            interfaceLists.add(new ConditionalElement<>(interfaceList.condition(), new ArrayList<>(interfaceList.element())));
+        }
+    }
+
+    @Override
+    public ProxyConfiguration copy() {
+        return new ProxyConfiguration(this);
+    }
+
+    @Override
+    protected void merge(ProxyConfiguration other) {
+        for (ConditionalElement<List<String>> interfaceList : other.interfaceLists) {
+            interfaceLists.add(new ConditionalElement<>(interfaceList.condition(), new ArrayList<>(interfaceList.element())));
+        }
+    }
+
+    @Override
+    protected void intersect(ProxyConfiguration other) {
+        interfaceLists.retainAll(other.interfaceLists);
+    }
+
+    @Override
+    protected void removeIf(Predicate predicate) {
+        interfaceLists.removeIf(predicate::testProxyInterfaceList);
+    }
+
+    @Override
+    public void subtract(ProxyConfiguration other) {
+        interfaceLists.removeAll(other.interfaceLists);
+    }
+
+    @Override
+    public void mergeConditional(UnresolvedConfigurationCondition condition, ProxyConfiguration other) {
+        for (ConditionalElement<List<String>> interfaceList : other.interfaceLists) {
+            add(condition, new ArrayList<>(interfaceList.element()));
+        }
+    }
+
+    public void add(UnresolvedConfigurationCondition condition, List<String> interfaceList) {
+        interfaceLists.add(new ConditionalElement<>(condition, interfaceList));
+    }
+
+    public boolean contains(UnresolvedConfigurationCondition condition, List<String> interfaceList) {
+        return interfaceLists.contains(new ConditionalElement<>(condition, interfaceList));
+    }
+
+    public boolean contains(UnresolvedConfigurationCondition condition, String... interfaces) {
+        return contains(condition, Arrays.asList(interfaces));
     }
 
     @Override
     public void printJson(JsonWriter writer) throws IOException {
-        List<String[]> sets = new ArrayList<>(interfaceSets.size());
-        for (Set<String> set : interfaceSets) {
-            String[] array = set.toArray(new String[0]);
-            Arrays.sort(array);
-            sets.add(array);
-        }
-        sets.sort((a, b) -> {
-            int c = 0;
-            for (int i = 0; c == 0 && i < a.length && i < b.length; i++) {
-                c = a[i].compareTo(b[i]);
-            }
-            return (c != 0) ? c : (a.length - b.length);
-        });
+        List<ConditionalElement<List<String>>> lists = new ArrayList<>(interfaceLists.size());
+        lists.addAll(interfaceLists);
+        printProxyInterfaces(writer, lists);
+    }
 
-        writer.append('[');
-        writer.indent();
-        String prefix = "";
-        for (String[] set : sets) {
-            writer.append(prefix).newline();
-            char typePrefix = '[';
-            for (String type : set) {
-                writer.append(typePrefix).quote(type);
-                typePrefix = ',';
+    public static void printProxyInterfaces(JsonWriter writer, List<ConditionalElement<List<String>>> lists) throws IOException {
+        lists.sort(ConditionalElement.comparator(ProxyConfiguration::compareList));
+
+        writer.appendArrayStart();
+        boolean firstProxy = true;
+        for (ConditionalElement<List<String>> list : lists) {
+            if (firstProxy) {
+                firstProxy = false;
+            } else {
+                writer.appendSeparator();
             }
-            writer.append(']');
-            prefix = ",";
+            writer.appendObjectStart();
+            ConfigurationConditionPrintable.printConditionAttribute(list.condition(), writer, false);
+            writer.quote("interfaces").appendFieldSeparator().appendArrayStart();
+            boolean firstType = true;
+            for (String type : list.element()) {
+                if (firstType) {
+                    firstType = false;
+                } else {
+                    writer.appendSeparator();
+                }
+                writer.quote(type);
+            }
+            writer.appendArrayEnd();
+            writer.appendObjectEnd();
         }
-        writer.unindent().newline();
-        writer.append(']').newline();
+        writer.appendArrayEnd();
+    }
+
+    @Override
+    public ConfigurationParser createParser(boolean combinedFileSchema, EnumSet<ConfigurationParserOption> parserOptions) {
+        if (combinedFileSchema) {
+            throw new IllegalArgumentException("Independent proxy configuration is only supported with the legacy metadata schema");
+        }
+        return new ProxyConfigurationParser<>(ConfigurationConditionResolver.identityResolver(), parserOptions,
+                        (cond, interfaces) -> interfaceLists.add(new ConditionalElement<>(cond, interfaces)));
+    }
+
+    @Override
+    public boolean isEmpty() {
+        return interfaceLists.isEmpty();
+    }
+
+    @Override
+    public boolean supportsCombinedFile() {
+        return false;
+    }
+
+    private static <T extends Comparable<T>> int compareList(List<T> l1, List<T> l2) {
+        for (int i = 0; i < l1.size() && i < l2.size(); i++) {
+            int c = l1.get(i).compareTo(l2.get(i));
+            if (c != 0) {
+                return c;
+            }
+        }
+        return l1.size() - l2.size();
+    }
+
+    public interface Predicate {
+
+        boolean testProxyInterfaceList(ConditionalElement<List<String>> conditionalElement);
+
     }
 }

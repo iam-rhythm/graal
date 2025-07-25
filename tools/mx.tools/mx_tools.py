@@ -1,8 +1,6 @@
 #
 # mx_tools.py - the GraalVM specific commands
 #
-# ----------------------------------------------------------------------------------------------------
-#
 # Copyright (c) 2018, 2018, Oracle and/or its affiliates. All rights reserved.
 # DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
 #
@@ -26,7 +24,6 @@
 # or visit www.oracle.com if you need additional information or have any
 # questions.
 #
-# ----------------------------------------------------------------------------------------------------
 
 import os
 from os.path import exists
@@ -34,14 +31,21 @@ import re
 
 import mx
 
+from mx_sigtest import sigtest
 from mx_unittest import unittest
-from mx_jackpot import jackpot
 from mx_gate import Task
-from urlparse import urljoin
 import mx_gate
 import mx_unittest
 import mx_benchmark
-import mx_sdk
+import mx_sdk_vm
+
+import sys
+
+if sys.version_info[0] < 3:
+    from urlparse import urljoin
+else:
+    from urllib.parse import urljoin # pylint: disable=no-name-in-module
+
 
 _suite = mx.suite('tools')
 
@@ -68,7 +72,7 @@ def javadoc(args):
         projectNames = []
         for p in mx.projects(True, True):
             projectNames.append(p.name)
-        mx.javadoc(['--unified', '--projects', ','.join(projectNames)], includeDeps=False)
+        mx.javadoc(['--unified', '--disallow-all-warnings', '--projects', ','.join(projectNames)], includeDeps=False)
     else:
         mx.javadoc(['--unified'] + args)
     javadocDir = os.sep.join([_suite.dir, 'javadoc'])
@@ -94,7 +98,7 @@ def checkLinks(javadocDir):
                     minIndex = sectionIndex
                     if minIndex < 0:
                         minIndex = len(full)
-                    if questionIndex >= 0 and questionIndex < minIndex:
+                    if 0 <= questionIndex < minIndex:
                         minIndex = questionIndex
                     path = full[0:minIndex]
 
@@ -117,7 +121,9 @@ def checkLinks(javadocDir):
         else:
             content = open(referencedfile, 'r').read()
             for path, s in sections:
-                if not s == None:
+                if not s is None:
+                    s = s.replace("%3C", "&lt;")
+                    s = s.replace("%3E", "&gt;")
                     whereName = content.find('name="' + s + '"')
                     whereId = content.find('id="' + s + '"')
                     if whereName == -1 and whereId == -1:
@@ -127,72 +133,130 @@ def checkLinks(javadocDir):
     if err:
         mx.abort('There are wrong references in Javadoc')
 
-def _unittest_config_participant(config):
-    vmArgs, mainClass, mainClassArgs = config
-    if mx.get_jdk(tag='default').javaCompliance > '1.8':
+class ToolsUnittestConfig(mx_unittest.MxUnittestConfig):
+
+    def __init__(self):
+        super(ToolsUnittestConfig, self).__init__('tools')
+
+    def apply(self, config):
+        vmArgs, mainClass, mainClassArgs = config
         # This is required to access jdk.internal.module.Modules which
         # in turn allows us to dynamically open fields/methods to reflection.
         vmArgs = vmArgs + ['--add-exports=java.base/jdk.internal.module=ALL-UNNAMED']
+        vmArgs = vmArgs + ['--add-modules=ALL-MODULE-PATH']
+        # The tools unittests use internals
+        mainClassArgs.extend(['-JUnitOpenPackages', 'com.oracle.truffle.tools.chromeinspector/*=ALL-UNNAMED'])
+        mainClassArgs.extend(['-JUnitOpenPackages', 'com.oracle.truffle.tools.coverage/*=ALL-UNNAMED'])
+        mainClassArgs.extend(['-JUnitOpenPackages', 'com.oracle.truffle.tools.dap/*=ALL-UNNAMED'])
+        mainClassArgs.extend(['-JUnitOpenPackages', 'org.graalvm.tools.insight/*=ALL-UNNAMED'])
+        mainClassArgs.extend(['-JUnitOpenPackages', 'org.graalvm.tools.insight.heap/*=ALL-UNNAMED'])
+        mainClassArgs.extend(['-JUnitOpenPackages', 'org.graalvm.tools.lsp/*=ALL-UNNAMED'])
+        return (vmArgs, mainClass, mainClassArgs)
 
-        # This is required for the call to setAccessible in
-        # TruffleTCK.testValueWithSource to work.
-        vmArgs = vmArgs + ['--add-opens=org.graalvm.truffle/com.oracle.truffle.api.vm=ALL-UNNAMED', '--add-modules=ALL-MODULE-PATH']
-    return (vmArgs, mainClass, mainClassArgs)
-
-mx_unittest.add_config_participant(_unittest_config_participant)
+mx_unittest.register_unittest_config(ToolsUnittestConfig())
 
 def _tools_gate_runner(args, tasks):
-    with Task('Jackpot check', tasks) as t:
-        if t: jackpot(['--fail-on-warnings'], suite=None, nonZeroIsFatal=True)
+    with Task('Tools Signature Tests', tasks) as t:
+        if t: sigtest(['--check', 'binary'])
     with Task('Tools UnitTests', tasks) as t:
-        if t: unittest(['--suite', 'tools', '--enable-timing', '--verbose', '--fail-fast'])
+        if t: unittest(['--suite', 'tools', '--enable-timing', '--verbose', '--max-class-failures=25'])
 
 mx_gate.add_gate_runner(_suite, _tools_gate_runner)
 
-mx_sdk.register_graalvm_component(mx_sdk.GraalVmTool(
+mx_sdk_vm.register_graalvm_component(mx_sdk_vm.GraalVmTool(
+    suite=_suite,
+    name='GraalVM Language Server',
+    short_name='lsp',
+    dir_name='lsp',
+    license_files=[],
+    third_party_license_files=[],
+    dependencies=['Truffle JSON Library'],
+    truffle_jars=['tools:LSP_API', 'tools:LSP'],
+    support_distributions=['tools:LSP_GRAALVM_SUPPORT'],
+    include_by_default=True,
+))
+
+mx_sdk_vm.register_graalvm_component(mx_sdk_vm.GraalVmTool(
+    suite=_suite,
+    name='GraalVM Debug Protocol Server',
+    short_name='dap',
+    dir_name='dap',
+    license_files=[],
+    third_party_license_files=[],
+    dependencies=['Truffle JSON Library'],
+    truffle_jars=['tools:DAP'],
+    support_distributions=['tools:DAP_GRAALVM_SUPPORT'],
+    include_by_default=True,
+))
+
+mx_sdk_vm.register_graalvm_component(mx_sdk_vm.GraalVmTool(
     suite=_suite,
     name='GraalVM Chrome Inspector',
     short_name='ins',
     dir_name='chromeinspector',
     license_files=[],
     third_party_license_files=[],
+    dependencies=['Truffle JSON Library'],
     truffle_jars=['tools:CHROMEINSPECTOR'],
     support_distributions=['tools:CHROMEINSPECTOR_GRAALVM_SUPPORT'],
     include_by_default=True,
 ))
 
-mx_sdk.register_graalvm_component(mx_sdk.GraalVmTool(
+mx_sdk_vm.register_graalvm_component(mx_sdk_vm.GraalVmTool(
+    suite=_suite,
+    name='Insight',
+    short_name='insight',
+    dir_name='insight',
+    license_files=[],
+    third_party_license_files=[],
+    dependencies=['Truffle'],
+    truffle_jars=['tools:INSIGHT'],
+    support_distributions=['tools:INSIGHT_GRAALVM_SUPPORT'],
+    priority=10,
+    include_by_default=True,
+))
+
+mx_sdk_vm.register_graalvm_component(mx_sdk_vm.GraalVmTool(
+    suite=_suite,
+    name='Insight Heap',
+    short_name='insightheap',
+    dir_name='insightheap',
+    license_files=[],
+    third_party_license_files=[],
+    dependencies=['Truffle', 'insight'],
+    truffle_jars=['tools:INSIGHT_HEAP'],
+    support_distributions=['tools:INSIGHT_HEAP_GRAALVM_SUPPORT'],
+    priority=10,
+    include_by_default=True,
+))
+
+mx_sdk_vm.register_graalvm_component(mx_sdk_vm.GraalVmTool(
     suite=_suite,
     name='GraalVM Profiler',
     short_name='pro',
     dir_name='profiler',
     license_files=[],
     third_party_license_files=[],
+    dependencies=['Truffle JSON Library'],
     truffle_jars=['tools:TRUFFLE_PROFILER'],
     support_distributions=['tools:TRUFFLE_PROFILER_GRAALVM_SUPPORT'],
     include_by_default=True,
 ))
 
-mx_sdk.register_graalvm_component(mx_sdk.GraalVmJdkComponent(
+mx_sdk_vm.register_graalvm_component(mx_sdk_vm.GraalVmTool(
     suite=_suite,
-    name='VisualVM',
-    short_name='vvm',
-    dir_name='visualvm',
+    name='GraalVM Coverage',
+    short_name='cov',
+    dir_name='coverage',
     license_files=[],
     third_party_license_files=[],
-    support_distributions=['tools:VISUALVM_GRAALVM_SUPPORT'],
-    provided_executables=['bin/jvisualvm']
+    dependencies=['Truffle JSON Library'],
+    truffle_jars=['tools:TRUFFLE_COVERAGE'],
+    support_distributions=['tools:TRUFFLE_COVERAGE_GRAALVM_SUPPORT'],
+    include_by_default=True,
 ))
-
-for mode in ['jvm', 'native']:
-    mx_sdk.add_graalvm_hostvm_config(mode + '-cpusampler-exclude-inlined-roots', launcher_args=['--' + mode, '--cpusampler', '--cpusampler.Mode=exclude_inlined_roots'])
-    mx_sdk.add_graalvm_hostvm_config(mode + '-cpusampler-roots', launcher_args=['--' + mode, '--cpusampler', '--cpusampler.Mode=roots'])
-    mx_sdk.add_graalvm_hostvm_config(mode + '-cpusampler-statements', launcher_args=['--' + mode, '--cpusampler', '--cpusampler.Mode=statements'])
-    mx_sdk.add_graalvm_hostvm_config(mode + '-cputracer-roots', launcher_args=['--' + mode, '--cputracer', '--cputracer.TraceRoots=true'])
-    mx_sdk.add_graalvm_hostvm_config(mode + '-cputracer-statements', launcher_args=['--' + mode, '--cputracer', '--cputracer.TraceStatements=true'])
 
 mx.update_commands(_suite, {
     'javadoc' : [javadoc, ''],
     'gate' : [mx_gate.gate, ''],
 })
-

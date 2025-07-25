@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2016, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -46,30 +46,131 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
-import org.graalvm.polyglot.Context;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+
+import org.graalvm.collections.Pair;
 import org.graalvm.polyglot.Source;
 import org.graalvm.polyglot.Value;
 import org.junit.Test;
 
-import com.oracle.truffle.api.debug.Breakpoint;
+import com.oracle.truffle.api.CallTarget;
+import com.oracle.truffle.api.TruffleLanguage;
 import com.oracle.truffle.api.debug.DebugStackFrame;
 import com.oracle.truffle.api.debug.DebugValue;
-import com.oracle.truffle.api.debug.Debugger;
 import com.oracle.truffle.api.debug.DebuggerSession;
+import com.oracle.truffle.api.debug.SourceElement;
 import com.oracle.truffle.api.debug.SuspendedEvent;
+import com.oracle.truffle.api.frame.VirtualFrame;
+import com.oracle.truffle.api.instrumentation.GenerateWrapper;
+import com.oracle.truffle.api.instrumentation.InstrumentableNode;
+import com.oracle.truffle.api.instrumentation.ProbeNode;
+import com.oracle.truffle.api.instrumentation.StandardTags;
+import com.oracle.truffle.api.instrumentation.Tag;
 import com.oracle.truffle.api.instrumentation.test.InstrumentationTestLanguage;
-import com.oracle.truffle.api.interop.ForeignAccess;
-import com.oracle.truffle.api.interop.KeyInfo;
-import com.oracle.truffle.api.interop.MessageResolution;
-import com.oracle.truffle.api.interop.Resolve;
+import com.oracle.truffle.api.interop.InteropLibrary;
+import com.oracle.truffle.api.interop.InvalidArrayIndexException;
 import com.oracle.truffle.api.interop.TruffleObject;
+import com.oracle.truffle.api.interop.UnsupportedMessageException;
+import com.oracle.truffle.api.library.ExportLibrary;
+import com.oracle.truffle.api.library.ExportMessage;
 import com.oracle.truffle.api.nodes.Node;
+import com.oracle.truffle.api.nodes.RootNode;
 import com.oracle.truffle.api.source.SourceSection;
+import com.oracle.truffle.api.test.polyglot.ProxyLanguage;
+import com.oracle.truffle.api.utilities.TriState;
 
+@SuppressWarnings({"static-method", "unused"})
 public class DebugValueTest extends AbstractDebugTest {
 
     @Test
     public void testNumValue() throws Throwable {
+        final Source source = testSource("ROOT(\n" +
+                        "  VARIABLE(a, 42), \n" +
+                        "  VARIABLE(b, true), \n" +
+                        "  VARIABLE(inf, infinity), \n" +
+                        "  STATEMENT()\n" +
+                        ")\n");
+        try (DebuggerSession session = startSession()) {
+            session.suspendNextExecution();
+            startEval(source);
+
+            expectSuspended((SuspendedEvent event) -> {
+                DebugStackFrame frame = event.getTopStackFrame();
+                DebugValue value42 = frame.getScope().getDeclaredValue("a");
+                DebugValue valueTrue = frame.getScope().getDeclaredValue("b");
+                DebugValue valueInf = frame.getScope().getDeclaredValue("inf");
+
+                assertEquals("a", value42.getName());
+                assertFalse(value42.isArray());
+                assertNull(value42.getArray());
+                assertNull(value42.getProperties());
+                assertFalse(value42.isBoolean());
+                assertTrue(value42.isNumber());
+                assertTrue(value42.fitsInLong());
+                assertTrue(value42.fitsInInt());
+                assertTrue(value42.fitsInShort());
+                assertTrue(value42.fitsInByte());
+                assertTrue(value42.fitsInDouble());
+                assertTrue(value42.fitsInFloat());
+                assertFalse(value42.isString());
+                assertFalse(value42.isDate());
+                assertFalse(value42.isDuration());
+                assertFalse(value42.isInstant());
+                assertFalse(value42.isTime());
+                assertFalse(value42.isTimeZone());
+                assertEquals("42", value42.toDisplayString());
+                DebugValue value42Meta = value42.getMetaObject();
+                assertEquals("Integer", value42Meta.toDisplayString());
+                assertEquals("Integer", value42Meta.getMetaQualifiedName());
+                assertEquals("Integer", value42Meta.getMetaSimpleName());
+                assertTrue(value42Meta.isMetaInstance(value42));
+                assertFalse(value42Meta.isMetaInstance(valueTrue));
+                assertFalse(value42Meta.isMetaInstance(valueInf));
+                SourceSection integerSS = value42.getSourceLocation();
+                assertEquals("source integer", integerSS.getCharacters());
+
+                assertEquals("b", valueTrue.getName());
+                assertTrue(valueTrue.isBoolean());
+                assertFalse(valueTrue.isNumber());
+                assertFalse(valueTrue.fitsInLong());
+                assertFalse(valueTrue.fitsInInt());
+                assertFalse(valueTrue.fitsInDouble());
+                assertEquals("true", valueTrue.toDisplayString());
+                DebugValue valueTrueMeta = valueTrue.getMetaObject();
+                assertEquals("Boolean", valueTrueMeta.toDisplayString());
+                assertEquals("Boolean", valueTrueMeta.getMetaQualifiedName());
+                assertEquals("Boolean", valueTrueMeta.getMetaSimpleName());
+                assertTrue(valueTrueMeta.isMetaInstance(valueTrue));
+                assertFalse(valueTrueMeta.isMetaInstance(value42));
+                assertFalse(valueTrueMeta.isMetaInstance(valueInf));
+
+                assertEquals("inf", valueInf.getName());
+                assertFalse(valueInf.isBoolean());
+                assertTrue(valueInf.isNumber());
+                assertFalse(valueInf.fitsInLong());
+                assertTrue(valueInf.fitsInDouble());
+                assertEquals("Infinity", valueInf.toDisplayString());
+                DebugValue valueInfMeta = valueInf.getMetaObject();
+                assertEquals("Infinity", valueInfMeta.toDisplayString());
+                assertEquals("Infinity", valueInfMeta.getMetaQualifiedName());
+                assertEquals("Infinity", valueInfMeta.getMetaSimpleName());
+                assertTrue(valueInfMeta.isMetaInstance(valueInf));
+                assertFalse(valueInfMeta.isMetaInstance(value42));
+                assertFalse(valueInfMeta.isMetaInstance(valueTrue));
+                SourceSection infinitySS = valueInf.getSourceLocation();
+                assertEquals("source infinity", infinitySS.getCharacters());
+            });
+
+            expectDone();
+        }
+    }
+
+    @Test
+    public void testGetRawValue() throws Throwable {
         final Source source = testSource("ROOT(\n" +
                         "  VARIABLE(a, 42), \n" +
                         "  VARIABLE(inf, infinity), \n" +
@@ -82,17 +183,30 @@ public class DebugValueTest extends AbstractDebugTest {
             expectSuspended((SuspendedEvent event) -> {
                 DebugStackFrame frame = event.getTopStackFrame();
                 DebugValue value42 = frame.getScope().getDeclaredValue("a");
+                assertEquals(42, value42.getRawValue(InstrumentationTestLanguage.class));
+                assertEquals(Double.POSITIVE_INFINITY, frame.getScope().getDeclaredValue("inf").getRawValue(InstrumentationTestLanguage.class));
+            });
 
-                assertEquals("a", value42.getName());
-                assertFalse(value42.isArray());
-                assertNull(value42.getArray());
-                assertNull(value42.getProperties());
-                assertEquals("Integer", value42.getMetaObject().as(String.class));
-                assertEquals("Infinity", frame.getScope().getDeclaredValue("inf").getMetaObject().as(String.class));
-                SourceSection integerSS = value42.getSourceLocation();
-                assertEquals("source integer", integerSS.getCharacters());
-                SourceSection infinitySS = frame.getScope().getDeclaredValue("inf").getSourceLocation();
-                assertEquals("source infinity", infinitySS.getCharacters());
+            expectDone();
+        }
+    }
+
+    @Test
+    public void testGetRawValueRestricted() throws Throwable {
+        final Source source = testSource("ROOT(\n" +
+                        "  VARIABLE(a, 42), \n" +
+                        "  VARIABLE(inf, infinity), \n" +
+                        "  STATEMENT()\n" +
+                        ")\n");
+        try (DebuggerSession session = startSession()) {
+            session.suspendNextExecution();
+            startEval(source);
+
+            expectSuspended((SuspendedEvent event) -> {
+                DebugStackFrame frame = event.getTopStackFrame();
+                DebugValue value42 = frame.getScope().getDeclaredValue("a");
+                assertNull(value42.getRawValue(ProxyLanguage.class));
+                assertNull(frame.getScope().getDeclaredValue("inf").getRawValue(ProxyLanguage.class));
             });
 
             expectDone();
@@ -105,23 +219,9 @@ public class DebugValueTest extends AbstractDebugTest {
      */
     @Test
     public void testValueAttributes() throws Throwable {
-        final Source source = testSource("DEFINE(function, ROOT(\n" +
-                        "  ARGUMENT(a), \n" +
-                        "  STATEMENT()\n" +
-                        "))\n");
-        Context context = Context.create();
-        context.eval(source);
-        Value functionValue = context.getBindings(InstrumentationTestLanguage.ID).getMember("function");
-        assertNotNull(functionValue);
-        Debugger debugger = context.getEngine().getInstruments().get("debugger").lookup(Debugger.class);
-
         // Test of the default attribute values:
         NoAttributesTruffleObject nao = new NoAttributesTruffleObject();
-        boolean[] suspended = new boolean[]{false};
-        DebuggerSession session = debugger.startSession((SuspendedEvent event) -> {
-            assertFalse(suspended[0]);
-            DebugValue value = event.getTopStackFrame().getScope().getDeclaredValue("a");
-            assertNotNull(value);
+        checkDebugValueOf(nao, (event, value) -> {
             DebugValue attributesTOValue = value.getProperties().iterator().next();
             assertEquals("property", attributesTOValue.getName());
             // Property is readable by default
@@ -138,25 +238,16 @@ public class DebugValueTest extends AbstractDebugTest {
             assertFalse(attributesTOValue.canExecute());
             DebugValue fvalue = event.getSession().getTopScope(InstrumentationTestLanguage.ID).getDeclaredValue("function");
             assertTrue(fvalue.canExecute());
-            event.prepareContinue();
-            suspended[0] = true;
         });
-        session.install(Breakpoint.newBuilder(getSourceImpl(source)).lineIs(3).build());
-        functionValue.execute(nao);
-        session.close();
-        assertTrue(suspended[0]);
 
         // Test of the modified attribute values:
-        suspended[0] = false;
         final ModifiableAttributesTruffleObject mao = new ModifiableAttributesTruffleObject();
-        session = debugger.startSession((SuspendedEvent event) -> {
-            assertFalse(suspended[0]);
-            DebugValue value = event.getTopStackFrame().getScope().getDeclaredValue("a");
-            assertNotNull(value);
+        checkDebugValueOf(mao, value -> {
             DebugValue attributesTOValue = value.getProperties().iterator().next();
             assertEquals("property", attributesTOValue.getName());
             // All false initially
             assertFalse(attributesTOValue.isReadable());
+            assertEquals("<not readable>", attributesTOValue.toDisplayString());
             assertFalse(attributesTOValue.isWritable());
             assertFalse(attributesTOValue.isInternal());
             assertFalse(attributesTOValue.hasReadSideEffects());
@@ -175,58 +266,314 @@ public class DebugValueTest extends AbstractDebugTest {
             attributesTOValue = value.getProperties().iterator().next();
             assertTrue(attributesTOValue.hasReadSideEffects());
             assertTrue(attributesTOValue.hasWriteSideEffects());
-            event.prepareContinue();
-            suspended[0] = true;
         });
-        session.install(Breakpoint.newBuilder(getSourceImpl(source)).lineIs(3).build());
-        functionValue.execute(mao);
-        session.close();
-        assertTrue(suspended[0]);
     }
 
-    static final class NoAttributesTruffleObject implements TruffleObject {
+    @Test
+    public void testCached() {
+        final ModifiableAttributesTruffleObject ma = new ModifiableAttributesTruffleObject();
+        checkDebugValueOf(ma, a -> {
+            ma.setIsReadable(true);
+            DebugValue ap1 = a.getProperty("p1");
+            DebugValue ap2 = a.getProperty("p2");
+            assertNotNull(ap1);
+            assertNotNull(ap2);
+
+            assertEquals(0, ap1.asInt());
+            assertEquals(0, ap2.asInt());
+            assertEquals(0, ap1.asInt());
+            ap2 = a.getProperty("p2"); // Get a fresh property value
+            assertEquals(1, ap2.asInt());
+            ap1.isArray();
+            ap1.isNull();
+            ap2.isArray();
+            ap2.isNull();
+            assertEquals(0, ap1.asInt());
+            assertEquals(1, ap2.asInt());
+
+            DebugValue ap1New = a.getProperty("p1");
+            DebugValue ap2New = a.getProperty("p2");
+            ap1New.isNull();
+            ap2New.isNull();
+            assertEquals(1, ap1New.asInt());
+            assertEquals(2, ap2New.asInt());
+            a.getProperty("p1");
+            ap1New = a.getProperty("p1");
+            ap1New.isNull();
+            ap2New.isNull();
+            assertEquals(2, ap1New.asInt());
+            assertEquals(2, ap2New.asInt());
+            // Original properties are unchanged:
+            assertEquals(0, ap1.asInt());
+            assertEquals(1, ap2.asInt());
+        });
+    }
+
+    @Test
+    public void testNull() {
+        ProxyLanguage.setDelegate(new ProxyLanguage() {
+            @Override
+            protected CallTarget parse(TruffleLanguage.ParsingRequest request) throws Exception {
+                return new TestRootNode(languageInstance).getCallTarget();
+            }
+
+            final class TestRootNode extends RootNode {
+                @Node.Child TestBody body = new TestBody();
+                private final int a;
+                private final int b;
+                private final int c;
+
+                TestRootNode(TruffleLanguage<?> language) {
+                    super(language);
+                    a = getFrameDescriptor().findOrAddAuxiliarySlot("a");
+                    b = getFrameDescriptor().findOrAddAuxiliarySlot("b");
+                    c = getFrameDescriptor().findOrAddAuxiliarySlot("c");
+                }
+
+                @Override
+                public Object execute(VirtualFrame frame) {
+                    frame.setAuxiliarySlot(a, new ValueLanguageTest.NullObject());
+                    frame.setAuxiliarySlot(b, 11);
+                    frame.setAuxiliarySlot(c, new Object());
+                    return body.execute(frame);
+                }
+            }
+        });
+        try (DebuggerSession session = tester.startSession(SourceElement.ROOT)) {
+            session.suspendNextExecution();
+            Source source = Source.create(ProxyLanguage.ID, "");
+            tester.startEval(source);
+            expectSuspended((SuspendedEvent event) -> {
+                Iterator<DebugValue> declaredValues = event.getTopStackFrame().getScope().getDeclaredValues().iterator();
+                DebugValue var0 = declaredValues.next();
+                DebugValue var1 = declaredValues.next();
+                // var2 is not an interop value
+                assertFalse(declaredValues.hasNext());
+
+                assertTrue(var0.isReadable());
+                assertTrue(var1.isReadable());
+
+                assertNull(var0.getProperties());
+                assertFalse(var0.isArray());
+                assertFalse(var0.isBoolean());
+                assertFalse(var0.isDate());
+                assertFalse(var0.isDuration());
+                assertFalse(var0.isInstant());
+                assertFalse(var0.isInternal());
+                assertFalse(var0.isMetaObject());
+                assertTrue(var0.isNull());
+                assertFalse(var0.isNumber());
+                assertTrue(var0.isReadable());
+                assertFalse(var0.isString());
+                assertFalse(var0.isTime());
+                assertFalse(var0.isTimeZone());
+
+                assertEquals("11", var1.toDisplayString());
+            });
+        }
+        expectDone();
+    }
+
+    @Test
+    public void testHashCode() {
+        final Source source = testSource("DEFINE(getHashCode, ROOT(\n" +
+                        "  ARGUMENT(a), \n" +
+                        "  STATEMENT()\n" +
+                        "))\n");
+        Value getHashCode = getFunctionValue(source, "getHashCode");
+
+        List<Pair<Object, Integer>> hashes = new ArrayList<>();
+        hashes.add(Pair.create(42, System.identityHashCode(42)));
+        hashes.add(Pair.create(true, System.identityHashCode(true)));
+        hashes.add(Pair.create(new IdentityObject(42, 24), 24));
+
+        try (DebuggerSession session = startSession()) {
+            session.suspendNextExecution();
+            startExecute(c -> {
+                for (Pair<Object, Integer> hash : new ArrayList<>(hashes)) {
+                    getHashCode.execute(hash.getLeft());
+                }
+                return Value.asValue(null);
+            });
+            while (!hashes.isEmpty()) {
+                expectSuspended((SuspendedEvent event) -> {
+                    DebugValue value = event.getTopStackFrame().getScope().getDeclaredValue("a");
+                    assertNotNull(value);
+                    Pair<Object, Integer> hash = hashes.remove(0);
+                    assertEquals("Hash of " + hash.getLeft(), hash.getRight().intValue(), value.hashCode());
+                    event.prepareStepOver(1);
+                });
+            }
+        }
+        expectDone();
+    }
+
+    @Test
+    public void testEquals() {
+        final Source source = testSource("DEFINE(isEqual, ROOT(\n" +
+                        "  ARGUMENT(a), \n" +
+                        "  ARGUMENT(b), \n" +
+                        "  STATEMENT()\n" +
+                        "))\n");
+        Value isEqual = getFunctionValue(source, "isEqual");
+
+        List<Pair<Pair<Object, Object>, Boolean>> equals = new ArrayList<>();
+        equals.add(Pair.create(Pair.create(42, 42), true));
+        equals.add(Pair.create(Pair.create(42, 10), false));
+        equals.add(Pair.create(Pair.create(false, false), true));
+        equals.add(Pair.create(Pair.create(true, false), false));
+        equals.add(Pair.create(Pair.create(new IdentityObject("aa", 10), new IdentityObject("aa", 10)), true));
+        equals.add(Pair.create(Pair.create(new IdentityObject("aa", 10), new IdentityObject("bb", 10)), false));
+
+        try (DebuggerSession session = startSession()) {
+            session.suspendNextExecution();
+            startExecute(c -> {
+                for (Pair<Pair<Object, Object>, Boolean> eq : new ArrayList<>(equals)) {
+                    Pair<Object, Object> objects = eq.getLeft();
+                    isEqual.execute(objects.getLeft(), objects.getRight());
+                }
+                return Value.asValue(null);
+            });
+            while (!equals.isEmpty()) {
+                expectSuspended((SuspendedEvent event) -> {
+                    DebugValue valueA = event.getTopStackFrame().getScope().getDeclaredValue("a");
+                    DebugValue valueB = event.getTopStackFrame().getScope().getDeclaredValue("b");
+                    assertNotNull(valueA);
+                    assertNotNull(valueB);
+                    Pair<Pair<Object, Object>, Boolean> eq = equals.remove(0);
+                    Pair<Object, Object> objects = eq.getLeft();
+                    assertEquals("Equality of " + objects.getLeft() + " and " + objects.getRight(), eq.getRight().booleanValue(), valueA.equals(valueB));
+                    event.prepareStepOver(1);
+                });
+            }
+        }
+        expectDone();
+    }
+
+    @Test
+    public void testUnreadableEquals() {
+        final Source source = testSource("DEFINE(isEqual, ROOT(\n" +
+                        "  ARGUMENT(a1), \n" +
+                        "  ARGUMENT(a2), \n" +
+                        "  ARGUMENT(b), \n" +
+                        "  ARGUMENT(c), \n" +
+                        "  STATEMENT()\n" +
+                        "))\n");
+        Value isEqual = getFunctionValue(source, "isEqual");
+
+        ModifiableAttributesTruffleObject obj1 = new ModifiableAttributesTruffleObject();
+        obj1.setIsReadable(false);
+        obj1.setIsWritable(true);
+        ModifiableAttributesTruffleObject obj2 = new ModifiableAttributesTruffleObject();
+        obj2.setIsReadable(false);
+        obj2.setIsWritable(true);
+        ModifiableAttributesTruffleObject objReadable = new ModifiableAttributesTruffleObject();
+        objReadable.setIsReadable(true);
+
+        // a1 and a2 refer to the same value with unreadable properties
+        // b refer to a different value with unreadable properties
+        // c refer to a value with readable properties
+        try (DebuggerSession session = startSession()) {
+            session.suspendNextExecution();
+            startExecute(c -> isEqual.execute(obj1, obj1, obj2, objReadable));
+            expectSuspended((SuspendedEvent event) -> {
+                DebugValue a1 = event.getTopStackFrame().getScope().getDeclaredValue("a1");
+                DebugValue a2 = event.getTopStackFrame().getScope().getDeclaredValue("a2");
+                DebugValue b = event.getTopStackFrame().getScope().getDeclaredValue("b");
+                DebugValue c = event.getTopStackFrame().getScope().getDeclaredValue("c");
+                assertNotNull(a1);
+                assertNotNull(a2);
+                assertNotNull(b);
+                assertNotNull(c);
+                assertTrue(a1.equals(a2));
+                assertFalse(a1.equals(b));
+                assertFalse(a1.equals(c));
+                DebugValue a1p1 = a1.getProperty("p1");
+                DebugValue a1p2 = a1.getProperty("p2");
+                DebugValue a2p1 = a2.getProperty("p1");
+                DebugValue a2p2 = a2.getProperty("p2");
+                DebugValue bp1 = b.getProperty("p1");
+                DebugValue bp2 = b.getProperty("p2");
+                DebugValue cp1 = c.getProperty("p1");
+                assertTrue(a1p1.equals(a2p1));
+                assertTrue(a1p2.equals(a2p2));
+                assertFalse(a1p1.equals(a2p2));
+                assertFalse(a1p1.equals(bp1));
+                assertFalse(a1p2.equals(bp2));
+                assertFalse(bp1.equals(cp1));
+                event.prepareStepOver(1);
+            });
+        }
+        expectDone();
+    }
+
+    @GenerateWrapper
+    static class TestBody extends Node implements InstrumentableNode {
 
         @Override
-        public ForeignAccess getForeignAccess() {
-            return NoAttributesMessageResolutionForeign.ACCESS;
+        public boolean isInstrumentable() {
+            return true;
         }
 
-        public static boolean isInstance(TruffleObject obj) {
-            return obj instanceof NoAttributesTruffleObject;
+        @Override
+        public boolean hasTag(Class<? extends Tag> tag) {
+            return StandardTags.RootTag.class.equals(tag);
         }
 
-        @MessageResolution(receiverType = NoAttributesTruffleObject.class)
-        static final class NoAttributesMessageResolution {
+        @Override
+        public InstrumentableNode.WrapperNode createWrapper(ProbeNode probe) {
+            return new TestBodyWrapper(this, probe);
+        }
 
-            @Resolve(message = "HAS_KEYS")
-            abstract static class NoAttributesHasKeysNode extends Node {
+        @Override
+        public SourceSection getSourceSection() {
+            return com.oracle.truffle.api.source.Source.newBuilder(ProxyLanguage.ID, "", "").build().createUnavailableSection();
+        }
 
-                @SuppressWarnings("unused")
-                public Object access(NoAttributesTruffleObject ato) {
-                    return true;
-                }
-            }
-
-            @Resolve(message = "KEYS")
-            abstract static class NoAttributesKeysNode extends Node {
-
-                @SuppressWarnings("unused")
-                public Object access(NoAttributesTruffleObject ato) {
-                    return new PropertyKeysTruffleObject();
-                }
-            }
-
-            @Resolve(message = "READ")
-            abstract static class NoAttributesReadNode extends Node {
-
-                @SuppressWarnings("unused")
-                public Object access(NoAttributesTruffleObject ato, String name) {
-                    return "propertyValue";
-                }
-            }
+        public Object execute(VirtualFrame frame) {
+            return 42;
         }
     }
 
+    @ExportLibrary(InteropLibrary.class)
+    static final class NoAttributesTruffleObject implements TruffleObject {
+
+        @ExportMessage
+        boolean hasMembers() {
+            return true;
+        }
+
+        @ExportMessage
+        Object getMembers(boolean internal) {
+            return new PropertyKeysTruffleObject();
+        }
+
+        @ExportMessage
+        boolean isMemberReadable(String member) {
+            return true;
+        }
+
+        @ExportMessage
+        boolean isMemberModifiable(String member) {
+            return true;
+        }
+
+        @ExportMessage
+        boolean isMemberInsertable(String member) {
+            return false;
+        }
+
+        @ExportMessage
+        void writeMember(String member, Object value) {
+        }
+
+        @ExportMessage
+        Object readMember(String member) {
+            return "propertyValue";
+        }
+    }
+
+    @ExportLibrary(InteropLibrary.class)
     static final class ModifiableAttributesTruffleObject implements TruffleObject {
 
         private boolean isReadable;
@@ -234,10 +581,66 @@ public class DebugValueTest extends AbstractDebugTest {
         private boolean isWritable;
         private boolean hasWriteSideEffects;
         private boolean isInternal;
+        private final Map<String, Integer> memberCounters = new HashMap<>();
 
-        @Override
-        public ForeignAccess getForeignAccess() {
-            return ModifiableAttributesMessageResolutionForeign.ACCESS;
+        @ExportMessage
+        boolean hasMembers() {
+            return true;
+        }
+
+        @ExportMessage
+        Object getMembers(boolean internal) {
+            if (internal || isInternal == internal) {
+                return new PropertyKeysTruffleObject();
+            } else {
+                return new EmptyKeysTruffleObject();
+            }
+        }
+
+        @ExportMessage
+        boolean isMemberReadable(String member) {
+            return isReadable;
+        }
+
+        @ExportMessage
+        boolean isMemberModifiable(String member) {
+            return isWritable;
+        }
+
+        @ExportMessage
+        boolean isMemberInternal(String member) {
+            return isInternal;
+        }
+
+        @ExportMessage
+        boolean hasMemberReadSideEffects(String member) {
+            return hasReadSideEffects;
+        }
+
+        @ExportMessage
+        boolean hasMemberWriteSideEffects(String member) {
+            return hasWriteSideEffects;
+        }
+
+        @ExportMessage
+        boolean isMemberInsertable(String member) {
+            return false;
+        }
+
+        @ExportMessage
+        void writeMember(String member, Object value) {
+        }
+
+        @ExportMessage
+        Object readMember(String member) {
+            Integer counter = memberCounters.get(member);
+            if (counter == null) {
+                counter = 0;
+            } else {
+                counter++;
+            }
+            memberCounters.put(member, counter);
+            return counter;
         }
 
         public void setIsReadable(boolean isReadable) {
@@ -260,133 +663,98 @@ public class DebugValueTest extends AbstractDebugTest {
             this.isInternal = isInternal;
         }
 
+        public String getMemberCounters() {
+            return memberCounters.toString();
+        }
+
         public static boolean isInstance(TruffleObject obj) {
             return obj instanceof ModifiableAttributesTruffleObject;
         }
 
-        @MessageResolution(receiverType = ModifiableAttributesTruffleObject.class)
-        static final class ModifiableAttributesMessageResolution {
-
-            @Resolve(message = "HAS_KEYS")
-            abstract static class ModifiableAttributesHasKeysNode extends Node {
-
-                @SuppressWarnings("unused")
-                public Object access(ModifiableAttributesTruffleObject ato) {
-                    return true;
-                }
-            }
-
-            @Resolve(message = "KEYS")
-            abstract static class ModifiableAttributesKeysNode extends Node {
-
-                public Object access(ModifiableAttributesTruffleObject ato, boolean internal) {
-                    if (internal || ato.isInternal == internal) {
-                        return new PropertyKeysTruffleObject();
-                    } else {
-                        return new EmptyKeysTruffleObject();
-                    }
-                }
-            }
-
-            @Resolve(message = "READ")
-            abstract static class ModifiableAttributesReadNode extends Node {
-
-                @SuppressWarnings("unused")
-                public Object access(ModifiableAttributesTruffleObject ato, String name) {
-                    return "propertyValue";
-                }
-            }
-
-            @Resolve(message = "KEY_INFO")
-            abstract static class ModifiableAttributesKeyInfoNode extends Node {
-
-                @SuppressWarnings("unused")
-                public int access(ModifiableAttributesTruffleObject ato, String propName) {
-                    return (ato.isReadable ? KeyInfo.READABLE : 0) |
-                                    (ato.isWritable ? KeyInfo.MODIFIABLE : 0) |
-                                    (ato.isInternal ? KeyInfo.INTERNAL : 0) |
-                                    (ato.hasReadSideEffects ? KeyInfo.READ_SIDE_EFFECTS : 0) |
-                                    (ato.hasWriteSideEffects ? KeyInfo.WRITE_SIDE_EFFECTS : 0);
-                }
-            }
-        }
     }
 
     /**
      * Truffle object representing property keys and having one property named "property".
      */
+    @ExportLibrary(InteropLibrary.class)
     static final class PropertyKeysTruffleObject implements TruffleObject {
 
-        @Override
-        public ForeignAccess getForeignAccess() {
-            return PropertyKeysMessageResolutionForeign.ACCESS;
+        @ExportMessage
+        boolean hasArrayElements() {
+            return true;
         }
 
-        public static boolean isInstance(TruffleObject obj) {
-            return obj instanceof PropertyKeysTruffleObject;
-        }
-
-        @MessageResolution(receiverType = PropertyKeysTruffleObject.class)
-        static final class PropertyKeysMessageResolution {
-
-            @Resolve(message = "HAS_SIZE")
-            abstract static class PropertyKeysHasSizeNode extends Node {
-
-                @SuppressWarnings("unused")
-                public boolean access(PropertyKeysTruffleObject ato) {
-                    return true;
-                }
-            }
-
-            @Resolve(message = "GET_SIZE")
-            abstract static class PropertyKeysGetSizeNode extends Node {
-
-                @SuppressWarnings("unused")
-                public int access(PropertyKeysTruffleObject ato) {
-                    return 1;
-                }
-            }
-
-            @Resolve(message = "READ")
-            abstract static class PropertyKeysReadNode extends Node {
-
-                @SuppressWarnings("unused")
-                public Object access(PropertyKeysTruffleObject ato, int index) {
+        @ExportMessage
+        Object readArrayElement(long index) throws UnsupportedMessageException, InvalidArrayIndexException {
+            switch ((int) index) {
+                case 0:
                     return "property";
-                }
+                case 1:
+                    return "p1";
+                case 2:
+                    return "p2";
+                default:
+                    throw new IllegalStateException("Wrong index: " + index);
             }
+        }
+
+        @ExportMessage
+        long getArraySize() throws UnsupportedMessageException {
+            return 3L;
+        }
+
+        @ExportMessage
+        boolean isArrayElementReadable(long index) {
+            return 0 <= index && index < 3;
         }
     }
 
-    @MessageResolution(receiverType = EmptyKeysTruffleObject.class)
+    @ExportLibrary(InteropLibrary.class)
     static final class EmptyKeysTruffleObject implements TruffleObject {
 
-        @Override
-        public ForeignAccess getForeignAccess() {
-            return EmptyKeysTruffleObjectForeign.ACCESS;
+        @ExportMessage
+        boolean hasArrayElements() {
+            return true;
         }
 
-        public static boolean isInstance(TruffleObject obj) {
-            return obj instanceof PropertyKeysTruffleObject;
+        @ExportMessage
+        Object readArrayElement(long index) throws UnsupportedMessageException, InvalidArrayIndexException {
+            throw InvalidArrayIndexException.create(index);
         }
 
-        @Resolve(message = "HAS_SIZE")
-        abstract static class PropertyKeysHasSizeNode extends Node {
-
-            @SuppressWarnings("unused")
-            public boolean access(PropertyKeysTruffleObject ato) {
-                return true;
-            }
+        @ExportMessage
+        long getArraySize() throws UnsupportedMessageException {
+            return 0L;
         }
 
-        @Resolve(message = "GET_SIZE")
-        abstract static class PropertyKeysGetSizeNode extends Node {
-
-            @SuppressWarnings("unused")
-            public int access(PropertyKeysTruffleObject ato) {
-                return 0;
-            }
+        @ExportMessage
+        boolean isArrayElementReadable(long index) {
+            return false;
         }
     }
 
+    @ExportLibrary(InteropLibrary.class)
+    static final class IdentityObject implements TruffleObject {
+
+        private final Object equalsDelegate;
+        private final int hashCode;
+
+        IdentityObject(Object equalsDelegate, int hashCode) {
+            this.equalsDelegate = equalsDelegate;
+            this.hashCode = hashCode;
+        }
+
+        @ExportMessage
+        int identityHashCode() {
+            return hashCode;
+        }
+
+        @ExportMessage
+        TriState isIdenticalOrUndefined(Object other) {
+            if (other == this) {
+                return TriState.TRUE;
+            }
+            return TriState.valueOf((other instanceof IdentityObject) && equalsDelegate.equals(((IdentityObject) other).equalsDelegate));
+        }
+    }
 }

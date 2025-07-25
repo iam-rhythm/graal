@@ -26,16 +26,19 @@ package com.oracle.svm.core.code;
 
 import org.graalvm.nativeimage.c.function.CEntryPoint;
 
+import com.oracle.svm.core.jdk.InternalVMMethod;
+
 import jdk.vm.ci.meta.ConstantPool;
 import jdk.vm.ci.meta.MetaAccessProvider;
 
 /**
  * Holder class for generated call stubs for {@link CEntryPoint} methods.
  */
+@InternalVMMethod
 public final class IsolateEnterStub {
     public static ConstantPool getConstantPool(MetaAccessProvider metaAccess) {
         // Generated call wrappers need a valid constant pool, so we provide that of our constructor
-        return metaAccess.lookupJavaType(IsolateEnterStub.class).getDeclaredConstructors()[0].getConstantPool();
+        return metaAccess.lookupJavaType(IsolateEnterStub.class).getDeclaredConstructors(false)[0].getConstantPool();
     }
 
     private IsolateEnterStub() {

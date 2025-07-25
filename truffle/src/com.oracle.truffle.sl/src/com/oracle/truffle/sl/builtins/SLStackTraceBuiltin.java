@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2014, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -46,13 +46,16 @@ import com.oracle.truffle.api.RootCallTarget;
 import com.oracle.truffle.api.Truffle;
 import com.oracle.truffle.api.dsl.Specialization;
 import com.oracle.truffle.api.frame.Frame;
-import com.oracle.truffle.api.frame.FrameDescriptor;
 import com.oracle.truffle.api.frame.FrameInstance;
-import com.oracle.truffle.api.frame.FrameInstance.FrameAccess;
 import com.oracle.truffle.api.frame.FrameInstanceVisitor;
-import com.oracle.truffle.api.frame.FrameSlot;
 import com.oracle.truffle.api.nodes.NodeInfo;
 import com.oracle.truffle.api.nodes.RootNode;
+import com.oracle.truffle.api.strings.TruffleString;
+import com.oracle.truffle.api.strings.TruffleStringBuilder;
+import com.oracle.truffle.sl.SLLanguage;
+import com.oracle.truffle.sl.nodes.SLEvalRootNode;
+import com.oracle.truffle.sl.nodes.SLRootNode;
+import com.oracle.truffle.sl.runtime.SLStrings;
 
 /**
  * Returns a string representation of the current stack. This includes the {@link CallTarget}s and
@@ -61,14 +64,19 @@ import com.oracle.truffle.api.nodes.RootNode;
 @NodeInfo(shortName = "stacktrace")
 public abstract class SLStackTraceBuiltin extends SLBuiltinNode {
 
+    public static final TruffleString FRAME = SLStrings.constant("Frame: root ");
+    public static final TruffleString SEPARATOR = SLStrings.constant(", ");
+    public static final TruffleString EQUALS = SLStrings.constant("=");
+    public static final TruffleString UNKNOWN = SLStrings.constant("Unknown");
+
     @Specialization
-    public String trace() {
+    public TruffleString trace() {
         return createStackTrace();
     }
 
     @TruffleBoundary
-    private static String createStackTrace() {
-        final StringBuilder str = new StringBuilder();
+    private static TruffleString createStackTrace() {
+        final TruffleStringBuilder str = TruffleStringBuilder.create(SLLanguage.STRING_ENCODING);
 
         Truffle.getRuntime().iterateFrames(new FrameInstanceVisitor<Integer>() {
             private int skip = 1; // skip stack trace builtin
@@ -80,23 +88,49 @@ public abstract class SLStackTraceBuiltin extends SLBuiltinNode {
                     return null;
                 }
                 CallTarget callTarget = frameInstance.getCallTarget();
-                Frame frame = frameInstance.getFrame(FrameAccess.READ_ONLY);
                 RootNode rn = ((RootCallTarget) callTarget).getRootNode();
                 // ignore internal or interop stack frames
-                if (rn.getLanguageInfo() == null) {
+                if (rn.isInternal() || rn.getLanguageInfo() == null) {
                     return 1;
                 }
-                if (str.length() > 0) {
-                    str.append(System.getProperty("line.separator"));
+                if (str.byteLength() > 0) {
+                    str.appendStringUncached(SLStrings.fromJavaString(System.getProperty("line.separator")));
                 }
-                str.append("Frame: ").append(rn.toString());
-                FrameDescriptor frameDescriptor = frame.getFrameDescriptor();
-                for (FrameSlot s : frameDescriptor.getSlots()) {
-                    str.append(", ").append(s.getIdentifier()).append("=").append(frame.getValue(s));
+                str.appendStringUncached(FRAME);
+                str.appendStringUncached(getRootNodeName(rn));
+
+                if (rn instanceof SLRootNode slRoot) {
+                    Object[] values = slRoot.getLocalValues(frameInstance);
+                    Object[] names = slRoot.getLocalNames(frameInstance);
+                    for (int i = 0; i < values.length; i++) {
+                        TruffleString slotName = (TruffleString) names[i];
+                        if (slotName == null) {
+                            // The operation interpreter allocates space for its own locals. We can
+                            // ignore those.
+                            continue;
+                        }
+                        Object value = values[i];
+                        if (value != null) {
+                            str.appendStringUncached(SEPARATOR);
+                            str.appendStringUncached(slotName == null ? UNKNOWN : slotName);
+                            str.appendStringUncached(EQUALS);
+                            str.appendStringUncached(SLStrings.fromObject(value));
+                        }
+                    }
                 }
                 return null;
             }
         });
-        return str.toString();
+        return str.toStringUncached();
+    }
+
+    private static TruffleString getRootNodeName(RootNode rootNode) {
+        if (rootNode instanceof SLRootNode) {
+            return ((SLRootNode) rootNode).getTSName();
+        } else if (rootNode instanceof SLEvalRootNode) {
+            return SLEvalRootNode.getTSName();
+        } else {
+            return SLStrings.fromJavaString(rootNode.getName());
+        }
     }
 }

@@ -1,6 +1,0 @@
-
-compilerCommon : ${common} {
-  setup : [
-    [cd, ${compiler-suite-root}]
-  ] ${download-hsdis.setup}
-}

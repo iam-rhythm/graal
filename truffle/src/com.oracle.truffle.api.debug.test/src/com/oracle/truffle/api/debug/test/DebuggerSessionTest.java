@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2016, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,11 +40,12 @@
  */
 package com.oracle.truffle.api.debug.test;
 
+import static com.oracle.truffle.tck.tests.TruffleTestAssumptions.isDeoptLoopDetectionAvailable;
+import static com.oracle.truffle.tck.tests.TruffleTestAssumptions.isOptimizingRuntime;
+
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
 import java.net.URI;
 import java.nio.file.FileSystem;
 import java.nio.file.FileSystems;
@@ -55,54 +56,43 @@ import java.nio.file.SimpleFileVisitor;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.Arrays;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
+import org.graalvm.collections.Pair;
+import org.graalvm.polyglot.Context;
+import org.graalvm.polyglot.Engine;
+import org.graalvm.polyglot.Instrument;
+import org.graalvm.polyglot.Source;
 import org.junit.Assert;
 import org.junit.Test;
 
+import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
 import com.oracle.truffle.api.debug.Breakpoint;
 import com.oracle.truffle.api.debug.Debugger;
 import com.oracle.truffle.api.debug.DebuggerSession;
 import com.oracle.truffle.api.debug.SuspendedCallback;
 import com.oracle.truffle.api.debug.SuspendedEvent;
+import com.oracle.truffle.api.debug.SuspensionFilter;
+import com.oracle.truffle.api.frame.VirtualFrame;
+import com.oracle.truffle.api.instrumentation.EventContext;
+import com.oracle.truffle.api.instrumentation.ExecutionEventListener;
+import com.oracle.truffle.api.instrumentation.SourceSectionFilter;
+import com.oracle.truffle.api.instrumentation.StandardTags;
+import com.oracle.truffle.api.instrumentation.TruffleInstrument;
 import com.oracle.truffle.api.instrumentation.test.InstrumentationTestLanguage;
+import com.oracle.truffle.api.nodes.Node;
 import com.oracle.truffle.api.source.SourceSection;
 import com.oracle.truffle.api.test.GCUtils;
-import com.oracle.truffle.api.test.ReflectionUtils;
 import com.oracle.truffle.api.test.polyglot.ProxyLanguage;
-
-import org.graalvm.polyglot.Context;
-import org.graalvm.polyglot.Source;
+import com.oracle.truffle.tck.DebuggerTester;
+import com.oracle.truffle.tck.tests.TruffleTestAssumptions;
 
 public class DebuggerSessionTest extends AbstractDebugTest {
-
-    private static void suspend(DebuggerSession session, Thread thread) {
-        invoke(session, "suspend", new Class<?>[]{Thread.class}, thread);
-    }
-
-    private static void suspendAll(DebuggerSession session) {
-        invoke(session, "suspendAll", new Class<?>[]{});
-    }
-
-    private static void resume(DebuggerSession session, Thread thread) {
-        invoke(session, "resume", new Class<?>[]{Thread.class}, thread);
-    }
-
-    private static void invoke(DebuggerSession session, String name, Class<?>[] classes, Object... arguments) throws AssertionError {
-        try {
-            Method method = session.getClass().getDeclaredMethod(name, classes);
-            ReflectionUtils.setAccessible(method, true);
-            method.invoke(session, arguments);
-        } catch (Throwable e) {
-            if (e instanceof InvocationTargetException && e.getCause() instanceof RuntimeException) {
-                throw (RuntimeException) e.getCause();
-            }
-            throw new AssertionError(e);
-        }
-    }
 
     @Test
     public void testSuspendNextExecution1() {
@@ -187,6 +177,141 @@ public class DebuggerSessionTest extends AbstractDebugTest {
     }
 
     @Test
+    public void testSuspendHereFailsFromCallback() {
+        Source testSource = testSource("ROOT(\n" +
+                        "  DEFINE(foo, ROOT(STATEMENT)),\n" +
+                        "  CALL(foo)\n" +
+                        ")\n");
+        try (DebuggerSession session = startSession()) {
+            session.suspendNextExecution();
+
+            startEval(testSource);
+            AtomicInteger suspendCount = new AtomicInteger(0);
+            expectSuspended((SuspendedEvent event) -> {
+                if (suspendCount.getAndIncrement() == 0) {
+                    try {
+                        session.suspendHere(null);
+                        Assert.fail("Should not suspend when suspended already.");
+                    } catch (IllegalStateException e) {
+                        // O.K.
+                    }
+                } else {
+                    Assert.fail("Called multiple times: " + suspendCount.get());
+                }
+            });
+            expectDone();
+        }
+    }
+
+    @Test
+    public void testSuspendHereFailsNoExecution() {
+        try (DebuggerSession session = startSession()) {
+            if (session.suspendHere(null)) {
+                Assert.fail("Should not suspend when there is no execution.");
+            }
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void testSuspendHereWrongNode() {
+        Source testSource = testSource("ROOT(\n" +
+                        "  DEFINE(foo, ROOT(EXPRESSION, EXPRESSION, STATEMENT)),\n" +
+                        "  CALL(foo)\n" +
+                        ")\n");
+        popContext();
+        Engine.Builder builder = Engine.newBuilder();
+        if (isOptimizingRuntime()) {
+            // TODO GR-65179
+            builder.option("engine.MaximumCompilations", "-1");
+            if (isDeoptLoopDetectionAvailable()) {
+                builder.option("compiler.DeoptCycleDetectionThreshold", "-1");
+            }
+        }
+        Engine engine = builder.build();
+        tester = new DebuggerTester(engine, Context.newBuilder().allowAllAccess(true));
+        try (DebuggerSession session = startSession()) {
+            Instrument instrument = engine.getInstruments().get("SuspendDebuggerFromInstrument");
+            Node nodeNoRoot = new Node() {
+            };
+            Pair<DebuggerSession, Function<Node, Node>> sessionNode = Pair.create(session, node -> nodeNoRoot);
+            instrument.lookup(AtomicReference.class).set(sessionNode);
+
+            startEval(testSource);
+            Throwable t = expectThrowable();
+            Assert.assertTrue(t.getMessage(), t.getMessage().endsWith("does not have a root."));
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void testSuspendHereFromGuest() {
+        Source testSource = testSource("ROOT(\n" +
+                        "  DEFINE(foo, ROOT(EXPRESSION, EXPRESSION, STATEMENT)),\n" +
+                        "  CALL(foo)\n" +
+                        ")\n");
+        popContext();
+        Engine.Builder builder = Engine.newBuilder();
+        if (isOptimizingRuntime()) {
+            // TODO GR-65179
+            builder.option("engine.MaximumCompilations", "-1");
+            if (TruffleTestAssumptions.isDeoptLoopDetectionAvailable()) {
+                builder.option("compiler.DeoptCycleDetectionThreshold", "-1");
+            }
+        }
+        Engine engine = builder.build();
+        tester = new DebuggerTester(engine, Context.newBuilder().allowAllAccess(true));
+        try (DebuggerSession session = startSession()) {
+            Instrument instrument = engine.getInstruments().get("SuspendDebuggerFromInstrument");
+            Pair<DebuggerSession, Function<Node, Node>> sessionNode = Pair.create(session, node -> null);
+            instrument.lookup(AtomicReference.class).set(sessionNode);
+
+            startEval(testSource);
+            expectSuspended((SuspendedEvent event) -> {
+                // Suspended immediately at the EXPRESSION's root as we do not have exact location
+                checkState(event, 2, true, " ROOT(EXPRESSION, EXPRESSION, STATEMENT)").prepareContinue();
+                Assert.assertEquals("foo", event.getTopStackFrame().getName());
+            });
+            sessionNode = Pair.create(session, node -> node);
+            instrument.lookup(AtomicReference.class).set(sessionNode);
+            expectSuspended((SuspendedEvent event) -> {
+                // Suspended immediately at the provided EXPRESSION node.
+                checkState(event, 2, true, "EXPRESSION").prepareContinue();
+                Assert.assertEquals("foo", event.getTopStackFrame().getName());
+            });
+            expectDone();
+        }
+    }
+
+    @TruffleInstrument.Registration(id = "SuspendDebuggerFromInstrument", services = AtomicReference.class)
+    public static class SuspendDebuggerFromInstrument extends TruffleInstrument {
+
+        @Override
+        protected void onCreate(Env env) {
+            AtomicReference<Pair<DebuggerSession, Function<Node, Node>>> sessionNodeRef = new AtomicReference<>();
+            env.getInstrumenter().attachExecutionEventListener(SourceSectionFilter.newBuilder().tagIs(StandardTags.ExpressionTag.class).build(), new ExecutionEventListener() {
+
+                @Override
+                @TruffleBoundary
+                public void onEnter(EventContext context, VirtualFrame frame) {
+                    Pair<DebuggerSession, Function<Node, Node>> sessionNode = sessionNodeRef.get();
+                    Node node = sessionNode.getRight().apply(context.getInstrumentedNode());
+                    Assert.assertTrue(sessionNode.getLeft().suspendHere(node));
+                }
+
+                @Override
+                public void onReturnValue(EventContext context, VirtualFrame frame, Object result) {
+                }
+
+                @Override
+                public void onReturnExceptional(EventContext context, VirtualFrame frame, Throwable exception) {
+                }
+            });
+            env.registerService(sessionNodeRef);
+        }
+    }
+
+    @Test
     public void testSuspendThread1() {
         Source testSource = testSource("ROOT(\n" +
                         "STATEMENT,\n" +
@@ -195,7 +320,7 @@ public class DebuggerSessionTest extends AbstractDebugTest {
         try (DebuggerSession session = startSession()) {
             // do suspend next for a few times
             for (int i = 0; i < 100; i++) {
-                suspend(session, getEvalThread());
+                session.suspend(getEvalThread());
                 startEval(testSource);
                 expectSuspended((SuspendedEvent event) -> {
                     checkState(event, 2, true, "STATEMENT").prepareContinue();
@@ -212,14 +337,14 @@ public class DebuggerSessionTest extends AbstractDebugTest {
                         "STATEMENT)");
 
         try (DebuggerSession session = startSession()) {
-            suspend(session, getEvalThread());
+            session.suspend(getEvalThread());
             startEval(testSource);
             expectSuspended((SuspendedEvent event) -> {
                 checkState(event, 2, true, "STATEMENT").prepareContinue();
             });
 
             // prepareContinue should be ignored here as suspensions counts more
-            suspend(session, getEvalThread());
+            session.suspend(getEvalThread());
 
             expectSuspended((SuspendedEvent event) -> {
                 checkState(event, 3, true, "STATEMENT").prepareContinue();
@@ -236,14 +361,14 @@ public class DebuggerSessionTest extends AbstractDebugTest {
                         "STATEMENT)");
 
         try (DebuggerSession session = startSession()) {
-            suspend(session, getEvalThread());
+            session.suspend(getEvalThread());
             startEval(testSource);
             expectSuspended((SuspendedEvent event) -> {
                 checkState(event, 2, true, "STATEMENT").prepareKill();
             });
 
             // For prepareKill additional suspensions should be ignored
-            suspend(session, getEvalThread());
+            session.suspend(getEvalThread());
 
             expectKilled();
         }
@@ -257,7 +382,7 @@ public class DebuggerSessionTest extends AbstractDebugTest {
 
         try (DebuggerSession session = startSession()) {
             for (int i = 0; i < 10; i++) {
-                suspendAll(session);
+                session.suspendAll();
                 startEval(testSource);
                 expectSuspended((SuspendedEvent event) -> {
                     checkState(event, 2, true, "STATEMENT").prepareContinue();
@@ -274,14 +399,14 @@ public class DebuggerSessionTest extends AbstractDebugTest {
                         "STATEMENT)");
 
         try (DebuggerSession session = startSession()) {
-            suspendAll(session);
+            session.suspendAll();
             startEval(testSource);
             expectSuspended((SuspendedEvent event) -> {
                 checkState(event, 2, true, "STATEMENT").prepareContinue();
             });
 
             // prepareContinue should be ignored here as suspenions counts higher
-            suspendAll(session);
+            session.suspendAll();
 
             expectSuspended((SuspendedEvent event) -> {
                 checkState(event, 3, true, "STATEMENT").prepareContinue();
@@ -298,14 +423,14 @@ public class DebuggerSessionTest extends AbstractDebugTest {
                         "STATEMENT)");
 
         try (DebuggerSession session = startSession()) {
-            suspendAll(session);
+            session.suspendAll();
             startEval(testSource);
             expectSuspended((SuspendedEvent event) -> {
                 checkState(event, 2, true, "STATEMENT").prepareKill();
             });
 
             // For prepareKill additional suspensions should be ignored
-            suspendAll(session);
+            session.suspendAll();
 
             expectKilled();
         }
@@ -325,7 +450,7 @@ public class DebuggerSessionTest extends AbstractDebugTest {
                     checkState(event, 2, true, "STATEMENT").prepareStepOver(1);
                 });
                 // resume events are ignored by stepping
-                resume(session, getEvalThread());
+                session.resume(getEvalThread());
                 expectDone();
             }
         }
@@ -340,14 +465,14 @@ public class DebuggerSessionTest extends AbstractDebugTest {
         try (DebuggerSession session = startSession()) {
             for (int i = 0; i < 10; i++) {
                 session.suspendNextExecution();
-                resume(session, getEvalThread());
+                session.resume(getEvalThread());
                 startEval(testSource);
 
                 // even if the thread is resumed suspend next execution will trigger.
                 expectSuspended((SuspendedEvent event) -> {
                     checkState(event, 2, true, "STATEMENT").prepareStepOver(1);
                 });
-                resume(session, getEvalThread());
+                session.resume(getEvalThread());
                 expectDone();
             }
         }
@@ -377,7 +502,7 @@ public class DebuggerSessionTest extends AbstractDebugTest {
 
         try (DebuggerSession session = startSession()) {
             for (int i = 0; i < 10; i++) {
-                suspendAll(session);
+                session.suspendAll();
                 session.resumeAll();
                 startEval(testSource);
                 expectDone();
@@ -393,7 +518,7 @@ public class DebuggerSessionTest extends AbstractDebugTest {
 
         try (DebuggerSession session = startSession()) {
             for (int i = 0; i < 10; i++) {
-                suspend(session, getEvalThread());
+                session.suspend(getEvalThread());
                 session.resumeAll();
                 startEval(testSource);
                 expectDone();
@@ -464,10 +589,10 @@ public class DebuggerSessionTest extends AbstractDebugTest {
 
         // if the engine disposes the session should still work
         session.suspendNextExecution();
-        suspend(session, Thread.currentThread());
-        suspendAll(session);
+        session.suspend(Thread.currentThread());
+        session.suspendAll();
         session.install(Breakpoint.newBuilder(getSourceImpl(testSource)).lineIs(2).build());
-        resume(session, Thread.currentThread());
+        session.resume(Thread.currentThread());
         session.resumeAll();
         session.getDebugger();
         session.getBreakpoints();
@@ -482,12 +607,12 @@ public class DebuggerSessionTest extends AbstractDebugTest {
         }
 
         try {
-            suspend(session, Thread.currentThread());
+            session.suspend(Thread.currentThread());
             Assert.fail();
         } catch (IllegalStateException e) {
         }
         try {
-            suspendAll(session);
+            session.suspendAll();
             Assert.fail();
         } catch (IllegalStateException e) {
         }
@@ -498,7 +623,7 @@ public class DebuggerSessionTest extends AbstractDebugTest {
         } catch (IllegalStateException e) {
         }
         try {
-            resume(session, Thread.currentThread());
+            session.resume(Thread.currentThread());
             Assert.fail();
         } catch (IllegalStateException e) {
         }
@@ -562,7 +687,7 @@ public class DebuggerSessionTest extends AbstractDebugTest {
         String sourceContent = "\n  relative source\nVarA";
         Source source = Source.newBuilder(ProxyLanguage.ID, sourceContent, "file").cached(false).build();
         String relativePath = "relative/test.file";
-        Path testSourcePath = Files.createTempDirectory("testPath");
+        Path testSourcePath = Files.createTempDirectory("testPath").toRealPath();
         Files.createDirectory(testSourcePath.resolve("relative"));
         Path filePath = testSourcePath.resolve(relativePath);
         Files.write(filePath, sourceContent.getBytes());
@@ -581,9 +706,15 @@ public class DebuggerSessionTest extends AbstractDebugTest {
                     tester.startEval(source);
                     expectSuspended((SuspendedEvent event) -> {
                         SourceSection sourceSection = event.getSourceSection();
-                        URI uri = sourceSection.getSource().getURI();
+                        com.oracle.truffle.api.source.Source resolvedSource = sourceSection.getSource();
+                        URI uri = resolvedSource.getURI();
                         Assert.assertTrue(uri.toString(), uri.isAbsolute());
                         Assert.assertEquals(resolvedURI, uri);
+                        Assert.assertEquals(ProxyLanguage.ID, resolvedSource.getLanguage());
+                        Assert.assertNull(resolvedSource.getMimeType());
+                        Assert.assertEquals("test.file", resolvedSource.getName());
+                        Assert.assertEquals(filePath.toString(), resolvedSource.getPath());
+                        Assert.assertNull(resolvedSource.getURL());
                         checkResolvedSourceSection(sourceSection, 2, 3, 17, 3, 15);
                         Assert.assertEquals(sourceContent, sourceSection.getSource().getCharacters().toString());
                         Assert.assertEquals(sourceContent.substring(3, sourceContent.indexOf('\n', 3)), sourceSection.getCharacters().toString());
@@ -610,11 +741,56 @@ public class DebuggerSessionTest extends AbstractDebugTest {
     }
 
     @Test
+    public void testResolvedSourceAttributes() throws IOException {
+        String sourceContent = "\n  relative source\nVarA";
+        String relativePath = "relative/test.file";
+        Path testSourcePath = Files.createTempDirectory("testPath").toRealPath();
+        Files.createDirectory(testSourcePath.resolve("relative"));
+        Path filePath = testSourcePath.resolve(relativePath);
+        Files.write(filePath, sourceContent.getBytes());
+        URI resolvedURI = testSourcePath.resolve(relativePath).toUri();
+        boolean[] trueFalse = new boolean[]{true, false};
+        try (DebuggerSession session = tester.startSession()) {
+            session.setSteppingFilter(SuspensionFilter.newBuilder().includeInternal(true).build());
+            session.setSourcePath(Arrays.asList(testSourcePath.toUri()));
+            for (String mimeType : new String[]{"application/x-proxy-language", null}) {
+                for (boolean interactive : trueFalse) {
+                    for (boolean internal : trueFalse) {
+                        Source source = Source.newBuilder(ProxyLanguage.ID, sourceContent, "file").cached(false).interactive(interactive).internal(internal).mimeType(mimeType).name("foo").build();
+                        TestDebugNoContentLanguage language = new TestDebugNoContentLanguage(relativePath, true, false);
+                        ProxyLanguage.setDelegate(language);
+                        session.suspendNextExecution();
+                        tester.startEval(source);
+                        expectSuspended((SuspendedEvent event) -> {
+                            SourceSection sourceSection = event.getSourceSection();
+                            com.oracle.truffle.api.source.Source resolvedSource = sourceSection.getSource();
+                            URI uri = resolvedSource.getURI();
+                            Assert.assertTrue(uri.toString(), uri.isAbsolute());
+                            Assert.assertEquals(resolvedURI, uri);
+                            Assert.assertEquals(interactive, resolvedSource.isInteractive());
+                            Assert.assertEquals(internal, resolvedSource.isInternal());
+                            Assert.assertEquals(ProxyLanguage.ID, resolvedSource.getLanguage());
+                            Assert.assertEquals(mimeType, resolvedSource.getMimeType());
+                            Assert.assertEquals("test.file", resolvedSource.getName());
+                            Assert.assertEquals(filePath.toString(), resolvedSource.getPath());
+                            Assert.assertNull(resolvedSource.getURL());
+                            event.prepareContinue();
+                        });
+                        expectDone();
+                    }
+                }
+            }
+        } finally {
+            deleteRecursively(testSourcePath);
+        }
+    }
+
+    @Test
     public void testSourcePathZip() throws IOException {
         String sourceContent = "\n  relative source\nVarA";
         Source source = Source.newBuilder(ProxyLanguage.ID, sourceContent, "file").cached(false).build();
         String relativePath = "relative/test.file";
-        File zip = File.createTempFile("TestZip", ".zip");
+        File zip = File.createTempFile("TestZip", ".zip").getCanonicalFile();
         zip.deleteOnExit();
         try (ZipOutputStream out = new ZipOutputStream(new FileOutputStream(zip))) {
             ZipEntry e = new ZipEntry("src/" + relativePath);
@@ -625,7 +801,7 @@ public class DebuggerSessionTest extends AbstractDebugTest {
         }
         URI sourcePathURI;
         URI resolvedURI;
-        try (FileSystem fs = FileSystems.newFileSystem(zip.toPath(), null)) {
+        try (FileSystem fs = FileSystems.newFileSystem(zip.toPath(), (ClassLoader) null)) {
             Path spInZip = fs.getPath("src");
             sourcePathURI = spInZip.toUri();
             resolvedURI = fs.getPath("src", relativePath).toUri();
@@ -685,7 +861,7 @@ public class DebuggerSessionTest extends AbstractDebugTest {
     public void testDebuggedSourcesCanBeReleasedRelative() throws IOException {
         String sourceContent = "\n  relative source\nVarA";
         String relativePath = "relative/test.file";
-        Path testSourcePath = Files.createTempDirectory("testPath");
+        Path testSourcePath = Files.createTempDirectory("testPath").toRealPath();
         Files.createDirectory(testSourcePath.resolve("relative"));
         Path filePath = testSourcePath.resolve(relativePath);
         Files.write(filePath, sourceContent.getBytes());

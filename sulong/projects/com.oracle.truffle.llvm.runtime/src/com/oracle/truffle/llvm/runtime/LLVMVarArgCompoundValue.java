@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates.
+ * Copyright (c) 2017, 2021, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -30,33 +30,40 @@
 package com.oracle.truffle.llvm.runtime;
 
 import com.oracle.truffle.api.CompilerDirectives.ValueType;
+import com.oracle.truffle.llvm.runtime.types.Type;
 
 @ValueType
 public final class LLVMVarArgCompoundValue {
     private final Object addr;
-    private final int size;
+    private final long size;
     private final int alignment;
+    private final Type type;
 
-    private LLVMVarArgCompoundValue(Object val, int size, int alignment) {
+    private LLVMVarArgCompoundValue(Object val, long size, int alignment, Type type) {
         this.addr = val;
         this.size = size;
         this.alignment = alignment;
+        this.type = type;
     }
 
-    public static LLVMVarArgCompoundValue create(Object val, int size, int alignment) {
-        return new LLVMVarArgCompoundValue(val, size, alignment);
+    public static LLVMVarArgCompoundValue create(Object val, long size, int alignment, Type type) {
+        return new LLVMVarArgCompoundValue(val, size, alignment, type);
     }
 
     public Object getAddr() {
         return addr;
     }
 
-    public int getSize() {
+    public long getSize() {
         return size;
     }
 
     public int getAlignment() {
         return alignment;
+    }
+
+    public Type getType() {
+        return type;
     }
 
     @Override
@@ -71,11 +78,11 @@ public final class LLVMVarArgCompoundValue {
 
     @Override
     public int hashCode() {
-        return addr.hashCode() + 11 * Integer.hashCode(size) + 23 * Integer.hashCode(alignment);
+        return addr.hashCode() + 11 * Long.hashCode(size) + 23 * Integer.hashCode(alignment);
     }
 
     @Override
     public String toString() {
-        return String.format("0x%x (%d align %d)", getAddr(), getSize(), getAlignment());
+        return String.format("%s (%d align %d)", getAddr(), getSize(), getAlignment());
     }
 }

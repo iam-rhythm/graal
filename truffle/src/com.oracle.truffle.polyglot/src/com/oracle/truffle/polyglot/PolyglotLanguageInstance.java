@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,79 +40,181 @@
  */
 package com.oracle.truffle.polyglot;
 
-import static com.oracle.truffle.polyglot.VMAccessor.LANGUAGE;
+import static com.oracle.truffle.polyglot.EngineAccessor.LANGUAGE;
 
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
+import java.util.function.Function;
 
+import org.graalvm.collections.Pair;
+import org.graalvm.options.OptionDescriptor;
+import org.graalvm.polyglot.SandboxPolicy;
+import org.graalvm.polyglot.impl.AbstractPolyglotImpl.APIAccess;
+
+import com.oracle.truffle.api.CallTarget;
+import com.oracle.truffle.api.CompilerDirectives.CompilationFinal;
 import com.oracle.truffle.api.TruffleLanguage;
-import com.oracle.truffle.api.TruffleLanguage.ContextPolicy;
-import com.oracle.truffle.polyglot.PolyglotValue.InteropCodeCache;
+import com.oracle.truffle.api.interop.TruffleObject;
+import com.oracle.truffle.api.nodes.RootNode;
+import com.oracle.truffle.api.source.Source;
+import com.oracle.truffle.polyglot.PolyglotImpl.VMObject;
+import com.oracle.truffle.polyglot.PolyglotLocals.LanguageContextLocal;
+import com.oracle.truffle.polyglot.PolyglotLocals.LanguageContextThreadLocal;
+import com.oracle.truffle.polyglot.PolyglotLocals.LocalLocation;
+import com.oracle.truffle.polyglot.PolyglotSourceCache.ParseOrigin;
 
-final class PolyglotLanguageInstance {
+/** The data corresponding to a specific {@link TruffleLanguage} instance. */
+final class PolyglotLanguageInstance implements VMObject {
 
     final PolyglotLanguage language;
-    final TruffleLanguage<?> spi;
+    final TruffleLanguage<Object> spi;
+    /*
+     * The sharing layer might change for the host language only.
+     */
+    @CompilationFinal PolyglotSharingLayer sharing;
 
-    private final PolyglotSourceCache sourceCache;
-    final Map<Class<?>, InteropCodeCache> valueCodeCache;
-    final Map<Object, Object> hostInteropCodeCache;
+    private final Map<Class<?>, PolyglotValueDispatch> valueCache;
+    private final Map<Class<?>, CallTarget> callTargetCache;
 
-    private volatile OptionValuesImpl firstOptionValues;
-    private volatile boolean needsInitializeMultiContext;
+    final Map<Object, Object> hostToGuestCodeCache = new ConcurrentHashMap<>();
+    final Map<Class<?>, Object> staticObjectClassLoaders = new ConcurrentHashMap<>();
+    final ConcurrentHashMap<Pair<Class<?>, Class<?>>, Object> generatorCache = new ConcurrentHashMap<>();
 
-    PolyglotLanguageInstance(PolyglotLanguage language) {
+    final WeakAssumedValue<PolyglotLanguageContext> singleLanguageContext = new WeakAssumedValue<>("single language context");
+    // effectively final
+    List<LanguageContextLocal<?>> contextLocals;
+    List<LanguageContextThreadLocal<?>> contextThreadLocals;
+    LocalLocation[] contextLocalLocations;
+    LocalLocation[] contextThreadLocalLocations;
+
+    @CompilationFinal private volatile Object guestToHostCodeCache;
+
+    private static final AtomicReferenceFieldUpdater<PolyglotLanguageInstance, Object> GUEST_TO_HOST_CODE_CACHE_UPDATER = //
+                    AtomicReferenceFieldUpdater.newUpdater(PolyglotLanguageInstance.class, Object.class, "guestToHostCodeCache");
+
+    @SuppressWarnings("unchecked")
+    PolyglotLanguageInstance(PolyglotLanguage language, PolyglotSharingLayer layer) {
         this.language = language;
+        this.sharing = layer;
+
+        this.valueCache = new ConcurrentHashMap<>();
+        this.callTargetCache = new ConcurrentHashMap<>();
         try {
-            this.spi = language.cache.loadLanguage();
-            LANGUAGE.initializeLanguage(spi, language.info, language);
-            if (!language.engine.singleContext.isValid()) {
-                initializeMultiContext();
-            } else {
-                needsInitializeMultiContext = !language.engine.boundEngine;
-            }
+            this.spi = (TruffleLanguage<Object>) language.cache.loadLanguage();
+            LANGUAGE.initializeLanguage(spi, language.info, language, language.isHost() ? null : this);
         } catch (Exception e) {
             throw new IllegalStateException(String.format("Error initializing language '%s' using class '%s'.", language.cache.getId(), language.cache.getClassName()), e);
         }
-        this.sourceCache = new PolyglotSourceCache();
-        this.valueCodeCache = new ConcurrentHashMap<>();
-        this.hostInteropCodeCache = new ConcurrentHashMap<>();
+        PolyglotValueDispatch.createDefaultValues(getImpl(), this, this.valueCache);
     }
 
-    boolean areOptionsCompatible(OptionValuesImpl newOptionValues) {
-        OptionValuesImpl firstOptions = this.firstOptionValues;
-        if (firstOptionValues == null) {
-            return true;
+    CallTarget lookupCallTarget(Class<? extends RootNode> rootNodeClass) {
+        return callTargetCache.get(rootNodeClass);
+    }
+
+    CallTarget installCallTarget(RootNode rootNode) {
+        return callTargetCache.computeIfAbsent(rootNode.getClass(), (r) -> rootNode.getCallTarget());
+    }
+
+    OptionValuesImpl parseSourceOptions(ParseOrigin origin, Source source, String componentOnly) {
+        Map<String, String> rawOptions = EngineAccessor.SOURCE.getSourceOptions(source);
+        if (rawOptions.isEmpty()) {
+            // fast-path: no options
+            return language.getEmptySourceOptionsInternal();
+        }
+        PolyglotEngineImpl engine = this.sharing.engine;
+
+        // if same language
+        boolean allowExperimental = true;
+        SandboxPolicy sandboxPolicy = SandboxPolicy.TRUSTED;
+        if (origin == ParseOrigin.EMBEDDING) {
+            allowExperimental = engine.allowExperimentalOptions;
+            sandboxPolicy = engine.sandboxPolicy;
+        }
+        Map<String, OptionValuesImpl> options = PolyglotSourceCache.parseSourceOptions(getEngine(),
+                        rawOptions, componentOnly,
+                        sandboxPolicy,
+                        allowExperimental);
+        OptionValuesImpl languageOptions = options.get(componentOnly != null ? componentOnly : source.getLanguage());
+        if (languageOptions == null) {
+            return language.getEmptySourceOptionsInternal();
+        }
+        List<OptionDescriptor> deprecated = null;
+        for (OptionValuesImpl resolvedOptions : options.values()) {
+            Collection<OptionDescriptor> descriptors = resolvedOptions.getUsedDeprecatedDescriptors();
+            if (!descriptors.isEmpty()) {
+                if (deprecated == null) {
+                    deprecated = new ArrayList<>();
+                }
+                deprecated.addAll(descriptors);
+            }
+        }
+
+        if (deprecated != null) {
+            engine.printDeprecatedOptionsWarning(deprecated);
+        }
+
+        return languageOptions;
+    }
+
+    @Override
+    public PolyglotEngineImpl getEngine() {
+        return language.engine;
+    }
+
+    @Override
+    public APIAccess getAPIAccess() {
+        return language.engine.apiAccess;
+    }
+
+    @Override
+    public PolyglotImpl getImpl() {
+        return language.engine.impl;
+    }
+
+    PolyglotValueDispatch lookupValueCache(PolyglotContextImpl context, Object guestValue) {
+        PolyglotValueDispatch cache = valueCache.get(guestValue.getClass());
+        if (cache == null) {
+            Object prev = language.engine.enterIfNeeded(context, true);
+            try {
+                cache = lookupValueCacheImpl(guestValue);
+            } finally {
+                language.engine.leaveIfNeeded(prev, context);
+            }
+        }
+        assert Objects.equals(cache.languageInstance.sharing, this.sharing) : PolyglotSharingLayer.invalidSharingError(null, cache.languageInstance.sharing, this.sharing);
+        return cache;
+    }
+
+    private synchronized PolyglotValueDispatch lookupValueCacheImpl(Object guestValue) {
+        PolyglotValueDispatch cache = valueCache.computeIfAbsent(guestValue.getClass(), new Function<Class<?>, PolyglotValueDispatch>() {
+            public PolyglotValueDispatch apply(Class<?> t) {
+                return PolyglotValueDispatch.createInteropValue(PolyglotLanguageInstance.this, (TruffleObject) guestValue, guestValue.getClass());
+            }
+        });
+        return cache;
+    }
+
+    Object getGuestToHostCodeCache() {
+        return guestToHostCodeCache;
+    }
+
+    Object installGuestToHostCodeCache(Object newCache) {
+        if (GUEST_TO_HOST_CODE_CACHE_UPDATER.compareAndSet(this, null, newCache)) {
+            return newCache;
         } else {
-            return VMAccessor.LANGUAGE.areOptionsCompatible(spi, firstOptions, newOptionValues);
+            return guestToHostCodeCache;
         }
     }
 
-    void claim(OptionValuesImpl optionValues) {
-        assert Thread.holdsLock(language.engine);
-        if (this.firstOptionValues == null) {
-            this.firstOptionValues = optionValues;
-        }
-    }
-
-    void ensureMultiContextInitialized() {
-        assert Thread.holdsLock(language.engine);
-        if (needsInitializeMultiContext) {
-            needsInitializeMultiContext = false;
-            language.engine.initializeMultiContext(null);
-            initializeMultiContext();
-        }
-    }
-
-    void initializeMultiContext() {
-        assert !language.engine.singleContext.isValid();
-        if (language.cache.getPolicy() != ContextPolicy.EXCLUSIVE) {
-            LANGUAGE.initializeMultiContext(spi);
-        }
-    }
-
-    PolyglotSourceCache getSourceCache() {
-        return sourceCache;
+    @Override
+    public String toString() {
+        return "PolyglotLanguageInstance[" + spi + "]";
     }
 
 }

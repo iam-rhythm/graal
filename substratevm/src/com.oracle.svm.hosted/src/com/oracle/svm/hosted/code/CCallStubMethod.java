@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,149 +24,139 @@
  */
 package com.oracle.svm.hosted.code;
 
-import java.util.Arrays;
-import java.util.Iterator;
+import java.util.ArrayList;
 import java.util.List;
 
-import org.graalvm.compiler.debug.DebugContext;
-import org.graalvm.compiler.java.FrameStateBuilder;
-import org.graalvm.compiler.nodes.CallTargetNode.InvokeKind;
-import org.graalvm.compiler.nodes.ConstantNode;
-import org.graalvm.compiler.nodes.StructuredGraph;
-import org.graalvm.compiler.nodes.UnwindNode;
-import org.graalvm.compiler.nodes.ValueNode;
-import org.graalvm.compiler.nodes.calc.IsNullNode;
-import org.graalvm.compiler.nodes.extended.BranchProbabilityNode;
-import org.graalvm.compiler.nodes.java.NewInstanceNode;
+import org.graalvm.nativeimage.ImageSingletons;
 import org.graalvm.nativeimage.c.constant.CEnum;
 import org.graalvm.nativeimage.c.constant.CEnumLookup;
-import org.graalvm.nativeimage.c.constant.CEnumValue;
 
+import com.oracle.graal.pointsto.infrastructure.ResolvedSignature;
+import com.oracle.graal.pointsto.meta.AnalysisMethod;
+import com.oracle.graal.pointsto.meta.AnalysisType;
 import com.oracle.graal.pointsto.meta.HostedProviders;
-import com.oracle.svm.core.meta.SharedMethod;
 import com.oracle.svm.core.util.UserError;
 import com.oracle.svm.hosted.annotation.CustomSubstitutionMethod;
+import com.oracle.svm.hosted.c.CInterfaceWrapper;
 import com.oracle.svm.hosted.c.NativeLibraries;
 import com.oracle.svm.hosted.c.info.ElementInfo;
 import com.oracle.svm.hosted.c.info.EnumInfo;
-import com.oracle.svm.hosted.c.info.EnumValueInfo;
 import com.oracle.svm.hosted.phases.CInterfaceEnumTool;
 import com.oracle.svm.hosted.phases.HostedGraphKit;
 
-import jdk.vm.ci.meta.JavaKind;
-import jdk.vm.ci.meta.JavaType;
-import jdk.vm.ci.meta.MetaAccessProvider;
+import jdk.graal.compiler.debug.DebugContext;
+import jdk.graal.compiler.java.FrameStateBuilder;
+import jdk.graal.compiler.nodes.StructuredGraph;
+import jdk.graal.compiler.nodes.ValueNode;
 import jdk.vm.ci.meta.ResolvedJavaMethod;
-import jdk.vm.ci.meta.ResolvedJavaType;
-import jdk.vm.ci.meta.Signature;
 
 public abstract class CCallStubMethod extends CustomSubstitutionMethod {
-    private static final JavaKind cEnumKind = JavaKind.Int;
+    protected final int newThreadStatus;
 
-    protected final boolean needsTransition;
-
-    CCallStubMethod(ResolvedJavaMethod original, boolean needsTransition) {
+    CCallStubMethod(ResolvedJavaMethod original, int newThreadStatus) {
         super(original);
-        this.needsTransition = needsTransition;
+        this.newThreadStatus = newThreadStatus;
     }
 
     protected abstract String getCorrespondingAnnotationName();
 
     @Override
-    public StructuredGraph buildGraph(DebugContext debug, ResolvedJavaMethod method, HostedProviders providers, Purpose purpose) {
-        NativeLibraries nativeLibraries = CEntryPointCallStubSupport.singleton().getNativeLibraries();
-        boolean deoptimizationTarget = method instanceof SharedMethod && ((SharedMethod) method).isDeoptTarget();
+    public StructuredGraph buildGraph(DebugContext debug, AnalysisMethod method, HostedProviders providers, Purpose purpose) {
+        NativeLibraries nativeLibraries = NativeLibraries.singleton();
+        boolean deoptimizationTarget = SubstrateCompilationDirectives.isDeoptTarget(method);
         HostedGraphKit kit = new HostedGraphKit(debug, providers, method);
         FrameStateBuilder state = kit.getFrameState();
-        List<ValueNode> arguments = kit.loadArguments(getParameterTypesForLoad(method));
-        ValueNode callAddress = createTargetAddressNode(kit, providers, arguments);
-        Signature signature = adaptSignatureAndConvertArguments(providers, nativeLibraries, kit,
-                        method.getSignature().getReturnType(null), method.toParameterTypes(), arguments);
+        List<ValueNode> arguments = new ArrayList<>(kit.getInitialArguments());
+        ValueNode callAddress = createTargetAddressNode(kit, arguments);
+        AnalysisType[] paramTypes = method.toParameterList().toArray(AnalysisType[]::new);
+        var signature = adaptSignatureAndConvertArguments(nativeLibraries, kit, method, method.getSignature().getReturnType(), paramTypes, arguments);
         state.clearLocals();
-        ValueNode returnValue = kit.createCFunctionCall(callAddress, arguments, signature, needsTransition, deoptimizationTarget);
-        returnValue = adaptReturnValue(method, providers, nativeLibraries, kit, returnValue);
+
+        if (ImageSingletons.contains(CInterfaceWrapper.class)) {
+            ImageSingletons.lookup(CInterfaceWrapper.class).tagCFunctionCallPrologue(kit, method);
+        }
+
+        ValueNode returnValue = kit.createCFunctionCall(callAddress, arguments, signature, newThreadStatus, deoptimizationTarget);
+
+        if (ImageSingletons.contains(CInterfaceWrapper.class)) {
+            ImageSingletons.lookup(CInterfaceWrapper.class).tagCFunctionCallEpilogue(kit, method);
+        }
+
+        returnValue = adaptReturnValue(method, nativeLibraries, kit, returnValue);
+
+        emitCallerEpilogue(kit);
+
         kit.createReturn(returnValue, signature.getReturnKind());
 
-        assert kit.getGraph().verify();
-        return kit.getGraph();
+        return kit.finalizeGraph();
     }
 
-    protected abstract ValueNode createTargetAddressNode(HostedGraphKit kit, HostedProviders providers, List<ValueNode> arguments);
-
-    protected static boolean isPrimitiveOrWord(HostedProviders providers, JavaType type) {
-        return type.getJavaKind().isPrimitive() || providers.getWordTypes().isWord(type);
+    protected void emitCallerEpilogue(@SuppressWarnings("unused") HostedGraphKit kit) {
     }
 
-    protected JavaType[] getParameterTypesForLoad(ResolvedJavaMethod method) {
-        return method.getSignature().toParameterTypes(/* exclude receiver parameter */ null);
-    }
+    protected abstract ValueNode createTargetAddressNode(HostedGraphKit kit, List<ValueNode> arguments);
 
-    protected Signature adaptSignatureAndConvertArguments(HostedProviders providers, NativeLibraries nativeLibraries,
-                    HostedGraphKit kit, JavaType returnType, JavaType[] parameterTypes, List<ValueNode> arguments) {
-
-        MetaAccessProvider metaAccess = providers.getMetaAccess();
+    /**
+     * The signature may contain Java object types. The only Java object types that we support at
+     * the moment are Java enums (annotated with @CEnum). This method replaces all Java enums with
+     * suitable primitive types.
+     */
+    protected ResolvedSignature<AnalysisType> adaptSignatureAndConvertArguments(NativeLibraries nativeLibraries,
+                    HostedGraphKit kit, @SuppressWarnings("unused") AnalysisMethod method, AnalysisType returnType, AnalysisType[] parameterTypes, List<ValueNode> arguments) {
         for (int i = 0; i < parameterTypes.length; i++) {
-            if (!isPrimitiveOrWord(providers, parameterTypes[i])) {
-                ElementInfo typeInfo = nativeLibraries.findElementInfo((ResolvedJavaType) parameterTypes[i]);
-                if (typeInfo instanceof EnumInfo) {
-                    UserError.guarantee(typeInfo.getChildren().stream().anyMatch(EnumValueInfo.class::isInstance), "Enum class " +
-                                    returnType.toJavaName() + " needs a method that is annotated with @" + CEnumValue.class.getSimpleName() +
-                                    " because it is used as a parameter of a method annotated with @" + getCorrespondingAnnotationName() + ": " +
-                                    getOriginal().format("%H.%n(%p)"));
+            if (!CInterfaceEnumTool.isPrimitiveOrWord(parameterTypes[i])) {
+                /* Replace the CEnum with the corresponding primitive type. */
+                EnumInfo enumInfo = getEnumInfo(nativeLibraries, parameterTypes[i], false);
+                ValueNode argumentValue = kit.maybeCreateExplicitNullCheck(arguments.get(i));
 
-                    ValueNode argumentValue = arguments.get(i);
+                AnalysisType cValueType = CInterfaceEnumTool.getCEnumValueType(enumInfo, kit.getMetaAccess());
+                argumentValue = CInterfaceEnumTool.singleton().createInvokeEnumToValue(kit, enumInfo, cValueType, argumentValue);
 
-                    IsNullNode isNull = kit.unique(new IsNullNode(argumentValue));
-                    kit.startIf(isNull, BranchProbabilityNode.VERY_SLOW_PATH_PROBABILITY);
-                    kit.thenPart();
-                    ResolvedJavaType enumExceptionType = metaAccess.lookupJavaType(RuntimeException.class);
-                    NewInstanceNode enumException = kit.append(new NewInstanceNode(enumExceptionType, true));
-                    Iterator<ResolvedJavaMethod> enumExceptionCtor = Arrays.stream(enumExceptionType.getDeclaredConstructors()).filter(
-                                    c -> c.getSignature().getParameterCount(false) == 1 && c.getSignature().getParameterType(0, null).equals(metaAccess.lookupJavaType(String.class))).iterator();
-                    ConstantNode enumExceptionMessage = kit.createConstant(kit.getConstantReflection().forString("null return value cannot be converted to a C enum value"), JavaKind.Object);
-                    kit.createJavaCallWithExceptionAndUnwind(InvokeKind.Special, enumExceptionCtor.next(), enumException, enumExceptionMessage);
-                    assert !enumExceptionCtor.hasNext();
-                    kit.append(new UnwindNode(enumException));
-                    kit.endIf();
-
-                    CInterfaceEnumTool tool = new CInterfaceEnumTool(metaAccess, providers.getSnippetReflection());
-                    argumentValue = tool.createEnumValueInvoke(kit, (EnumInfo) typeInfo, cEnumKind, argumentValue);
-
-                    arguments.set(i, argumentValue);
-                    parameterTypes[i] = metaAccess.lookupJavaType(cEnumKind.toJavaClass());
-                } else {
-                    throw UserError.abort("@" + getCorrespondingAnnotationName() + " parameter types are restricted to primitive types, word types and enumerations (@" +
-                                    CEnum.class.getSimpleName() + "): " + getOriginal().format("%H.%n(%p)"));
-                }
+                arguments.set(i, argumentValue);
+                parameterTypes[i] = cValueType;
             }
         }
-        /* Actual checks and conversion are in adaptReturnValue() */
-        JavaType actualReturnType = isPrimitiveOrWord(providers, returnType) ? returnType : providers.getWordTypes().getWordImplType();
-        return new SimpleSignature(parameterTypes, actualReturnType);
+
+        AnalysisType patchedReturnType = returnType;
+        if (!CInterfaceEnumTool.isPrimitiveOrWord(patchedReturnType)) {
+            /*
+             * The return type is a @CEnum. Change the return type to Word because the C function
+             * call will return some primitive value (and checks expect Word type replacements).
+             * adaptReturnValue() below does the actual conversion from the primitive value to the
+             * Java object.
+             */
+            assert getEnumInfo(nativeLibraries, patchedReturnType, true) != null;
+            patchedReturnType = (AnalysisType) kit.getWordTypes().getWordImplType();
+        }
+        return ResolvedSignature.fromArray(parameterTypes, patchedReturnType);
     }
 
-    private ValueNode adaptReturnValue(ResolvedJavaMethod method, HostedProviders providers, NativeLibraries nativeLibraries, HostedGraphKit kit, ValueNode invokeValue) {
-        ValueNode returnValue = invokeValue;
-        JavaType declaredReturnType = method.getSignature().getReturnType(null);
-        if (isPrimitiveOrWord(providers, declaredReturnType)) {
-            return returnValue;
+    private ValueNode adaptReturnValue(AnalysisMethod method, NativeLibraries nativeLibraries, HostedGraphKit kit, ValueNode value) {
+        AnalysisType declaredReturnType = method.getSignature().getReturnType();
+        if (CInterfaceEnumTool.isPrimitiveOrWord(declaredReturnType)) {
+            return value;
         }
-        ElementInfo typeInfo = nativeLibraries.findElementInfo((ResolvedJavaType) declaredReturnType);
-        if (typeInfo instanceof EnumInfo) {
-            UserError.guarantee(typeInfo.getChildren().stream().anyMatch(EnumValueInfo.class::isInstance), "Enum class " +
-                            declaredReturnType.toJavaName() + " needs a method that is annotated with @" + CEnumLookup.class +
-                            " because it is used as the return type of a method annotated with @" + getCorrespondingAnnotationName() +
-                            ": " + getOriginal().format("%H.%n(%p)"));
 
-            // We take a word return type because checks expect word type replacements, but it is
-            // narrowed to cEnumKind here.
-            CInterfaceEnumTool tool = new CInterfaceEnumTool(providers.getMetaAccess(), providers.getSnippetReflection());
-            returnValue = tool.createEnumLookupInvoke(kit, (ResolvedJavaType) declaredReturnType, (EnumInfo) typeInfo, cEnumKind, returnValue);
-        } else {
-            throw UserError.abort("Return types of methods annotated with @" + getCorrespondingAnnotationName() +
-                            " are restricted to primitive types, word types and enumerations (@" +
-                            CEnum.class.getSimpleName() + "): " + getOriginal().format("%H.%n(%p)"));
+        /* The C function call returned a primitive value. Now, we convert it to a Java enum. */
+        EnumInfo enumInfo = getEnumInfo(nativeLibraries, declaredReturnType, true);
+        UserError.guarantee(enumInfo.hasCEnumLookupMethods(),
+                        "Enum class %s needs a method that is annotated with @%s because it is used as the return type of a method annotated with @%s: %s.",
+                        declaredReturnType, CEnumLookup.class.getSimpleName(), getCorrespondingAnnotationName(), getOriginal());
+
+        return CInterfaceEnumTool.singleton().createInvokeLookupEnum(kit, declaredReturnType, enumInfo, value);
+    }
+
+    private EnumInfo getEnumInfo(NativeLibraries nativeLibraries, AnalysisType type, boolean isReturnType) {
+        ElementInfo typeInfo = nativeLibraries.findElementInfo(type);
+        if (typeInfo instanceof EnumInfo enumInfo) {
+            return enumInfo;
         }
-        return returnValue;
+
+        if (isReturnType) {
+            throw UserError.abort("Return types of methods annotated with @%s are restricted to primitive types, word types and enumerations (@%s): %s",
+                            getCorrespondingAnnotationName(), CEnum.class.getSimpleName(), getOriginal());
+        }
+        throw UserError.abort("@%s parameter types are restricted to primitive types, word types and enumerations (@%s): %s",
+                        getCorrespondingAnnotationName(), CEnum.class.getSimpleName(), getOriginal());
     }
 }

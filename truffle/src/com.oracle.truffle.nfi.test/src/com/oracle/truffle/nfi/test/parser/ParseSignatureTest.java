@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,87 +40,123 @@
  */
 package com.oracle.truffle.nfi.test.parser;
 
-import com.oracle.truffle.nfi.types.NativeArrayTypeMirror;
-import com.oracle.truffle.nfi.types.NativeSimpleType;
-import com.oracle.truffle.nfi.types.NativeSimpleTypeMirror;
-import com.oracle.truffle.nfi.types.NativeTypeMirror;
-import com.oracle.truffle.nfi.types.NativeTypeMirror.Kind;
+import com.oracle.truffle.api.CallTarget;
+import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
+import com.oracle.truffle.api.dsl.Cached;
+import com.oracle.truffle.api.dsl.NeverDefault;
+import com.oracle.truffle.api.dsl.Specialization;
+import com.oracle.truffle.api.frame.VirtualFrame;
+import com.oracle.truffle.api.interop.InteropException;
+import com.oracle.truffle.api.interop.InteropLibrary;
+import com.oracle.truffle.api.nodes.DirectCallNode;
+import com.oracle.truffle.api.nodes.Node;
+import com.oracle.truffle.api.nodes.RootNode;
+import com.oracle.truffle.api.source.Source;
+import com.oracle.truffle.nfi.api.SignatureLibrary;
+import com.oracle.truffle.nfi.backend.spi.types.NativeSimpleType;
+import com.oracle.truffle.nfi.test.parser.ParseSignatureTestFactory.InlineCacheNodeGen;
+import com.oracle.truffle.nfi.test.parser.backend.NFITestBackend.ArrayType;
+import com.oracle.truffle.nfi.test.parser.backend.TestCallInfo;
+import com.oracle.truffle.nfi.test.parser.backend.TestSignature;
+import com.oracle.truffle.tck.TruffleRunner.RunWithPolyglotRule;
+import java.util.Arrays;
 import org.hamcrest.Description;
 import org.hamcrest.Matcher;
 import org.hamcrest.TypeSafeMatcher;
+import org.junit.BeforeClass;
+import org.junit.ClassRule;
 
 public class ParseSignatureTest {
 
-    private abstract static class TypeMatcher<T extends NativeTypeMirror> extends TypeSafeMatcher<NativeTypeMirror> {
+    @ClassRule public static RunWithPolyglotRule runWithPolyglot = new RunWithPolyglotRule();
 
-        private final Class<T> expectedClass;
-        private final Kind expectedKind;
+    private static InteropLibrary INTEROP = InteropLibrary.getFactory().getUncached();
+    static Object testSymbol;
 
-        protected TypeMatcher(Class<T> expectedClass, Kind expectedKind) {
-            this.expectedClass = expectedClass;
-            this.expectedKind = expectedKind;
+    @BeforeClass
+    public static void loadTestSymbol() throws InteropException {
+        Source source = Source.newBuilder("nfi", "with test default", "ParseSignatureTest").internal(true).build();
+        CallTarget target = runWithPolyglot.getTruffleTestEnv().parseInternal(source);
+        Object library = target.call();
+        testSymbol = INTEROP.readMember(library, "testSymbol");
+    }
+
+    @SuppressWarnings("truffle-inlining")
+    abstract static class InlineCacheNode extends Node {
+
+        abstract Object execute(CallTarget callTarget);
+
+        @NeverDefault
+        static DirectCallNode createInlined(CallTarget callTarget) {
+            DirectCallNode ret = DirectCallNode.create(callTarget);
+            ret.forceInlining();
+            return ret;
         }
 
-        protected abstract boolean matchesType(T type);
+        @Specialization(limit = "1", guards = "call.getCallTarget() == callTarget")
+        Object doCached(@SuppressWarnings("unused") CallTarget callTarget,
+                        @Cached("createInlined(callTarget)") DirectCallNode call) {
+            return call.call();
+        }
 
-        protected abstract void describeTypeMismatch(T item, Description mismatchDescription);
+        // no specialization for the polymorphic case
+        // if we need it, something is wrong with code caching
+    }
 
-        @Override
-        protected boolean matchesSafely(NativeTypeMirror item) {
-            if (item.getKind() == expectedKind) {
-                return matchesType(expectedClass.cast(item));
-            } else {
-                return false;
-            }
+    class ParseSignatureNode extends RootNode {
+
+        final Source source;
+        @Child InlineCacheNode inlineCache = InlineCacheNodeGen.create();
+
+        protected ParseSignatureNode(String format, Object... args) {
+            this(String.format(format, args));
+        }
+
+        protected ParseSignatureNode(String signature) {
+            super(null);
+            this.source = Source.newBuilder("nfi", String.format("with test %s", signature), "ParseSignatureTest").internal(true).build();
+        }
+
+        @TruffleBoundary
+        CallTarget parse() {
+            return runWithPolyglot.getTruffleTestEnv().parseInternal(source);
         }
 
         @Override
-        protected void describeMismatchSafely(NativeTypeMirror item, Description mismatchDescription) {
-            if (item.getKind() == expectedKind) {
-                describeTypeMismatch(expectedClass.cast(item), mismatchDescription);
-            } else {
-                mismatchDescription.appendText("is type of kind ").appendValue(item.getKind());
-            }
+        public Object execute(VirtualFrame frame) {
+            return inlineCache.execute(parse());
         }
     }
 
-    protected static Matcher<NativeTypeMirror> isSimpleType(NativeSimpleType expected) {
-        return new TypeMatcher<NativeSimpleTypeMirror>(NativeSimpleTypeMirror.class, Kind.SIMPLE) {
+    static Object[] mkArgs(int count) {
+        Object[] ret = new Object[count];
+        // 0 is compatible with all numeric types
+        Arrays.fill(ret, 0);
+        return ret;
+    }
+
+    protected static TestSignature getSignature(CallTarget parsedSignature, int argCount) {
+        Object ret = parsedSignature.call();
+        try {
+            TestCallInfo info = (TestCallInfo) SignatureLibrary.getUncached().call(ret, testSymbol, mkArgs(argCount));
+            return info.signature;
+        } catch (InteropException ex) {
+            throw new AssertionError(ex);
+        }
+    }
+
+    protected static Matcher<Object> isArrayType(NativeSimpleType expected) {
+        return new TypeSafeMatcher<>(ArrayType.class) {
 
             @Override
-            protected boolean matchesType(NativeSimpleTypeMirror item) {
-                return expected == item.getSimpleType();
+            protected boolean matchesSafely(Object item) {
+                ArrayType type = (ArrayType) item;
+                return type.base == expected;
             }
 
             @Override
             public void describeTo(Description description) {
-                description.appendValue(expected);
-            }
-
-            @Override
-            protected void describeTypeMismatch(NativeSimpleTypeMirror item, Description mismatchDescription) {
-                mismatchDescription.appendValue(item.getSimpleType());
-            }
-        };
-    }
-
-    protected static Matcher<NativeTypeMirror> isArrayType(Matcher<?> component) {
-        return new TypeMatcher<NativeArrayTypeMirror>(NativeArrayTypeMirror.class, Kind.ARRAY) {
-
-            @Override
-            protected boolean matchesType(NativeArrayTypeMirror type) {
-                return component.matches(type.getElementType());
-            }
-
-            @Override
-            public void describeTo(Description description) {
-                description.appendText("array of ").appendDescriptionOf(component);
-            }
-
-            @Override
-            protected void describeTypeMismatch(NativeArrayTypeMirror item, Description mismatchDescription) {
-                mismatchDescription.appendText("array of ");
-                component.describeMismatch(item.getElementType(), mismatchDescription);
+                description.appendText("array of ").appendText(expected.name());
             }
         };
     }

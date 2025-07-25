@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,6 +40,8 @@
  */
 package com.oracle.truffle.api;
 
+import com.oracle.truffle.api.CompilerDirectives.CompilationFinal;
+import com.oracle.truffle.api.nodes.ExplodeLoop;
 import com.oracle.truffle.api.nodes.InvalidAssumptionException;
 import com.oracle.truffle.api.nodes.Node;
 
@@ -54,10 +56,39 @@ import com.oracle.truffle.api.nodes.Node;
  *
  * All instances of classes implementing {@code Assumption} must be held in {@code final} fields for
  * compiler optimizations to take effect.
+ * <p>
+ * Do not manually subclass the {@link Assumption} interface. This class is only intended to be
+ * subclassed by Truffle runtime implementations to avoid polymorphism in performance sensitive
+ * methods.
  *
  * @since 0.8 or earlier
  */
 public interface Assumption {
+
+    /**
+     * An assumption that is always valid and fails with an {@link UnsupportedOperationException} if
+     * invalidated.
+     *
+     * @since 22.1
+     */
+    Assumption ALWAYS_VALID = createAlwaysValid();
+
+    /**
+     * An assumption that is never valid.
+     *
+     * @since 22.1
+     */
+    Assumption NEVER_VALID = createNeverValid();
+
+    private static Assumption createNeverValid() {
+        Assumption assumption = create("<never valid>");
+        assumption.invalidate();
+        return assumption;
+    }
+
+    private static Assumption createAlwaysValid() {
+        return LanguageAccessor.RUNTIME.createAlwaysValidAssumption();
+    }
 
     /**
      * Checks that this assumption is still valid. The method throws an exception, if this is no
@@ -76,6 +107,7 @@ public interface Assumption {
      * @return a boolean value indicating the validity of the assumption
      * @since 0.8 or earlier
      */
+    // @NonIdempotent
     boolean isValid();
 
     /**
@@ -102,4 +134,57 @@ public interface Assumption {
      * @since 0.8 or earlier
      */
     String getName();
+
+    /**
+     * Checks whether an assumption is not <code>null</code> and valid.
+     *
+     * @since 19.0
+     */
+    // @NonIdempotent
+    static boolean isValidAssumption(Assumption assumption) {
+        return assumption != null && assumption.isValid();
+    }
+
+    /**
+     * Checks whether all assumptions in an array are not <code>null</code> and valid. Returns
+     * <code>false</code> if the assumptions array itself is <code>null</code>. This method is
+     * designed for compilation. Note that the provided assumptions array must be a compilation
+     * final array with {@link CompilationFinal#dimensions() dimensions} set to one.
+     *
+     * @since 19.0
+     */
+    @ExplodeLoop
+    // @NonIdempotent
+    static boolean isValidAssumption(Assumption[] assumptions) {
+        CompilerAsserts.partialEvaluationConstant(assumptions);
+        if (assumptions == null) {
+            return false;
+        }
+        for (Assumption assumption : assumptions) {
+            if (!isValidAssumption(assumption)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Creates a new assumption with a name. Shortcut for {@link TruffleRuntime#createAssumption()}.
+     *
+     * @since 22.1
+     */
+    static Assumption create() {
+        return Truffle.getRuntime().createAssumption();
+    }
+
+    /**
+     * Creates a new assumption with a name. Shortcut for
+     * {@link TruffleRuntime#createAssumption(String)}.
+     *
+     * @since 22.1
+     */
+    static Assumption create(String name) {
+        return Truffle.getRuntime().createAssumption(name);
+    }
+
 }

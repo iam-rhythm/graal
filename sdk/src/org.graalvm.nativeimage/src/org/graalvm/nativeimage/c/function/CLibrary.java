@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -49,16 +49,32 @@ import java.lang.annotation.Target;
  * Denotes an external library that needs to be linked in. The annotation can be placed on any
  * element, and the same library can be referenced by multiple annotations.
  *
- * @since 1.0
+ * @since 19.0
  */
 @Retention(RetentionPolicy.RUNTIME)
 @Target({ElementType.TYPE, ElementType.METHOD})
 public @interface CLibrary {
 
     /**
-     * The name of the library.
+     * The name of the library without a file extension (e.g., "hello"). The name of the actual file
+     * is platform-specific, e.g., <code>libhello.so</code> on Linux, <code>libhello.dylib</code> on
+     * macOS, and <code>hello.dll</code> on Windows.
      *
-     * @since 1.0
+     * @since 19.0
      */
     String value();
+
+    /**
+     * Specifies if static linking is required.
+     *
+     * @since 19.1.0
+     */
+    boolean requireStatic() default false;
+
+    /**
+     * Specifies the name of the libraries this library depends on.
+     *
+     * @since 20.1.0
+     */
+    String[] dependsOn() default {};
 }

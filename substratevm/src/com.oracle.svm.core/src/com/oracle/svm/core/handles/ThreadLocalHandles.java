@@ -24,9 +24,14 @@
  */
 package com.oracle.svm.core.handles;
 
+import java.util.Arrays;
+
+import jdk.graal.compiler.word.Word;
 import org.graalvm.nativeimage.ObjectHandle;
 import org.graalvm.word.SignedWord;
-import org.graalvm.word.WordFactory;
+
+import com.oracle.svm.core.NeverInline;
+import com.oracle.svm.core.Uninterruptible;
 
 /**
  * Implementation of local object handles, which are bound to a specific thread and can be created
@@ -36,13 +41,15 @@ import org.graalvm.word.WordFactory;
 public final class ThreadLocalHandles<T extends ObjectHandle> {
     private static final int INITIAL_NUMBER_OF_FRAMES = 4;
 
-    private static final int MIN_VALUE = Math.toIntExact(1 + nullHandle().rawValue());
-    private static final int MAX_VALUE = Integer.MAX_VALUE;
+    public static final int MIN_VALUE = Math.toIntExact(1 + nullHandle().rawValue());
+    public static final int MAX_VALUE = Integer.MAX_VALUE;
 
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     public static <U extends SignedWord> U nullHandle() {
-        return WordFactory.signed(0);
+        return Word.signed(0);
     }
 
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     public static <U extends ObjectHandle> boolean isInRange(U handle) {
         return handle.rawValue() >= MIN_VALUE && handle.rawValue() <= MAX_VALUE;
     }
@@ -57,6 +64,7 @@ public final class ThreadLocalHandles<T extends ObjectHandle> {
         objects = new Object[MIN_VALUE + initialNumberOfHandles];
     }
 
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     private static <T extends ObjectHandle> int toIndex(T handle) {
         return (int) handle.rawValue();
     }
@@ -67,9 +75,7 @@ public final class ThreadLocalHandles<T extends ObjectHandle> {
 
     public int pushFrame(int capacity) {
         if (frameCount == frameStack.length) {
-            int[] oldArray = frameStack;
-            frameStack = new int[oldArray.length * 2];
-            System.arraycopy(oldArray, 0, frameStack, 0, oldArray.length);
+            growFrameStack();
         }
         frameStack[frameCount] = top;
         frameCount++;
@@ -77,19 +83,37 @@ public final class ThreadLocalHandles<T extends ObjectHandle> {
         return frameCount;
     }
 
-    @SuppressWarnings("unchecked")
-    public T create(Object obj) {
-        if (obj == null) {
-            return (T) nullHandle();
-        }
-        ensureCapacity(1);
-        int index = top;
-        objects[index] = obj;
-        top++;
-        return (T) WordFactory.signed(index);
+    @NeverInline("Decrease code size of JNI entry points by not inlining allocations")
+    private void growFrameStack() {
+        frameStack = Arrays.copyOf(frameStack, frameStack.length * 2);
     }
 
     @SuppressWarnings("unchecked")
+    public T create(Object obj) {
+        if (obj == null) {
+            return nullHandle();
+        }
+        ensureCapacity(1);
+        T handle = tryCreateNonNull(obj);
+        assert !handle.equal(nullHandle());
+        return handle;
+    }
+
+    @SuppressWarnings("unchecked")
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public T tryCreateNonNull(Object obj) {
+        assert obj != null;
+        if (top >= objects.length) {
+            return nullHandle();
+        }
+        int index = top;
+        objects[index] = obj;
+        top++;
+        return Word.signed(index);
+    }
+
+    @SuppressWarnings("unchecked")
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     public <U> U getObject(T handle) {
         return (U) objects[toIndex(handle)];
     }
@@ -105,6 +129,7 @@ public final class ThreadLocalHandles<T extends ObjectHandle> {
         popFramesIncluding(frameCount);
     }
 
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     public void popFramesIncluding(int frame) {
         assert frame > 0 && frame <= frameCount;
         int previousTop = top;
@@ -116,12 +141,14 @@ public final class ThreadLocalHandles<T extends ObjectHandle> {
     }
 
     public void ensureCapacity(int capacity) {
-        if (top + capacity >= objects.length) {
-            Object[] oldArray = objects;
-            int newLength = oldArray.length * 2;
-            assert newLength >= top + capacity;
-            objects = new Object[newLength];
-            System.arraycopy(oldArray, 0, objects, 0, oldArray.length);
+        int minLength = top + capacity;
+        if (minLength >= objects.length) {
+            growCapacity(minLength);
         }
+    }
+
+    @NeverInline("Decrease code size of JNI entry points by not inlining allocations")
+    private void growCapacity(int minLength) {
+        objects = Arrays.copyOf(objects, minLength * 2);
     }
 }

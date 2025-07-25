@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,14 +40,16 @@
  */
 package com.oracle.truffle.api.dsl;
 
-import com.oracle.truffle.api.CompilerAsserts;
-import com.oracle.truffle.api.CompilerDirectives.CompilationFinal;
-import com.oracle.truffle.api.nodes.Node;
-
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
+
+import com.oracle.truffle.api.CompilerAsserts;
+import com.oracle.truffle.api.CompilerDirectives.CompilationFinal;
+import com.oracle.truffle.api.dsl.InlineSupport.InlineTarget;
+import com.oracle.truffle.api.nodes.Node;
+import com.oracle.truffle.api.nodes.NodeInterface;
 
 // Workaround for Eclipse formatter behaving different when running on JDK 9.
 // @formatter:off
@@ -71,11 +73,12 @@ import java.lang.annotation.Target;
  * </p>
  * <p>
  * The initializer expression of a cached parameter is defined using a subset of Java. This subset
- * includes field/parameter accesses, function calls, type exact infix comparisons (==, !=,
- * <, <=, >, >=) and integer literals. The return type of the initializer expression must be
- * assignable to the parameter type. If the annotated parameter type is derived from {@link Node}
- * then the {@link Node} instance is allowed to use the {@link Node#replace(Node)} method to replace
- * itself. Bound elements without receivers are resolved using the following order:
+ * includes field/parameter accesses, function calls, type exact infix comparisons (==, !=, &lt;, &lt;=,
+ * &gt;, &gt;=), logical negation (!), logical disjunction (||), null, true, false, and integer literals.
+ * The return type of the initializer expression must be assignable to the parameter type. If the
+ * annotated parameter type is derived from {@link Node} then the {@link Node} instance is allowed
+ * to use the {@link Node#replace(Node)} method to replace itself. Bound elements without receivers
+ * are resolved using the following order:
  * <ol>
  * <li>Dynamic and cached parameters of the enclosing specialization.</li>
  * <li>Fields defined using {@link NodeField} for the enclosing node.</li>
@@ -156,7 +159,7 @@ import java.lang.annotation.Target;
  * instantiated. Alternatively if the <code>replaces</code> relation is omitted then all
  * <code>doCached</code> instances remain but no new instances are created.
  *
- * <code>
+ * <pre>
  * &#064;Specialization(guards = &quot;operand == cachedOperand&quot;)
  * void doCached(int operand, {@code @Cached}(&quot;operand&quot;) int cachedOperand) {
  *    CompilerAsserts.compilationConstant(cachedOperand);
@@ -182,7 +185,7 @@ import java.lang.annotation.Target;
  * execute(3) => doNormal(3)    // new instantiation of doNormal due to limit overflow
  * execute(1) => doCached(1, 1)
  *
- * </code>
+ * </pre>
  *
  * </li>
  * <li>This next example shows how methods from the enclosing node can be used to initialize cached
@@ -194,7 +197,7 @@ import java.lang.annotation.Target;
  * }
  *
  * int transformLocal(int operand) {
- *     return operand & 0x42;
+ *     return operand &amp; 0x42;
  * }
  *
  * </li>
@@ -250,7 +253,16 @@ public @interface Cached {
      * @see Cached
      * @since 0.8 or earlier
      */
-    String value();
+    String value() default "create($parameters)";
+
+    /**
+     * Defines the initializer that is used for {@link GenerateUncached uncached} nodes or uncached
+     * versions of exported library messages.
+     *
+     * @see GenerateUncached
+     * @since 19.0
+     */
+    String uncached() default "getUncached($parameters)";
 
     /**
      * Specifies the number of array dimensions to be marked as {@link CompilationFinal compilation
@@ -269,5 +281,164 @@ public @interface Cached {
      * @see CompilationFinal#dimensions()
      */
     int dimensions() default -1;
+
+    /**
+     * Allows the {@link #value()} to be used for {@link #uncached()}. This is useful if the
+     * expression is the same for {@link #value()} and {@link #uncached()}. By setting
+     * {@link #allowUncached()} to <code>true</code> it is not necessary to repeat the
+     * {@link #value()} expression in the {@link #uncached()} expression. This flag cannot be set in
+     * combination with {@link #uncached()}.
+     *
+     * @since 19.0
+     */
+    boolean allowUncached() default false;
+
+    /**
+     * Enables inlining of the cached parameter if supported. The type of a cached parameter is
+     * considered inlinable if it declares a static method called <code>inline</code> with a single
+     * parameter of type {@link InlineTarget}. For specializing DSL nodes the {@link GenerateInline}
+     * is sufficient to be enabled for the cached target type, the static inline method will be
+     * resolved automatically from the generated code of the target type.
+     * <p>
+     * Inlining is enabled by default if:
+     * <ul>
+     * <li>{@link GenerateInline} is set to <code>true</code> for the declaring specializing node
+     * type.
+     * <li>The {@link GenerateCached#alwaysInlineCached()} property is set to <code>true</code> for
+     * the declaring specializing node type.
+     * <li>If a target parameter type is a specializing node and has {@link GenerateInline} enabled
+     * but {@link GenerateCached} disabled.
+     * </ul>
+     * Else, inlining is disabled by default. If a node is inlinable but is not inlined by default,
+     * the DSL will emit a warning to indicate this possibility.
+     *
+     * @see InlineSupport
+     * @since 23.0
+     */
+    boolean inline() default false;
+
+    /**
+     * Specifies an alternative method name for node object inlining. Instead of looking up the
+     * inline method from the receiver type use an accessible enclosing method of the given name
+     * instead. The method must have a single parameter {@link InlineTarget} and return a type
+     * compatible to the cached type. This can be useful if you want to route calls to the inline
+     * method through an abstraction that does not allow direct type access to the node classes. It
+     * is expected that this property is only needed rarely.
+     *
+     * @since 23.0
+     */
+    String inlineMethod() default "";
+
+    /**
+     * Specifies the bindings used for the $parameters variable in cached or uncached initializers.
+     *
+     * @since 19.0
+     */
+    String[] parameters() default {};
+
+    /**
+     * If set to <code>true</code> then weak references will be used to refer to this cached value
+     * in the generated node. The default value is <code>false</code>. The weak cached parameter is
+     * guaranteed to not become <code>null</code> in guards or specialization method invocations. If
+     * a weak cached parameter gets collected by the GC, then any compiled code remain unaffected
+     * and the specialization instance will not be removed. Specializations with collected cached
+     * references continue to count to the specialization limit. This is necessary to provide an
+     * upper bound for the number of invalidations that may happen for this specialization.
+     * <p>
+     * A weak cached parameter implicitly adds a <code>weakRef.get() != null</code> guard that is
+     * invoked before the cached value is referenced for the first time. This means that
+     * specializations which previously did not result in fall-through behavior may now
+     * fall-through. This is important if used in combination with {@link Fallback}. Weak cached
+     * parameters that are used as part of {@link GenerateUncached uncached} nodes, execute the
+     * cached initializer for each execution and therefore implicitly do not use a weak reference.
+     * <p>
+     * Example usage:
+     *
+     * <pre>
+     * &#64;GenerateUncached
+     * abstract class WeakInlineCacheNode extends Node {
+     *
+     *     abstract Object execute(Object arg0);
+     *
+     *     &#64;Specialization(guards = "cachedArg.equals(arg)", limit = "3")
+     *     Object s0(String arg,
+     *                     &#64;Cached(value = "arg", weak = true) String cachedArg) {
+     *         assertNotNull(cachedStorage);
+     *         return arg;
+     *     }
+     * }
+     * </pre>
+     *
+     * @see com.oracle.truffle.api.utilities.TruffleWeakReference
+     * @since 20.2
+     */
+    boolean weak() default false;
+
+    /**
+     * Specifies whether the cached parameter values of type {@link NodeInterface} should be adopted
+     * as its child by the current node. The default value is <code>true</code>, therefore all
+     * cached values of type {@link NodeInterface} and arrays of the same type are adopted. If the
+     * value is set to <code>false</code>, then no adoption is performed. It is useful to set adopt
+     * to <code>false</code> when nodes need to be referenced more than once in the AST.
+     * <p>
+     * If the type of the field is an {@link NodeInterface} array and adopt is set to
+     * <code>false</code>, then the compilation final {@link Cached#dimensions() dimensions}
+     * attribute needs to be specified explicitly.
+     *
+     * @since 20.2
+     */
+    boolean adopt() default true;
+
+    /**
+     * Returns <code>true</code> if the cache initializer never returns the default value of its
+     * parameter type at runtime. For reference types the default value is <code>null</code>, for
+     * primitive values 0. By default, default values in cache initializers are allowed. The DSL may
+     * use the default state of a cache for optimizations in the generated code layout. The DSL
+     * informs with a warning when the use of this property has an effect and is recommended to be
+     * set. Alternatively to specifying {@link #neverDefault()}, the {@link NeverDefault} annotation
+     * may be used on the method or field bound by the cache initializer.
+     * <p>
+     * If a cache initializer returns the illegal default value when this property is set to
+     * <code>true</code> then the node will throw an {@link IllegalStateException} at runtime.
+     * <p>
+     *
+     * @see NeverDefault
+     * @since 23.0
+     */
+    boolean neverDefault() default false;
+
+    /**
+     * Allows sharing between multiple Cached parameters between multiple specializations or
+     * exported library messages. If no sharing is desired then the {@link Cached cached} parameter
+     * can be annotated with {@link Exclusive exclusive}. The DSL will indicate sharing
+     * opportunities to the user by showing a warning.
+     *
+     * @see Exclusive
+     * @since 19.0
+     */
+    @Retention(RetentionPolicy.CLASS)
+    @Target({ElementType.PARAMETER})
+    public @interface Shared {
+
+        /**
+         * Specifies the sharing group of the shared cached element. If not specified then the
+         * parameter name will be used as a group.
+         *
+         * @since 19.0
+         */
+        String value() default "";
+
+    }
+
+    /**
+     * Disallows any sharing with other cached parameters. The DSL will indicate sharing
+     * opportunities to the user by showing a warning.
+     *
+     * @since 19.0
+     */
+    @Retention(RetentionPolicy.CLASS)
+    @Target({ElementType.PARAMETER, ElementType.METHOD, ElementType.TYPE})
+    public @interface Exclusive {
+    }
 
 }

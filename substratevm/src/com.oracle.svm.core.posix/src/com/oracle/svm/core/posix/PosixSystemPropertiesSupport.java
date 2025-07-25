@@ -24,21 +24,15 @@
  */
 package com.oracle.svm.core.posix;
 
-import static com.oracle.svm.core.posix.headers.Limits.MAXPATHLEN;
-import static com.oracle.svm.core.posix.headers.Pwd.getpwuid;
-
-import org.graalvm.nativeimage.Platform;
-import org.graalvm.nativeimage.Platforms;
-import org.graalvm.nativeimage.StackValue;
+import jdk.graal.compiler.word.Word;
 import org.graalvm.nativeimage.c.type.CCharPointer;
 import org.graalvm.nativeimage.c.type.CTypeConversion;
-import org.graalvm.word.WordFactory;
 
+import com.oracle.svm.core.graal.stackvalue.UnsafeStackValue;
 import com.oracle.svm.core.jdk.SystemPropertiesSupport;
-import com.oracle.svm.core.posix.headers.Pwd.passwd;
+import com.oracle.svm.core.posix.headers.Limits;
 import com.oracle.svm.core.posix.headers.Unistd;
 
-@Platforms({Platform.LINUX_AND_JNI.class, Platform.DARWIN_AND_JNI.class})
 public abstract class PosixSystemPropertiesSupport extends SystemPropertiesSupport {
 
     /*
@@ -48,21 +42,21 @@ public abstract class PosixSystemPropertiesSupport extends SystemPropertiesSuppo
 
     @Override
     protected String userNameValue() {
-        passwd pwent = getpwuid(Unistd.getuid());
-        return pwent.isNull() ? "?" : CTypeConversion.toJavaString(pwent.pw_name());
+        String name = PosixUtils.getUserName(Unistd.getuid());
+        return name == null ? "?" : name;
     }
 
     @Override
     protected String userHomeValue() {
-        passwd pwent = getpwuid(Unistd.getuid());
-        return pwent.isNull() ? "?" : CTypeConversion.toJavaString(pwent.pw_dir());
+        String dir = PosixUtils.getUserDir(Unistd.getuid());
+        return dir == null ? "?" : dir;
     }
 
     @Override
     protected String userDirValue() {
-        int bufSize = MAXPATHLEN();
-        CCharPointer buf = StackValue.get(bufSize);
-        if (Unistd.getcwd(buf, WordFactory.unsigned(bufSize)).isNonNull()) {
+        int bufSize = Limits.MAXPATHLEN();
+        CCharPointer buf = UnsafeStackValue.get(bufSize);
+        if (Unistd.getcwd(buf, Word.unsigned(bufSize)).isNonNull()) {
             return CTypeConversion.toJavaString(buf);
         } else {
             throw new java.lang.Error("Properties init: Could not determine current working directory.");

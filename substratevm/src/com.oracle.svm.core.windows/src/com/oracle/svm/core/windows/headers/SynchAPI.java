@@ -24,11 +24,11 @@
  */
 package com.oracle.svm.core.windows.headers;
 
-import org.graalvm.nativeimage.Platform;
-import org.graalvm.nativeimage.Platforms;
 import org.graalvm.nativeimage.c.CContext;
 import org.graalvm.nativeimage.c.constant.CConstant;
 import org.graalvm.nativeimage.c.function.CFunction;
+import org.graalvm.nativeimage.c.function.CFunction.Transition;
+import org.graalvm.nativeimage.c.type.CIntPointer;
 import org.graalvm.word.PointerBase;
 
 //Checkstyle: stop
@@ -37,12 +37,8 @@ import org.graalvm.word.PointerBase;
  * Definitions for Windows syncapi.h header file
  */
 @CContext(WindowsDirectives.class)
-@Platforms(Platform.WINDOWS.class)
 public class SynchAPI {
 
-    /**
-     * Create an Event Object
-     */
     @CFunction
     public static native WinBase.HANDLE CreateEventA(PointerBase lpEventAttributes, int bManualReset, int bInitialState, PointerBase lpName);
 
@@ -59,9 +55,10 @@ public class SynchAPI {
     @CConstant
     public static native int INFINITE();
 
-    /**
+    /*
      * Result codes for WaitForSingleObject
      */
+
     @CConstant
     public static native int WAIT_OBJECT_0();
 
@@ -73,4 +70,15 @@ public class SynchAPI {
 
     @CConstant
     public static native int WAIT_FAILED();
+
+    public static class NoTransitions {
+        @CFunction(transition = Transition.NO_TRANSITION)
+        public static native void Sleep(int dwMilliseconds);
+
+        @CFunction(transition = Transition.NO_TRANSITION)
+        public static native int WaitForSingleObject(WinBase.HANDLE hEvent, int dwMilliseconds);
+
+        @CFunction(transition = Transition.NO_TRANSITION)
+        public static native int ReleaseSemaphore(WinBase.HANDLE hSemaphore, int lReleaseCount, CIntPointer lpPreviousCount);
+    }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2023, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,20 +24,21 @@
  */
 package com.oracle.svm.core.threadlocal;
 
-//Checkstyle: allow reflection
-
-import static com.oracle.svm.core.util.VMError.shouldNotReachHere;
+import static com.oracle.svm.core.util.VMError.shouldNotReachHereUnexpectedInput;
 
 import java.util.function.IntSupplier;
 
+import org.graalvm.nativeimage.IsolateThread;
 import org.graalvm.nativeimage.Platform;
 import org.graalvm.nativeimage.Platforms;
 import org.graalvm.word.LocationIdentity;
 import org.graalvm.word.WordBase;
 
-import com.oracle.svm.core.FrameAccess;
-import com.oracle.svm.core.annotate.UnknownObjectField;
-import com.oracle.svm.core.annotate.UnknownPrimitiveField;
+import com.oracle.svm.core.BuildPhaseProvider.ReadyForCompilation;
+import com.oracle.svm.core.config.ConfigurationValues;
+import com.oracle.svm.core.graal.thread.LoadVMThreadLocalNode;
+import com.oracle.svm.core.graal.thread.StoreVMThreadLocalNode;
+import com.oracle.svm.core.heap.UnknownPrimitiveField;
 
 import jdk.vm.ci.meta.JavaKind;
 
@@ -62,7 +63,7 @@ public class VMThreadLocalInfo {
         } else if (threadLocalClass == FastThreadLocalObject.class) {
             return Object.class;
         } else {
-            throw shouldNotReachHere();
+            throw shouldNotReachHereUnexpectedInput(threadLocalClass); // ExcludeFromJacocoGeneratedReport
         }
     }
 
@@ -72,14 +73,31 @@ public class VMThreadLocalInfo {
     public final boolean isObject;
     public final JavaKind storageKind;
     public final Class<?> valueClass;
-    @UnknownObjectField(types = {String.class}) public String name;
-    @UnknownPrimitiveField public long offset;
-    @UnknownPrimitiveField public int sizeInBytes;
+    public final int maxOffset;
+    public final boolean allowFloatingReads;
+    public final String name;
+
+    /**
+     * Offset of this thread local variable from its holder thread {@link IsolateThread} data
+     * structure. It is a compile time constant, determined by collecting and sorting all thread
+     * locals, and used during lowering of {@link FastThreadLocal} specific operations, e.g.,
+     * {@link LoadVMThreadLocalNode}, {@link StoreVMThreadLocalNode} and others.
+     */
+    @UnknownPrimitiveField(availability = ReadyForCompilation.class) public int offset;
+    /**
+     * How many bytes does this thread local need for storage. Just like the {@link #offset} this is
+     * a compile-time constant, determined by taking into account the {@link #storageKind} or via
+     * the {@link #sizeSupplier}, and it is used to lay out the thread locals in memory.
+     */
+    @UnknownPrimitiveField(availability = ReadyForCompilation.class) public int sizeInBytes;
 
     @Platforms(Platform.HOSTED_ONLY.class)
     public VMThreadLocalInfo(FastThreadLocal threadLocal) {
         this.threadLocalClass = threadLocal.getClass();
         this.locationIdentity = threadLocal.getLocationIdentity();
+        this.maxOffset = threadLocal.getMaxOffset();
+        this.allowFloatingReads = threadLocal.getAllowFloatingReads();
+        this.name = threadLocal.getName();
 
         if (threadLocalClass == FastThreadLocalBytes.class) {
             sizeSupplier = ((FastThreadLocalBytes<?>) threadLocal).getSizeSupplier();
@@ -100,13 +118,13 @@ public class VMThreadLocalInfo {
         } else if (threadLocalClass == FastThreadLocalLong.class) {
             storageKind = JavaKind.Long;
         } else if (threadLocalClass == FastThreadLocalWord.class) {
-            storageKind = FrameAccess.getWordKind();
+            storageKind = ConfigurationValues.getWordKind();
         } else if (threadLocalClass == FastThreadLocalObject.class) {
             storageKind = JavaKind.Object;
         } else if (threadLocalClass == FastThreadLocalBytes.class) {
             storageKind = null;
         } else {
-            throw shouldNotReachHere();
+            throw shouldNotReachHereUnexpectedInput(threadLocalClass); // ExcludeFromJacocoGeneratedReport
         }
 
         /* Initialize with illegal value for assertion checking. */

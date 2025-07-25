@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -44,6 +44,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 
 import org.graalvm.polyglot.Context;
+import org.graalvm.polyglot.HostAccess.Implementable;
 import org.junit.Assume;
 import org.junit.BeforeClass;
 import org.junit.ClassRule;
@@ -51,15 +52,12 @@ import org.junit.Test;
 
 import com.oracle.truffle.api.CallTarget;
 import com.oracle.truffle.api.TruffleOptions;
-import com.oracle.truffle.api.interop.ForeignAccess;
-import com.oracle.truffle.api.interop.Message;
-import com.oracle.truffle.api.interop.TruffleObject;
 import com.oracle.truffle.api.source.Source;
 import com.oracle.truffle.tck.TruffleRunner;
 
 public class StringAsInterfaceNFITest {
     private static StdLib stdlib;
-    private static TruffleObject rawStdLib;
+    private static Object rawStdLib;
 
     @ClassRule public static TruffleRunner.RunWithPolyglotRule runWithPolyglot = new TruffleRunner.RunWithPolyglotRule(Context.newBuilder().allowNativeAccess(true));
 
@@ -71,24 +69,26 @@ public class StringAsInterfaceNFITest {
             return;
         }
 
-        CallTarget load = runWithPolyglot.getTruffleTestEnv().parse(Source.newBuilder("nfi", "default {\n" + //
+        CallTarget load = runWithPolyglot.getTruffleTestEnv().parseInternal(Source.newBuilder("nfi", "default {\n" + //
                         "  strdup(string):string;\n" + //
                         "  malloc(UINT32):pointer;\n" + //
                         "  free(pointer):void;\n" + //
                         "}", "(load default)" //
-        ).build());
-        rawStdLib = (TruffleObject) load.call();
+        ).internal(true).build());
+        rawStdLib = load.call();
         stdlib = runWithPolyglot.getPolyglotContext().asValue(rawStdLib).as(StdLib.class);
     }
 
+    @Implementable
     interface StdLib {
-        long malloc(int size);
+        Object malloc(int size);
 
-        void free(long pointer);
+        void free(Object pointer);
 
         String strdup(String orig);
     }
 
+    @Implementable
     interface Strndup {
         String strndup(String orig, int len);
     }
@@ -111,25 +111,25 @@ public class StringAsInterfaceNFITest {
     @Test
     public void testAllocAndRelease() {
         assumptions();
-        long mem = stdlib.malloc(512);
+        Object mem = stdlib.malloc(512);
         stdlib.free(mem);
     }
 
     @Test
     public void testAllocAndReleaseWithInvoke() throws Exception {
         assumptions();
-        Object mem = ForeignAccess.sendInvoke(Message.INVOKE.createNode(), rawStdLib, "malloc", 512);
+        Object mem = NFITest.UNCACHED_INTEROP.invokeMember(rawStdLib, "malloc", 512);
         assertNotNull("some memory allocated", mem);
-        ForeignAccess.sendInvoke(Message.INVOKE.createNode(), rawStdLib, "free", mem);
+        NFITest.UNCACHED_INTEROP.invokeMember(rawStdLib, "free", mem);
     }
 
     @Test
     public void canViewDefaultLibraryAsAnotherInterface() {
         assumptions();
-        CallTarget load = runWithPolyglot.getTruffleTestEnv().parse(Source.newBuilder("nfi", "default {\n" + //
+        CallTarget load = runWithPolyglot.getTruffleTestEnv().parseInternal(Source.newBuilder("nfi", "default {\n" + //
                         "  strndup(string, UINT32):string;\n" + //
                         "}", "(load default)" //
-        ).build());
+        ).internal(true).build());
         Strndup second = runWithPolyglot.getPolyglotContext().asValue(load.call()).as(Strndup.class);
 
         String copy = stdlib.strdup("Hello World!");

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2016, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -43,7 +43,9 @@ package com.oracle.truffle.api.interop;
 import com.oracle.truffle.api.CompilerDirectives;
 
 /**
- * An exception thrown if a {@link TruffleObject} does not support a {@link Message}.
+ * An exception thrown if a {@link TruffleObject} does not support a interop message. If this
+ * exception is thrown then the receiver does not support the message at all and it is not supported
+ * for any arguments given to the message.
  *
  * @since 0.11
  */
@@ -51,37 +53,60 @@ public final class UnsupportedMessageException extends InteropException {
 
     private static final long serialVersionUID = 1857745390734085182L;
 
-    private final Message message;
+    private UnsupportedMessageException(Throwable cause) {
+        super(null, cause);
+    }
 
-    private UnsupportedMessageException(Message message) {
-        super("Message not supported: " + message.toString());
-        this.message = message;
+    private UnsupportedMessageException() {
+        super(null);
     }
 
     /**
-     * Returns the {@link Message} that was not supported by the {@link TruffleObject}.
+     * {@inheritDoc}
      *
-     * @return the unsupported message
-     * @since 0.11
+     * @since 19.0
      */
-    public Message getUnsupportedMessage() {
-        return message;
+    @Override
+    public String getMessage() {
+        return "Message not supported.";
     }
 
     /**
-     * Raises an {@link UnsupportedMessageException}, hidden as a {@link RuntimeException}, which
-     * allows throwing it without an explicit throws declaration. The {@link ForeignAccess} methods
-     * (e.g. <code> ForeignAccess.sendRead </code>) catch the exceptions and re-throw them as
-     * checked exceptions.
+     * Creates an {@link UnsupportedMessageException} to indicate that an {@link InteropLibrary
+     * interop} message is not supported.
+     * <p>
+     * This method is designed to be used in {@link CompilerDirectives#inCompiledCode() compiled}
+     * code paths.
      *
-     * @param message message that is not supported
-     *
-     * @return the exception
-     * @since 0.11
+     * @since 19.0
      */
-    public static RuntimeException raise(Message message) {
-        CompilerDirectives.transferToInterpreter();
-        return silenceException(RuntimeException.class, new UnsupportedMessageException(message));
+    public static UnsupportedMessageException create() {
+        return new UnsupportedMessageException();
+    }
+
+    /**
+     * Creates an {@link UnsupportedMessageException} to indicate that an {@link InteropLibrary
+     * interop} message is not supported.
+     * <p>
+     * In addition a cause may be provided. The cause should only be set if the guest language code
+     * caused this problem. An example for this is a language specific proxy mechanism that invokes
+     * guest language code to describe an object. If the guest language code fails to execute and
+     * this interop exception is a valid interpretation of the error, then the error should be
+     * provided as cause. The cause can then be used by the source language as new exception cause
+     * if the {@link InteropException} is translated to a source language error. If the
+     * {@link InteropException} is discarded, then the cause will most likely get discarded by the
+     * source language as well. Note that the cause must be of type
+     * {@link com.oracle.truffle.api.exception.AbstractTruffleException} otherwise an
+     * {@link IllegalArgumentException} is thrown.
+     * <p>
+     * This method is designed to be used in {@link CompilerDirectives#inCompiledCode() compiled}
+     * code paths.
+     *
+     * @param cause the guest language exception that caused the error.
+     * @since 20.2
+     */
+    public static UnsupportedMessageException create(Throwable cause) {
+        return new UnsupportedMessageException(cause);
     }
 
 }

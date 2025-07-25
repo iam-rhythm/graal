@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates.
+ * Copyright (c) 2017, 2022, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -29,25 +29,30 @@
  */
 #include <stdio.h>
 #include <stdint.h>
-#include "syscall.h"
+#include "exit.h"
 
+#if defined(_WIN32)
+#define ABORT_STATUS 0xC0000409
+#else
 #define ABORT_STATUS 134
-
-#ifndef __linux__
-#define SYS_exit_group 231
 #endif
 
 void __sulong_print_stacktrace();
 int __sulong_should_print_stacktrace_on_abort();
 
-void abort() {
-  int64_t result;
-  if (__sulong_should_print_stacktrace_on_abort()) {
-    fprintf(stderr, "abort()\n\n");
-    __sulong_print_stacktrace();
-  }
-  __SYSCALL_1(result, SYS_exit_group, ABORT_STATUS);
-  for (;;) {
-    __SYSCALL_1(result, SYS_exit_group, ABORT_STATUS);
-  }
+void __sulong_abort() {
+    if (__sulong_should_print_stacktrace_on_abort()) {
+        fprintf(stderr, "abort()\n\n");
+        __sulong_print_stacktrace();
+    }
+    _EXIT(ABORT_STATUS);
+    for (;;) {
+        _EXIT(ABORT_STATUS);
+    }
 }
+
+#if !defined(_WIN32)
+void abort() {
+    __sulong_abort();
+}
+#endif

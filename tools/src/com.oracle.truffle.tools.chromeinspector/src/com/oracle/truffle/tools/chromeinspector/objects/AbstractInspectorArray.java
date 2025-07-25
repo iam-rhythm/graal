@@ -24,53 +24,57 @@
  */
 package com.oracle.truffle.tools.chromeinspector.objects;
 
-import com.oracle.truffle.api.interop.ForeignAccess;
-import com.oracle.truffle.api.interop.MessageResolution;
-import com.oracle.truffle.api.interop.Resolve;
+import com.oracle.truffle.api.interop.InteropLibrary;
+import com.oracle.truffle.api.interop.InvalidArrayIndexException;
 import com.oracle.truffle.api.interop.TruffleObject;
-import com.oracle.truffle.api.nodes.Node;
+import com.oracle.truffle.api.interop.UnsupportedMessageException;
+import com.oracle.truffle.api.library.ExportLibrary;
+import com.oracle.truffle.api.library.ExportMessage;
+import com.oracle.truffle.api.utilities.TriState;
 
 /**
  * A base class for arrays returned by Inspector module.
  */
-@MessageResolution(receiverType = AbstractInspectorArray.class)
+@ExportLibrary(InteropLibrary.class)
 abstract class AbstractInspectorArray implements TruffleObject {
 
-    @Override
-    public ForeignAccess getForeignAccess() {
-        return AbstractInspectorArrayForeign.ACCESS;
+    @ExportMessage
+    abstract int getArraySize();
+
+    @ExportMessage
+    abstract Object readArrayElement(long index) throws InvalidArrayIndexException;
+
+    @ExportMessage
+    @SuppressWarnings("unused")
+    void writeArrayElement(long index, Object value) throws InvalidArrayIndexException, UnsupportedMessageException {
+        throw UnsupportedMessageException.create();
     }
 
-    public static boolean isInstance(TruffleObject obj) {
-        return obj instanceof AbstractInspectorArray;
+    @SuppressWarnings("static-method")
+    @ExportMessage
+    final boolean hasArrayElements() {
+        return true;
     }
 
-    abstract int getLength();
-
-    abstract Object getElementAt(int index);
-
-    @Resolve(message = "HAS_SIZE")
-    abstract static class InspectorArrayHasSizeNode extends Node {
-
-        @SuppressWarnings("unused")
-        public Object access(AbstractInspectorArray array) {
-            return true;
-        }
+    @ExportMessage
+    boolean isArrayElementReadable(long index) {
+        return index >= 0 && index < getArraySize();
     }
 
-    @Resolve(message = "GET_SIZE")
-    abstract static class InspectorArrayGetSizeNode extends Node {
-
-        public Object access(AbstractInspectorArray array) {
-            return array.getLength();
-        }
+    @ExportMessage
+    boolean isArrayElementModifiable(@SuppressWarnings("unused") long index) {
+        return false;
     }
 
-    @Resolve(message = "READ")
-    abstract static class InspectorArrayReadNode extends Node {
-
-        public Object access(AbstractInspectorArray array, int index) {
-            return array.getElementAt(index);
-        }
+    @ExportMessage
+    boolean isArrayElementInsertable(@SuppressWarnings("unused") long index) {
+        return false;
     }
+
+    @ExportMessage
+    abstract TriState isIdenticalOrUndefined(Object other);
+
+    @ExportMessage
+    abstract int identityHashCode();
+
 }

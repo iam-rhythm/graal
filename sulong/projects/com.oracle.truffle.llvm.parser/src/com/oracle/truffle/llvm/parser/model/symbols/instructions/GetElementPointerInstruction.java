@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2018, Oracle and/or its affiliates.
+ * Copyright (c) 2016, 2022, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -29,18 +29,14 @@
  */
 package com.oracle.truffle.llvm.parser.model.symbols.instructions;
 
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.List;
-
+import com.oracle.truffle.llvm.parser.model.SymbolImpl;
 import com.oracle.truffle.llvm.parser.model.SymbolTable;
-import com.oracle.truffle.llvm.parser.model.symbols.constants.GetElementPointerConstant;
 import com.oracle.truffle.llvm.parser.model.visitors.SymbolVisitor;
 import com.oracle.truffle.llvm.runtime.types.Type;
-import com.oracle.truffle.llvm.parser.model.SymbolImpl;
-import com.oracle.truffle.llvm.parser.model.ValueSymbol;
 
 public final class GetElementPointerInstruction extends ValueInstruction {
+
+    private final Type baseType;
 
     private SymbolImpl base;
 
@@ -48,8 +44,9 @@ public final class GetElementPointerInstruction extends ValueInstruction {
 
     private final boolean isInbounds;
 
-    private GetElementPointerInstruction(Type type, boolean isInbounds, int numIndices) {
+    private GetElementPointerInstruction(Type type, Type baseType, boolean isInbounds, int numIndices) {
         super(type);
+        this.baseType = baseType;
         this.indices = new SymbolImpl[numIndices];
         this.isInbounds = isInbounds;
     }
@@ -59,23 +56,16 @@ public final class GetElementPointerInstruction extends ValueInstruction {
         visitor.visit(this);
     }
 
-    @Override
-    public int getAlign() {
-        if (base instanceof ValueSymbol) {
-            return ((ValueSymbol) base).getAlign();
-        } else if (base instanceof GetElementPointerConstant) {
-            return ((ValueSymbol) ((GetElementPointerConstant) base).getBasePointer()).getAlign();
-        } else {
-            throw new IllegalStateException("Unknown Source of Alignment: " + base.getClass());
-        }
-    }
-
     public SymbolImpl getBasePointer() {
         return base;
     }
 
-    public List<SymbolImpl> getIndices() {
-        return Collections.unmodifiableList(Arrays.asList(indices));
+    public Type getBaseType() {
+        return baseType;
+    }
+
+    public SymbolImpl[] getIndices() {
+        return indices;
     }
 
     public boolean isInbounds() {
@@ -94,11 +84,11 @@ public final class GetElementPointerInstruction extends ValueInstruction {
         }
     }
 
-    public static GetElementPointerInstruction fromSymbols(SymbolTable symbols, Type type, int pointer, List<Integer> indices, boolean isInbounds) {
-        final GetElementPointerInstruction inst = new GetElementPointerInstruction(type, isInbounds, indices.size());
+    public static GetElementPointerInstruction fromSymbols(SymbolTable symbols, Type type, Type baseType, int pointer, int[] indices, boolean isInbounds) {
+        final GetElementPointerInstruction inst = new GetElementPointerInstruction(type, baseType, isInbounds, indices.length);
         inst.base = symbols.getForwardReferenced(pointer, inst);
-        for (int i = 0; i < indices.size(); i++) {
-            inst.indices[i] = symbols.getForwardReferenced(indices.get(i), inst);
+        for (int i = 0; i < indices.length; i++) {
+            inst.indices[i] = symbols.getForwardReferenced(indices[i], inst);
         }
         return inst;
     }

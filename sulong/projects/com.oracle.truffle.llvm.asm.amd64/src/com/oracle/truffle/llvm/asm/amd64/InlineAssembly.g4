@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2018, Oracle and/or its affiliates.
+ * Copyright (c) 2016, 2025, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -27,7 +27,7 @@
  * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
  * OF THE POSSIBILITY OF SUCH DAMAGE.
  */
- 
+
 /*
  * The parser and lexer need to be generated using 'mx create-asm-parser';
  */
@@ -38,12 +38,7 @@ grammar InlineAssembly;
 {
 // DO NOT MODIFY - generated from InlineAssembly.g4 using "mx create-asm-parser"
 
-import com.oracle.truffle.api.source.Source;
-import com.oracle.truffle.llvm.nodes.func.LLVMInlineAssemblyRootNode;
-import com.oracle.truffle.llvm.runtime.debug.scope.LLVMSourceLocation;
-import com.oracle.truffle.llvm.runtime.LLVMContext;
-import com.oracle.truffle.llvm.runtime.except.LLVMParserException;
-import com.oracle.truffle.llvm.runtime.types.Type;
+import com.oracle.truffle.llvm.runtime.nodes.func.LLVMInlineAssemblyRootNode;
 }
 
 @lexer::header
@@ -65,11 +60,11 @@ private static final class BailoutErrorListener extends BaseErrorListener {
     @Override
     public void syntaxError(Recognizer<?, ?> recognizer, Object offendingSymbol, int line, int charPositionInLine, String msg, RecognitionException e) {
         String location = "-- line " + line + " col " + (charPositionInLine + 1) + ": ";
-        throw new LLVMParserException(String.format("ASM error in %s:\n%s%s", snippet, location, msg));
+        throw new AsmParseException(String.format("ASM error in %s:\n%s%s", snippet, location, msg));
     }
 }
 
-public static LLVMInlineAssemblyRootNode parseInlineAssembly(LLVMContext context, LLVMSourceLocation sourceSection, String asmSnippet, String asmFlags, Type[] argTypes, Type retType, Type[] retTypes, int[] retOffsets) {
+public static LLVMInlineAssemblyRootNode parseInlineAssembly(String asmSnippet, AsmFactory factory) {
     InlineAssemblyLexer lexer = new InlineAssemblyLexer(CharStreams.fromString(asmSnippet));
     InlineAssemblyParser parser = new InlineAssemblyParser(new CommonTokenStream(lexer));
     lexer.removeErrorListeners();
@@ -78,7 +73,7 @@ public static LLVMInlineAssemblyRootNode parseInlineAssembly(LLVMContext context
     lexer.addErrorListener(listener);
     parser.addErrorListener(listener);
     parser.snippet = asmSnippet;
-    parser.factory = new AsmFactory(context, sourceSection, argTypes, asmFlags, retType, retTypes, retOffsets);
+    parser.factory = factory;
     parser.inline_assembly();
     if (parser.root == null) {
         throw new IllegalStateException("no roots produced by inline assembly snippet");
@@ -98,7 +93,7 @@ inline_assembly :
     )
     assembly_instruction
     ( ( ';' | '\n' )
-      ( prefix
+      ( prefix ( ';' )?
       |                                          { factory.setPrefix(null); }
       )
       ( assembly_instruction )?
@@ -120,7 +115,8 @@ prefix :
   ;
 
 assembly_instruction :
-  ( zero_op
+  ( directive
+  | zero_op
   | unary_op8
   | unary_op16
   | unary_op32
@@ -184,6 +180,10 @@ jump :
   | 'loopz'
   )
   bta=operand64
+  ;
+
+directive :
+  op='.p2align' low_order_bits=number (',' padding_byte=number (',' max_bytes=number)?)? /* no-op */
   ;
 
 zero_op :
@@ -322,10 +322,13 @@ unary_op :
   | 'setpo'
   | 'sets'
   | 'setz'
+  | 'fstcw'
   | 'push'
   | 'pop'
   | 'cmpxchg8b'
   | 'cmpxchg16b'
+  | 'fstcw'
+  | 'fnstcw'
   )
   operand                                        { factory.createUnaryOperationImplicitSize($op.getText(), $operand.op); }
   ;
@@ -697,7 +700,7 @@ memory_reference returns [AsmMemoryOperand op] :
     )
     ( '('
       ( operand
-      	                                         { base = $operand.op; } 
+      	                                         { base = $operand.op; }
       )?
       ( ',' operand                              { offset = $operand.op; }
         ( ',' number                             { scale = (int) $number.n; }
@@ -707,7 +710,7 @@ memory_reference returns [AsmMemoryOperand op] :
     )?
   | '('
     ( operand
-      	                                         { base = $operand.op; } 
+      	                                         { base = $operand.op; }
     )?
     ( ',' operand                                { offset = $operand.op; }
       ( ',' number                               { scale = (int) $number.n; }
@@ -899,4 +902,6 @@ BIN_NUMBER : '0b' BIN_DIGIT+;
 HEX_NUMBER : '0x' HEX_DIGIT+;
 NUMBER : '-'? DIGIT+;
 
-WS : ' '+ -> skip;
+WS : ( ' ' | '\t' )+ -> skip;
+COMMENT : '/*' .*? '*/' -> skip;
+LINE_COMMENT : '#' ~[\r\n]* -> skip;

@@ -29,46 +29,57 @@ import java.util.List;
 import org.graalvm.collections.EconomicMap;
 import org.graalvm.collections.EconomicSet;
 import org.graalvm.collections.Equivalence;
-import org.graalvm.compiler.core.common.util.FrequencyEncoder;
-import org.graalvm.compiler.core.common.util.TypeConversion;
-import org.graalvm.compiler.core.common.util.UnsafeArrayTypeWriter;
-import org.graalvm.compiler.graph.NodeSourcePosition;
 
-import com.oracle.svm.core.heap.PinnedAllocator;
+import com.oracle.svm.core.Uninterruptible;
+import com.oracle.svm.core.c.NonmovableArray;
+import com.oracle.svm.core.c.NonmovableArrays;
+import com.oracle.svm.core.c.NonmovableObjectArray;
+import com.oracle.svm.core.nmt.NmtCategory;
 import com.oracle.svm.core.util.ByteArrayReader;
+
+import jdk.graal.compiler.core.common.util.FrequencyEncoder;
+import jdk.graal.compiler.core.common.util.TypeConversion;
+import jdk.graal.compiler.core.common.util.UnsafeArrayTypeWriter;
+import jdk.graal.compiler.graph.NodeSourcePosition;
 
 public class DeoptimizationSourcePositionEncoder {
 
-    private final PinnedAllocator allocator;
     private final FrequencyEncoder<Object> objectConstants;
 
-    protected int[] deoptimizationStartOffsets;
-    protected byte[] deoptimizationEncodings;
-    protected Object[] deoptimizationObjectConstants;
-
-    public DeoptimizationSourcePositionEncoder(PinnedAllocator allocator) {
-        this.allocator = allocator;
+    public DeoptimizationSourcePositionEncoder() {
         this.objectConstants = FrequencyEncoder.createIdentityEncoder();
     }
 
-    public void encode(List<NodeSourcePosition> deoptimzationSourcePositions) {
-        addObjectConstants(deoptimzationSourcePositions);
-        deoptimizationObjectConstants = objectConstants.encodeAll(newObjectArray(objectConstants.getLength()));
+    public void encodeAndInstall(List<NodeSourcePosition> deoptSourcePositions, CodeInfo target, ReferenceAdjuster adjuster) {
+        addObjectConstants(deoptSourcePositions);
+        Object[] encodedObjectConstants = objectConstants.encodeAll(new Object[objectConstants.getLength()]);
 
         UnsafeArrayTypeWriter encodingBuffer = UnsafeArrayTypeWriter.create(ByteArrayReader.supportsUnalignedMemoryAccess());
         EconomicMap<NodeSourcePosition, Long> sourcePositionStartOffsets = EconomicMap.create(Equivalence.IDENTITY_WITH_SYSTEM_HASHCODE);
-        deoptimizationStartOffsets = newIntArray(deoptimzationSourcePositions.size());
+        NonmovableArray<Integer> deoptStartOffsets = NonmovableArrays.createIntArray(deoptSourcePositions.size(), NmtCategory.Code);
 
-        encodeSourcePositions(deoptimzationSourcePositions, sourcePositionStartOffsets, encodingBuffer);
-        deoptimizationEncodings = encodingBuffer.toArray(newByteArray(TypeConversion.asS4(encodingBuffer.getBytesWritten())));
+        encodeSourcePositions(deoptSourcePositions, sourcePositionStartOffsets, deoptStartOffsets, encodingBuffer);
+        NonmovableArray<Byte> deoptEncodings = NonmovableArrays.createByteArray(TypeConversion.asS4(encodingBuffer.getBytesWritten()), NmtCategory.Code);
+        encodingBuffer.toByteBuffer(NonmovableArrays.asByteBuffer(deoptEncodings));
 
-        verifyEncoding(deoptimzationSourcePositions);
+        install(target, deoptStartOffsets, deoptEncodings, encodedObjectConstants, deoptSourcePositions, adjuster);
     }
 
-    public void install(RuntimeMethodInfo target) {
-        target.deoptimizationStartOffsets = deoptimizationStartOffsets;
-        target.deoptimizationEncodings = deoptimizationEncodings;
-        target.deoptimizationObjectConstants = deoptimizationObjectConstants;
+    @Uninterruptible(reason = "Nonmovable object arrays are not visible to GC until installed in target.")
+    private static void install(CodeInfo target, NonmovableArray<Integer> deoptStartOffsets, NonmovableArray<Byte> deoptEncodings,
+                    Object[] encodedObjectConstants, List<NodeSourcePosition> deoptSourcePositions, ReferenceAdjuster adjuster) {
+
+        NonmovableObjectArray<Object> deoptObjectConstants = adjuster.copyOfObjectArray(encodedObjectConstants, NmtCategory.Code);
+        RuntimeCodeInfoAccess.setDeoptimizationMetadata(target, deoptStartOffsets, deoptEncodings, deoptObjectConstants);
+
+        afterInstallation(deoptStartOffsets, deoptEncodings, deoptSourcePositions, deoptObjectConstants, adjuster);
+    }
+
+    @Uninterruptible(reason = "Safe for GC, but called from uninterruptible code.", calleeMustBe = false)
+    private static void afterInstallation(NonmovableArray<Integer> deoptStartOffsets, NonmovableArray<Byte> deoptEncodings,
+                    List<NodeSourcePosition> deoptSourcePositions, NonmovableObjectArray<Object> deoptObjectConstants, ReferenceAdjuster adjuster) {
+
+        assert !adjuster.isFinished() || verifyEncoding(deoptSourcePositions, deoptStartOffsets, deoptEncodings, deoptObjectConstants);
     }
 
     private void addObjectConstants(List<NodeSourcePosition> deoptimzationSourcePositions) {
@@ -88,17 +99,18 @@ public class DeoptimizationSourcePositionEncoder {
         processedPositions.add(sourcePosition);
     }
 
-    private void encodeSourcePositions(List<NodeSourcePosition> deoptimzationSourcePositions, EconomicMap<NodeSourcePosition, Long> sourcePositionStartOffsets, UnsafeArrayTypeWriter encodingBuffer) {
-        for (int i = 0; i < deoptimzationSourcePositions.size(); i++) {
-            NodeSourcePosition sourcePosition = deoptimzationSourcePositions.get(i);
+    private void encodeSourcePositions(List<NodeSourcePosition> deoptSourcePositions, EconomicMap<NodeSourcePosition, Long> sourcePositionStartOffsets,
+                    NonmovableArray<Integer> deoptStartOffsets, UnsafeArrayTypeWriter encodingBuffer) {
+        for (int i = 0; i < deoptSourcePositions.size(); i++) {
+            NodeSourcePosition sourcePosition = deoptSourcePositions.get(i);
             int startOffset;
             if (sourcePosition == null) {
                 startOffset = DeoptimizationSourcePositionDecoder.NO_SOURCE_POSITION;
             } else {
                 startOffset = TypeConversion.asS4(encodeSourcePositions(sourcePosition, sourcePositionStartOffsets, encodingBuffer));
-                assert startOffset > DeoptimizationSourcePositionDecoder.NO_SOURCE_POSITION;
+                assert startOffset > DeoptimizationSourcePositionDecoder.NO_SOURCE_POSITION : startOffset;
             }
-            deoptimizationStartOffsets[i] = startOffset;
+            NonmovableArrays.setInt(deoptStartOffsets, i, startOffset);
         }
     }
 
@@ -118,7 +130,7 @@ public class DeoptimizationSourcePositionEncoder {
         long callerRelativeOffset = DeoptimizationSourcePositionDecoder.NO_CALLER;
         if (sourcePosition.getCaller() != null) {
             callerRelativeOffset = startAbsoluteOffset - callerAbsoluteOffset;
-            assert callerRelativeOffset > DeoptimizationSourcePositionDecoder.NO_CALLER;
+            assert callerRelativeOffset > DeoptimizationSourcePositionDecoder.NO_CALLER : sourcePosition;
         }
 
         encodingBuffer.putUV(callerRelativeOffset);
@@ -129,36 +141,26 @@ public class DeoptimizationSourcePositionEncoder {
         return startAbsoluteOffset;
     }
 
-    private Object[] newObjectArray(int length) {
-        return allocator == null ? new Object[length] : (Object[]) allocator.newArray(Object.class, length);
-    }
+    private static boolean verifyEncoding(List<NodeSourcePosition> deoptSourcePositions, NonmovableArray<Integer> deoptStartOffsets,
+                    NonmovableArray<Byte> deoptEncodings, NonmovableObjectArray<Object> deoptObjectConstants) {
 
-    private byte[] newByteArray(int length) {
-        return allocator == null ? new byte[length] : (byte[]) allocator.newArray(byte.class, length);
-    }
-
-    private int[] newIntArray(int length) {
-        return allocator == null ? new int[length] : (int[]) allocator.newArray(int.class, length);
-    }
-
-    private boolean verifyEncoding(List<NodeSourcePosition> deoptimzationSourcePositions) {
-        for (int i = 0; i < deoptimzationSourcePositions.size(); i++) {
-            NodeSourcePosition originalSourcePosition = deoptimzationSourcePositions.get(i);
-            NodeSourcePosition decodedSourcePosition = DeoptimizationSourcePositionDecoder.decode(i, deoptimizationStartOffsets, deoptimizationEncodings, deoptimizationObjectConstants);
+        for (int i = 0; i < deoptSourcePositions.size(); i++) {
+            NodeSourcePosition originalSourcePosition = deoptSourcePositions.get(i);
+            NodeSourcePosition decodedSourcePosition = DeoptimizationSourcePositionDecoder.decode(i, deoptStartOffsets, deoptEncodings, deoptObjectConstants);
 
             verifySourcePosition(originalSourcePosition, decodedSourcePosition);
         }
         return true;
     }
 
-    private void verifySourcePosition(NodeSourcePosition originalPosition, NodeSourcePosition decodedSourcePosition) {
+    private static void verifySourcePosition(NodeSourcePosition originalPosition, NodeSourcePosition decodedSourcePosition) {
         if (originalPosition == null) {
             assert decodedSourcePosition == null;
             return;
         }
 
-        assert originalPosition.getBCI() == decodedSourcePosition.getBCI();
-        assert originalPosition.getMethod().equals(decodedSourcePosition.getMethod());
+        assert originalPosition.getBCI() == decodedSourcePosition.getBCI() : decodedSourcePosition;
+        assert originalPosition.getMethod().equals(decodedSourcePosition.getMethod()) : decodedSourcePosition;
         verifySourcePosition(originalPosition.getCaller(), decodedSourcePosition.getCaller());
     }
 }

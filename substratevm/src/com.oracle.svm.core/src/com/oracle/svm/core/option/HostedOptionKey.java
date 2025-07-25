@@ -24,9 +24,14 @@
  */
 package com.oracle.svm.core.option;
 
-import org.graalvm.compiler.api.replacements.Fold;
-import org.graalvm.compiler.options.Option;
-import org.graalvm.compiler.options.OptionKey;
+import com.oracle.svm.common.option.LocatableOption;
+import com.oracle.svm.common.option.MultiOptionValue;
+import org.graalvm.collections.EconomicMap;
+import jdk.graal.compiler.api.replacements.Fold;
+import jdk.graal.compiler.options.Option;
+import jdk.graal.compiler.options.OptionKey;
+
+import java.util.function.Consumer;
 
 /**
  * Defines a hosted {@link Option} that is used during native image generation, in contrast to a
@@ -34,10 +39,17 @@ import org.graalvm.compiler.options.OptionKey;
  *
  * @see com.oracle.svm.core.option
  */
-public class HostedOptionKey<T> extends OptionKey<T> {
+public class HostedOptionKey<T> extends OptionKey<T> implements SubstrateOptionKey<T> {
+    private final Consumer<HostedOptionKey<T>> validation;
+    private OptionOrigin lastOrigin;
 
     public HostedOptionKey(T defaultValue) {
+        this(defaultValue, null);
+    }
+
+    public HostedOptionKey(T defaultValue, Consumer<HostedOptionKey<T>> validation) {
         super(defaultValue);
+        this.validation = validation;
     }
 
     /**
@@ -47,6 +59,7 @@ public class HostedOptionKey<T> extends OptionKey<T> {
      * {@link Fold} annotation.
      */
     @Fold
+    @Override
     public T getValue() {
         return getValue(HostedOptionValues.singleton());
     }
@@ -58,6 +71,7 @@ public class HostedOptionKey<T> extends OptionKey<T> {
      * {@link Fold} annotation.
      */
     @Fold
+    @Override
     public boolean hasBeenSet() {
         return hasBeenSet(HostedOptionValues.singleton());
     }
@@ -68,5 +82,33 @@ public class HostedOptionKey<T> extends OptionKey<T> {
     @Override
     protected boolean checkDescriptorExists() {
         return true;
+    }
+
+    @Override
+    public void update(EconomicMap<OptionKey<?>, Object> values, Object boxedValue) {
+        Object defaultValue = getDefaultValue();
+        if (defaultValue instanceof MultiOptionValue) {
+            MultiOptionValue<?> value = (MultiOptionValue<?>) values.get(this);
+            if (value == null) {
+                value = ((MultiOptionValue<?>) defaultValue).createCopy();
+            }
+            value.valueUpdate(boxedValue);
+            super.update(values, value);
+        } else {
+            /* store origin, last option update wins. */
+            lastOrigin = OptionOrigin.from(LocatableOption.valueOrigin(boxedValue), false);
+            super.update(values, LocatableOption.rawValue(boxedValue));
+        }
+    }
+
+    @Override
+    public void validate() {
+        if (validation != null) {
+            validation.accept(this);
+        }
+    }
+
+    public OptionOrigin getLastOrigin() {
+        return lastOrigin;
     }
 }

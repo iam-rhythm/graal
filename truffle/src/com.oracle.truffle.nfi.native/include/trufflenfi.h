@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,6 +40,8 @@
  */
 #ifndef __TRUFFLE_NFI_H
 #define __TRUFFLE_NFI_H
+
+#include <stdbool.h>
 
 /**
  * Opaque handle to a {@link com.oracle.truffle.api.interop.TruffleObject}.
@@ -157,9 +159,12 @@ struct __TruffleNativeAPI {
      * closure pointer, instead of allocating a new one.
      */
     TruffleObject (*getClosureObject)(TruffleEnv *env, void *closure);
+
+    /**
+     * Returns whether there is a pending exception from the last upcall.
+     */
+    bool (*exceptionCheck)(TruffleEnv *env);
 };
-
-
 
 struct __TruffleEnv {
     const struct __TruffleNativeAPI *functions;
@@ -185,29 +190,28 @@ struct __TruffleEnv {
         return functions->isSameObject(this, object1, object2);
     }
 
-    template<class T> void newClosureRef(T *closure) {
-        functions->newClosureRef(this, (void*) closure);
+    template <class T> void newClosureRef(T *closure) {
+        functions->newClosureRef(this, (void *) closure);
     }
 
-    template<class T> void releaseClosureRef(T *closure) {
-        functions->releaseClosureRef(this, (void*) closure);
+    template <class T> void releaseClosureRef(T *closure) {
+        functions->releaseClosureRef(this, (void *) closure);
     }
 
     /**
      * Convenience function that calls {@link newClosureRef} on a function pointer, and returns the
      * same function pointer without losing type information.
      */
-    template<class T> T *dupClosureRef(T *closure) {
-        functions->newClosureRef(this, (void*) closure);
+    template <class T> T *dupClosureRef(T *closure) {
+        functions->newClosureRef(this, (void *) closure);
         return closure;
     }
 
-    template<class T> TruffleObject getClosureObject(T *closure) {
-        return functions->getClosureObject(this, (void*) closure);
+    template <class T> TruffleObject getClosureObject(T *closure) {
+        return functions->getClosureObject(this, (void *) closure);
     }
 #endif
 };
-
 
 struct __TruffleThreadAPI {
     /**
@@ -243,6 +247,5 @@ struct __TruffleContext {
     }
 #endif
 };
-
 
 #endif

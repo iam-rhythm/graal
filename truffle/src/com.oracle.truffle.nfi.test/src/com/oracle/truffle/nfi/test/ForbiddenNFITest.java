@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,31 +40,41 @@
  */
 package com.oracle.truffle.nfi.test;
 
-import com.oracle.truffle.api.interop.TruffleObject;
+import com.oracle.truffle.api.exception.AbstractTruffleException;
 import com.oracle.truffle.api.source.Source;
 import com.oracle.truffle.tck.TruffleRunner;
 import org.graalvm.polyglot.Context;
+import org.junit.Assume;
 import org.junit.Rule;
 import org.junit.Test;
 
 public class ForbiddenNFITest {
 
-    private final String nativeTestLib = System.getProperty("native.test.lib");
-
     @Rule public TruffleRunner.RunWithPolyglotRule runWithPolyglot = new TruffleRunner.RunWithPolyglotRule(Context.newBuilder().allowNativeAccess(false));
 
-    private TruffleObject eval(String format, Object... args) {
-        Source source = Source.newBuilder("nfi", String.format(format, args), "ForbiddenNFITest").build();
-        return (TruffleObject) runWithPolyglot.getTruffleTestEnv().parse(source).call();
+    private Object eval(String format, Object... args) {
+        if (NFITest.TEST_BACKEND != null) {
+            switch (NFITest.TEST_BACKEND) {
+                case "native":
+                case "panama":
+                    // these backends need the native permission
+                    break;
+                default:
+                    Assume.assumeTrue("Skipping, non-default backends might actually work without allowNativeAccess.", NFITest.TEST_BACKEND == null);
+                    break;
+            }
+        }
+        Source source = Source.newBuilder("nfi", String.format(format, args), "ForbiddenNFITest").internal(true).build();
+        return runWithPolyglot.getTruffleTestEnv().parseInternal(source).call();
     }
 
-    @Test(expected = UnsatisfiedLinkError.class)
+    @Test(expected = AbstractTruffleException.class)
     public void loadDefault() {
         eval("default");
     }
 
-    @Test(expected = UnsatisfiedLinkError.class)
+    @Test(expected = AbstractTruffleException.class)
     public void loadTestLib() {
-        eval("load '%s'", nativeTestLib);
+        eval("load '%s'", NFITest.getLibPath("nativetest"));
     }
 }

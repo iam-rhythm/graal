@@ -24,101 +24,166 @@
  */
 package com.oracle.svm.configure.trace;
 
-import java.util.Arrays;
+import static com.oracle.svm.configure.trace.LazyValueUtils.lazyNull;
+import static com.oracle.svm.configure.trace.LazyValueUtils.lazyValue;
+
 import java.util.List;
-import java.util.Map;
 
-import com.oracle.svm.configure.config.JniConfiguration;
-import com.oracle.svm.configure.config.JniMethod;
+import org.graalvm.collections.EconomicMap;
 
-import jdk.vm.ci.meta.MetaUtil;
+import com.oracle.svm.configure.ClassNameSupport;
+import com.oracle.svm.configure.ConfigurationTypeDescriptor;
+import com.oracle.svm.configure.NamedConfigurationTypeDescriptor;
+import com.oracle.svm.configure.UnresolvedConfigurationCondition;
+import com.oracle.svm.configure.config.ConfigurationMemberInfo.ConfigurationMemberDeclaration;
+import com.oracle.svm.configure.config.ConfigurationMethod;
+import com.oracle.svm.configure.config.ConfigurationSet;
+import com.oracle.svm.configure.config.ConfigurationType;
+import com.oracle.svm.configure.config.TypeConfiguration;
+import com.oracle.svm.util.LogUtils;
+
+import jdk.graal.compiler.phases.common.LazyValue;
 
 class JniProcessor extends AbstractProcessor {
-    private final JniConfiguration configuration = new JniConfiguration();
-    private boolean filter = true;
-    private boolean previousIsGetApplicationClass = false;
+    private final AccessAdvisor advisor;
 
-    public void setFilterEnabled(boolean enabled) {
-        filter = enabled;
-    }
-
-    public JniConfiguration getConfiguration() {
-        return configuration;
+    JniProcessor(AccessAdvisor advisor) {
+        this.advisor = advisor;
     }
 
     @Override
-    void processEntry(Map<String, ?> entry) {
+    @SuppressWarnings("fallthrough")
+    void processEntry(EconomicMap<String, Object> entry, ConfigurationSet configurationSet) {
+        UnresolvedConfigurationCondition condition = UnresolvedConfigurationCondition.alwaysTrue();
         boolean invalidResult = Boolean.FALSE.equals(entry.get("result"));
         if (invalidResult) {
             return;
         }
         String function = (String) entry.get("function");
-        String clazz = (String) entry.get("class");
         String callerClass = (String) entry.get("caller_class");
         List<?> args = (List<?>) entry.get("args");
-        if (filter && shouldFilter(function, clazz, callerClass, args)) {
+        LazyValue<String> callerClassLazyValue = lazyValue(callerClass);
+        // Special: FindClass and DefineClass take the class in question as a string argument
+        if (function.equals("FindClass") || function.equals("DefineClass")) {
+            String jniName = singleElement(args);
+            if (ClassNameSupport.isValidJNIName(jniName)) {
+                ConfigurationTypeDescriptor type = NamedConfigurationTypeDescriptor.fromJNIName(jniName);
+                LazyValue<String> reflectionName = lazyValue(ClassNameSupport.jniNameToReflectionName(jniName));
+                if (!advisor.shouldIgnore(reflectionName, callerClassLazyValue, entry)) {
+                    if (function.equals("FindClass")) {
+                        if (!advisor.shouldIgnoreJniLookup(function, reflectionName, lazyNull(), lazyNull(), callerClassLazyValue, entry)) {
+                            configurationSet.getReflectionConfiguration().getOrCreateType(condition, type).setJniAccessible();
+                        }
+                    } else if (!AccessAdvisor.PROXY_CLASS_NAME_PATTERN.matcher(jniName).matches()) { // DefineClass
+                        LogUtils.warning("Unsupported JNI function DefineClass used to load class " + jniName);
+                    }
+                }
+            }
             return;
         }
+        ConfigurationTypeDescriptor clazz = descriptorForClass(entry.get("class"));
+        if (clazz.getAllQualifiedJavaNames().stream().anyMatch(c -> advisor.shouldIgnore(lazyValue(c), callerClassLazyValue, entry))) {
+            return;
+        }
+        boolean hasDeclaringClass = entry.containsKey("declaring_class");
+        ConfigurationTypeDescriptor declaringClass = hasDeclaringClass ? descriptorForClass(entry.get("declaring_class")) : null;
+        ConfigurationTypeDescriptor declaringClassOrClazz = hasDeclaringClass ? declaringClass : clazz;
+        ConfigurationMemberDeclaration declaration = hasDeclaringClass ? ConfigurationMemberDeclaration.DECLARED : ConfigurationMemberDeclaration.PRESENT;
+        TypeConfiguration config = configurationSet.getReflectionConfiguration();
+        boolean makeTypeJniAccessible = true;
         switch (function) {
-            case "DefineClass": {
-                String name = singleElement(args);
-                if (name.startsWith("com/sun/proxy/$Proxy")) {
-                    break; // implementation detail of Proxy support
-                }
-                logWarning("Unsupported JNI function DefineClass used to load class " + name);
+            case "AllocObject":
+                expectSize(args, 0);
+                /*
+                 * AllocObject is implemented via Unsafe.allocateInstance, so we need to set the
+                 * "unsafe allocated" flag in the reflection configuration file.
+                 */
+                configurationSet.getReflectionConfiguration().getOrCreateType(condition, clazz).setUnsafeAllocated();
                 break;
-            }
-            case "FindClass": {
-                String name = singleElement(args);
-                if (name.charAt(0) != '[') {
-                    name = "L" + name + ";";
-                }
-                name = MetaUtil.internalNameToJava(name, true, false);
-                configuration.getOrCreateType(name);
-                break;
-            }
-            case "GetMethodID":
-            case "GetStaticMethodID": {
+            case "GetStaticMethodID":
+            case "GetMethodID": {
                 expectSize(args, 2);
                 String name = (String) args.get(0);
                 String signature = (String) args.get(1);
-                configuration.getOrCreateType(clazz).getMethods().add(new JniMethod(name, signature));
+                if (clazz.getAllQualifiedJavaNames().stream()
+                                .noneMatch(c -> advisor.shouldIgnoreJniLookup(function, lazyValue(c), lazyValue(name), lazyValue(signature), callerClassLazyValue, entry))) {
+                    ConfigurationType type = getOrCreateJniAccessibleType(config, condition, declaringClassOrClazz);
+                    type.addMethod(name, signature, declaration);
+                    if (!declaringClassOrClazz.equals(clazz)) {
+                        config.getOrCreateType(condition, clazz);
+                    }
+                }
                 break;
             }
             case "GetFieldID":
             case "GetStaticFieldID": {
                 expectSize(args, 2);
                 String name = (String) args.get(0);
-                configuration.getOrCreateType(clazz).getFields().add(name);
+                String signature = (String) args.get(1);
+                if (clazz.getAllQualifiedJavaNames().stream()
+                                .noneMatch(c -> advisor.shouldIgnoreJniLookup(function, lazyValue(c), lazyValue(name), lazyValue(signature), callerClassLazyValue, entry))) {
+                    ConfigurationType type = getOrCreateJniAccessibleType(config, condition, declaringClassOrClazz);
+                    type.addField(name, declaration, false);
+                    if (!declaringClassOrClazz.equals(clazz)) {
+                        config.getOrCreateType(condition, clazz);
+                    }
+                }
+                break;
+            }
+            case "ThrowNew": {
+                expectSize(args, 1); // exception message, ignore
+                String name = ConfigurationMethod.CONSTRUCTOR_NAME;
+                String signature = "(Ljava/lang/String;)V";
+                if (clazz.getAllQualifiedJavaNames().stream()
+                                .noneMatch(c -> advisor.shouldIgnoreJniLookup(function, lazyValue(c), lazyValue(name), lazyValue(signature), callerClassLazyValue, entry))) {
+                    ConfigurationType type = getOrCreateJniAccessibleType(config, condition, declaringClassOrClazz);
+                    type.addMethod(name, signature, declaration);
+                    assert declaringClassOrClazz.equals(clazz) : "Constructor can only be accessed via declaring class";
+                }
+                break;
+            }
+            case "ToReflectedField":
+                makeTypeJniAccessible = false;
+                // fall through
+            case "FromReflectedField": {
+                expectSize(args, 1);
+                String name = (String) args.get(0);
+                ConfigurationType type = config.getOrCreateType(condition, declaringClassOrClazz);
+                if (makeTypeJniAccessible) {
+                    type.setJniAccessible();
+                }
+                type.addField(name, declaration, false);
+                break;
+            }
+            case "ToReflectedMethod":
+                makeTypeJniAccessible = false;
+                // fall through
+            case "FromReflectedMethod": {
+                expectSize(args, 2);
+                String name = (String) args.get(0);
+                String signature = (String) args.get(1);
+                ConfigurationType type = config.getOrCreateType(condition, declaringClassOrClazz);
+                if (makeTypeJniAccessible) {
+                    type.setJniAccessible();
+                }
+                type.addMethod(name, signature, declaration);
+                break;
+            }
+            case "NewObjectArray": {
+                expectSize(args, 0);
+                if (clazz.getAllQualifiedJavaNames().stream().noneMatch(c -> advisor.shouldIgnoreJniLookup(function, lazyValue(c), null, null, callerClassLazyValue, entry))) {
+                    /* Array class name is already in Class.forName format */
+                    config.getOrCreateType(condition, clazz);
+                }
                 break;
             }
         }
     }
 
-    private boolean shouldFilter(String function, String clazz, String callerClass, List<?> args) {
-        if (!isInLivePhase() || (callerClass != null && isInternalClass(callerClass))) {
-            return true;
-        }
-
-        // Heuristic: filter LauncherHelper as well as a lookup of main(String[]) that
-        // immediately follows a lookup of LauncherHelper.getApplicationClass()
-        if ("sun.launcher.LauncherHelper".equals(clazz)) {
-            previousIsGetApplicationClass = function.equals("GetStaticMethodID") &&
-                            args.equals(Arrays.asList("getApplicationClass", "()Ljava/lang/Class;"));
-            return true;
-        }
-        if (previousIsGetApplicationClass) {
-            if (function.equals("GetStaticMethodID") && args.equals(Arrays.asList("main", "([Ljava/lang/String;)V"))) {
-                return true;
-            }
-            previousIsGetApplicationClass = false;
-        }
-
-        /*
-         * NOTE: JVM invocations cannot be reliably filtered with callerClass == null because these
-         * could also be calls in a manually launched thread which is attached to JNI, but is not
-         * executing Java code (yet).
-         */
-        return false;
+    private static ConfigurationType getOrCreateJniAccessibleType(TypeConfiguration config, UnresolvedConfigurationCondition condition, ConfigurationTypeDescriptor typeName) {
+        ConfigurationType type = config.getOrCreateType(condition, typeName);
+        type.setJniAccessible();
+        return type;
     }
+
 }

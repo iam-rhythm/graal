@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,11 +40,9 @@
  */
 package com.oracle.truffle.api.nodes;
 
-import java.security.AccessController;
+import java.lang.reflect.Field;
 import java.security.PrivilegedAction;
-import java.util.ArrayList;
 import java.util.Iterator;
-import java.util.List;
 
 /**
  * Information about a {@link Node} class. A single instance of this class is allocated for every
@@ -53,10 +51,11 @@ import java.util.List;
  * @since 0.8 or earlier
  */
 public abstract class NodeClass {
-    private static final ClassValue<NodeClass> nodeClasses = new ClassValue<NodeClass>() {
+    private static final ClassValue<NodeClass> nodeClasses = new ClassValue<>() {
+        @SuppressWarnings("deprecation")
         @Override
         protected NodeClass computeValue(final Class<?> clazz) {
-            return AccessController.doPrivileged(new PrivilegedAction<NodeClass>() {
+            return java.security.AccessController.doPrivileged(new PrivilegedAction<NodeClass>() {
                 public NodeClass run() {
                     return new NodeClassImpl(clazz.asSubclass(Node.class));
                 }
@@ -78,56 +77,24 @@ public abstract class NodeClass {
     public NodeClass(@SuppressWarnings("unused") Class<? extends Node> clazz) {
     }
 
-    /** @since 0.8 or earlier */
-    @SuppressWarnings("deprecation")
-    @Deprecated
-    public NodeFieldAccessor getNodeClassField() {
-        return null;
-    }
-
-    /** @since 0.8 or earlier */
-    @SuppressWarnings("deprecation")
-    @Deprecated
-    public NodeFieldAccessor[] getCloneableFields() {
-        return null;
-    }
-
-    /** @since 0.8 or earlier */
-    @SuppressWarnings("deprecation")
-    @Deprecated
-    public NodeFieldAccessor[] getFields() {
-        return null;
-    }
-
-    /** @since 0.8 or earlier */
-    @SuppressWarnings("deprecation")
-    @Deprecated
-    public NodeFieldAccessor getParentField() {
-        return null;
-    }
-
-    /** @since 0.8 or earlier */
-    @SuppressWarnings("deprecation")
-    @Deprecated
-    public NodeFieldAccessor[] getChildFields() {
-        return null;
-    }
-
-    /** @since 0.8 or earlier */
-    @SuppressWarnings("deprecation")
-    @Deprecated
-    public NodeFieldAccessor[] getChildrenFields() {
-        return null;
+    /*
+     * Reflectively accessed by TruffleBaseFeature.
+     */
+    Field[] getAccessedFields() {
+        throw new UnsupportedOperationException();
     }
 
     /** @since 0.8 or earlier */
     public Iterator<Node> makeIterator(Node node) {
-        List<Object> arr = new ArrayList<>();
-        for (Object field : getNodeFields()) {
-            arr.add(field);
-        }
-        return new NodeIterator(this, node, arr.toArray());
+        return new NodeIterator(this, node, getNodeFieldArray());
     }
+
+    /**
+     * Returns <code>true</code> if {@link DenyReplace} was not set for this node.
+     *
+     * @since 22.2
+     **/
+    protected abstract boolean isReplaceAllowed();
 
     /**
      * The {@link Class} this <code>NodeClass</code> has been {@link #NodeClass(java.lang.Class)
@@ -138,8 +105,8 @@ public abstract class NodeClass {
      */
     public abstract Class<? extends Node> getType();
 
-    /** @since 0.14 */
-    protected abstract Iterable<? extends Object> getNodeFields();
+    /** @since 20.2 */
+    protected abstract Object[] getNodeFieldArray();
 
     /** @since 0.14 */
     protected abstract void putFieldObject(Object field, Node receiver, Object value);
@@ -177,4 +144,5 @@ public abstract class NodeClass {
     boolean nodeFieldsOrderedByKind() {
         return false;
     }
+
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -43,14 +43,14 @@ package org.graalvm.nativeimage;
 /**
  * Utility methods that provide access to the current isolate.
  *
- * @since 1.0
+ * @since 19.0
  */
 public final class CurrentIsolate {
 
     /**
      * Returns the current isolate.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public static Isolate getIsolate() {
         throw new IllegalStateException("Cannot invoke method during native image generation");
@@ -59,7 +59,7 @@ public final class CurrentIsolate {
     /**
      * Returns the current thread in the current isolate.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public static IsolateThread getCurrentThread() {
         throw new IllegalStateException("Cannot invoke method during native image generation");

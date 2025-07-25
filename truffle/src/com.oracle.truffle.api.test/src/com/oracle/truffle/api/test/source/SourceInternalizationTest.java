@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,15 +40,14 @@
  */
 package com.oracle.truffle.api.test.source;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.assertEquals;
 
 import java.io.File;
 import java.io.IOException;
-import java.lang.ref.ReferenceQueue;
 import java.lang.ref.WeakReference;
 import java.net.URI;
 import java.net.URISyntaxException;
@@ -64,16 +63,27 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import org.junit.Assert;
-import org.junit.Assume;
+import com.oracle.truffle.api.test.SubprocessTestUtils;
+import org.graalvm.nativeimage.ImageInfo;
+import org.junit.BeforeClass;
 import org.junit.Test;
 
 import com.oracle.truffle.api.TruffleFile;
 import com.oracle.truffle.api.source.Source;
 import com.oracle.truffle.api.test.GCUtils;
 import com.oracle.truffle.api.test.polyglot.AbstractPolyglotTest;
+import com.oracle.truffle.tck.tests.TruffleTestAssumptions;
 
 public class SourceInternalizationTest extends AbstractPolyglotTest {
+
+    @BeforeClass
+    public static void runWithWeakEncapsulationOnly() {
+        TruffleTestAssumptions.assumeWeakEncapsulation();
+    }
+
+    public SourceInternalizationTest() {
+        needsLanguageEnv = true;
+    }
 
     @Test
     public void testSourceIdentity() throws RuntimeException, URISyntaxException, IOException {
@@ -118,8 +128,8 @@ public class SourceInternalizationTest extends AbstractPolyglotTest {
         assertSame(Source.newBuilder("", "", "").uri(new URI("s:///333")).build(),
                         Source.newBuilder("", "", "").uri(new URI("s:///333")).build());
 
-        TruffleFile file1 = languageEnv.getTruffleFile(createTempFile("1").getPath());
-        TruffleFile file2 = languageEnv.getTruffleFile(createTempFile("2").getPath());
+        TruffleFile file1 = languageEnv.getPublicTruffleFile(createTempFile("1").getPath());
+        TruffleFile file2 = languageEnv.getPublicTruffleFile(createTempFile("2").getPath());
 
         assertNotSame(Source.newBuilder("", file1).build(),
                         Source.newBuilder("", file2).build());
@@ -208,27 +218,25 @@ public class SourceInternalizationTest extends AbstractPolyglotTest {
     }
 
     @Test
-    public void testSourceInterning() {
-        Assume.assumeFalse("This test is too slow in fastdebug.", System.getProperty("java.vm.version").contains("fastdebug"));
+    public void testSourceInterning() throws IOException, InterruptedException {
+        Runnable action = () -> {
+            byte[] bytes = new byte[16 * 1024 * 1024];
+            byte byteValue = (byte) 'a';
+            Arrays.fill(bytes, byteValue);
+            String testString = new String(bytes); // big string
 
-        byte[] bytes = new byte[16 * 1024 * 1024];
-        byte byteValue = (byte) 'a';
-        Arrays.fill(bytes, byteValue);
-        String testString = new String(bytes); // big string
+            List<WeakReference<Object>> sources = new ArrayList<>();
+            for (int i = 0; i < GCUtils.GC_TEST_ITERATIONS; i++) {
+                sources.add(new WeakReference<>(createTestSource(testString, i)));
+            }
 
-        ReferenceQueue<Object> queue = new ReferenceQueue<>();
-        List<WeakReference<Object>> sources = new ArrayList<>();
-        for (int i = 0; i < GCUtils.GC_TEST_ITERATIONS; i++) {
-            sources.add(new WeakReference<>(createTestSource(testString, i), queue));
-            System.gc();
+            GCUtils.assertGc("Sources not referenced from a language must be collected", sources);
+        };
+        if (ImageInfo.inImageCode()) {
+            action.run();
+        } else {
+            SubprocessTestUtils.newBuilder(SourceInternalizationTest.class, action).run();
         }
-
-        int refsCleared = 0;
-        while (queue.poll() != null) {
-            refsCleared++;
-        }
-        // we need to have any refs cleared for this test to have any value
-        Assert.assertTrue(refsCleared > 0);
     }
 
     private static Object createTestSource(String testString, int i) {

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -25,44 +25,40 @@
 package com.oracle.svm.core.posix;
 
 import java.io.FileDescriptor;
+import java.util.EnumSet;
 
-import org.graalvm.nativeimage.Feature;
-import org.graalvm.nativeimage.ImageSingletons;
+import com.oracle.svm.core.imagelayer.ImageLayerBuildingSupport;
 import org.graalvm.nativeimage.LogHandler;
-import org.graalvm.nativeimage.Platform;
-import org.graalvm.nativeimage.Platforms;
 import org.graalvm.nativeimage.c.type.CCharPointer;
 import org.graalvm.word.UnsignedWord;
 
-import com.oracle.svm.core.annotate.AutomaticFeature;
-import com.oracle.svm.core.posix.headers.Errno;
-import com.oracle.svm.core.posix.headers.LibC;
+import com.oracle.svm.core.SubstrateDiagnostics;
+import com.oracle.svm.core.feature.AutomaticallyRegisteredFeature;
+import com.oracle.svm.core.feature.InternalFeature;
+import com.oracle.svm.core.headers.LibC;
+import com.oracle.svm.core.layeredimagesingleton.InitialLayerOnlyImageSingleton;
+import com.oracle.svm.core.layeredimagesingleton.LayeredImageSingletonBuilderFlags;
+import com.oracle.svm.core.log.Log;
+import com.oracle.svm.core.thread.VMThreads;
 
-@AutomaticFeature
-@Platforms({Platform.LINUX_AND_JNI.class, Platform.DARWIN_AND_JNI.class})
-class PosixLogHandlerFeature implements Feature {
+@AutomaticallyRegisteredFeature
+class PosixLogHandlerFeature implements InternalFeature {
     @Override
     public void beforeAnalysis(BeforeAnalysisAccess access) {
-        /* An alternative log handler can be set in Feature.duringSetup(). */
-        if (!ImageSingletons.contains(LogHandler.class)) {
-            /*
-             * Install the default log handler in ImageSingletons such that if another feature tries
-             * to install another log handler at a later point it will get an error.
-             */
-            LogHandler logHandler = new PosixLogHandler();
-            ImageSingletons.add(LogHandler.class, logHandler);
+        if (ImageLayerBuildingSupport.firstImageBuild()) {
+            Log.finalizeDefaultLogHandler(new PosixLogHandler());
         }
     }
 }
 
-public class PosixLogHandler implements LogHandler {
+public class PosixLogHandler implements LogHandler, InitialLayerOnlyImageSingleton {
 
     @Override
     public void log(CCharPointer bytes, UnsignedWord length) {
         /* Save and restore errno around calls that would otherwise change errno. */
-        final int savedErrno = Errno.errno();
+        final int savedErrno = LibC.errno();
         try {
-            if (!PosixUtils.writeBytes(getOutputFile(), bytes, length)) {
+            if (!PosixUtils.write(getOutputFile(), bytes, length)) {
                 /*
                  * We are in a low-level log routine and output failed, so there is little we can
                  * do.
@@ -70,28 +66,42 @@ public class PosixLogHandler implements LogHandler {
                 fatalError();
             }
         } finally {
-            Errno.set_errno(savedErrno);
+            LibC.setErrno(savedErrno);
         }
     }
 
     @Override
     public void flush() {
         /* Save and restore errno around calls that would otherwise change errno. */
-        final int savedErrno = Errno.errno();
+        final int savedErrno = LibC.errno();
         try {
             PosixUtils.flush(getOutputFile());
             /* ignore error -- they're benign */
         } finally {
-            Errno.set_errno(savedErrno);
+            LibC.setErrno(savedErrno);
         }
     }
 
     @Override
     public void fatalError() {
+        if (SubstrateDiagnostics.isFatalErrorHandlingInProgress()) {
+            // Delay the shutdown a bit if another thread has something important to report.
+            VMThreads.singleton().nativeSleep(3000);
+        }
         LibC.abort();
     }
 
     private static FileDescriptor getOutputFile() {
         return FileDescriptor.err;
+    }
+
+    @Override
+    public EnumSet<LayeredImageSingletonBuilderFlags> getImageBuilderFlags() {
+        return LayeredImageSingletonBuilderFlags.RUNTIME_ACCESS_ONLY;
+    }
+
+    @Override
+    public boolean accessibleInFutureLayers() {
+        return true;
     }
 }

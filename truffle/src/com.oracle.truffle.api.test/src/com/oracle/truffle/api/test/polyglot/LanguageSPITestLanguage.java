@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -47,16 +47,15 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 
 import com.oracle.truffle.api.CallTarget;
-import com.oracle.truffle.api.Truffle;
+import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
 import com.oracle.truffle.api.TruffleLanguage;
 import com.oracle.truffle.api.TruffleLanguage.ContextPolicy;
 import com.oracle.truffle.api.frame.VirtualFrame;
 import com.oracle.truffle.api.nodes.RootNode;
 import com.oracle.truffle.api.test.polyglot.LanguageSPITestLanguage.LanguageContext;
 
-@TruffleLanguage.Registration(id = LanguageSPITestLanguage.ID, name = LanguageSPITestLanguage.ID, version = "1.0", contextPolicy = ContextPolicy.SHARED, services = {
-                LanguageSPITestLanguageService2.class, LanguageSPITestLanguageService3.class})
-public class LanguageSPITestLanguage extends TruffleLanguage<LanguageContext> implements LanguageSPITestLanguageService {
+@TruffleLanguage.Registration(id = LanguageSPITestLanguage.ID, name = LanguageSPITestLanguage.ID, version = "1.0", contextPolicy = ContextPolicy.SHARED)
+public class LanguageSPITestLanguage extends TruffleLanguage<LanguageContext> {
 
     static final String ID = "LanguageSPITest";
 
@@ -76,10 +75,6 @@ public class LanguageSPITestLanguage extends TruffleLanguage<LanguageContext> im
         instanceCount.incrementAndGet();
     }
 
-    public static LanguageContext getContext() {
-        return getCurrentContext(LanguageSPITestLanguage.class);
-    }
-
     @Override
     protected boolean isThreadAccessAllowed(Thread thread, boolean singleThreaded) {
         return true;
@@ -87,14 +82,14 @@ public class LanguageSPITestLanguage extends TruffleLanguage<LanguageContext> im
 
     @Override
     protected CallTarget parse(ParsingRequest request) throws Exception {
-        return Truffle.getRuntime().createCallTarget(new RootNode(this) {
+        return new RootNode(this) {
             @Override
             public Object execute(VirtualFrame frame) {
                 getContext(); // We must have the context here
                 Object result = "null result";
                 if (runinside != null) {
                     try {
-                        result = runinside.apply(getContext().env);
+                        result = runCustomCode();
                     } finally {
                         runinside = null;
                     }
@@ -104,7 +99,12 @@ public class LanguageSPITestLanguage extends TruffleLanguage<LanguageContext> im
                 }
                 return result;
             }
-        });
+
+            @TruffleBoundary
+            private Object runCustomCode() {
+                return runinside.apply(getContext().env);
+            }
+        }.getCallTarget();
     }
 
     @Override
@@ -112,10 +112,6 @@ public class LanguageSPITestLanguage extends TruffleLanguage<LanguageContext> im
         LanguageSPITest.langContext = new LanguageContext();
         LanguageSPITest.langContext.env = env;
         LanguageSPITest.langContext.config = env.getConfig();
-        env.registerService(new LanguageSPITestLanguageService2() {
-        });
-        env.registerService(new LanguageSPITestLanguageService3() {
-        });
         return LanguageSPITest.langContext;
     }
 
@@ -124,37 +120,20 @@ public class LanguageSPITestLanguage extends TruffleLanguage<LanguageContext> im
         context.initialized = true;
     }
 
+    @SuppressWarnings("deprecation")
     @Override
     protected void disposeContext(LanguageContext context) {
         if (context.initialized) {
             assertSame(getContext(), context);
-            assertSame(context, getContextReference().get());
-
-            assertSame(context, new RootNode(this) {
-                @Override
-                public Object execute(VirtualFrame frame) {
-                    return null;
-                }
-            }.getLanguage(LanguageSPITestLanguage.class).getContextReference().get());
         }
 
         context.disposeCalled++;
     }
 
-    @Override
-    protected boolean isObjectOfLanguage(Object object) {
-        return false;
+    public static LanguageContext getContext() {
+        return CONTEXT_REF.get(null);
     }
-}
 
-interface LanguageSPITestLanguageService {
-}
+    private static final ContextReference<LanguageContext> CONTEXT_REF = ContextReference.create(LanguageSPITestLanguage.class);
 
-interface LanguageSPITestLanguageService2 {
-}
-
-interface LanguageSPITestLanguageService3 {
-}
-
-interface LanguageSPITestLanguageService4 {
 }

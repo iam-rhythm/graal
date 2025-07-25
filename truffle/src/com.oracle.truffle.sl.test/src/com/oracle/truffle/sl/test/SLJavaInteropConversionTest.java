@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -42,22 +42,24 @@ package com.oracle.truffle.sl.test;
 
 import static org.hamcrest.CoreMatchers.hasItems;
 import static org.hamcrest.CoreMatchers.instanceOf;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 
 import java.util.List;
 import java.util.Map;
 
 import org.graalvm.polyglot.Context;
+import org.graalvm.polyglot.HostAccess;
 import org.graalvm.polyglot.Source;
 import org.graalvm.polyglot.Value;
 import org.junit.Test;
 
 import com.oracle.truffle.sl.SLLanguage;
 
-public class SLJavaInteropConversionTest {
+public class SLJavaInteropConversionTest extends AbstractSLTest {
     public static class Validator {
+        @HostAccess.Export
         @SuppressWarnings("unchecked")
         public int validateObject(Object value1, Value value2) {
             assertThat(value1, instanceOf(Map.class));
@@ -69,6 +71,7 @@ public class SLJavaInteropConversionTest {
             return 42;
         }
 
+        @HostAccess.Export
         public int validateMap(Map<String, Object> map1, Map<String, Value> map2) {
             assertEquals(2, map1.size());
             assertThat(map1.keySet(), hasItems("a", "b"));
@@ -84,6 +87,7 @@ public class SLJavaInteropConversionTest {
             return 42;
         }
 
+        @HostAccess.Export
         public int validateList(List<Object> list1, List<Value> list2) {
             assertEquals(2, list1.size());
             for (Object value : list1) {
@@ -106,7 +110,7 @@ public class SLJavaInteropConversionTest {
                         "  obj.b = new();\n" +
                         "  return validator.validateObject(obj, obj);\n" +
                         "}";
-        try (Context context = Context.newBuilder(SLLanguage.ID).build()) {
+        try (Context context = newContextBuilder(SLLanguage.ID).build()) {
             context.eval(Source.newBuilder(SLLanguage.ID, sourceText, "Test").build());
             Value test = context.getBindings(SLLanguage.ID).getMember("test");
             Value res = test.execute(new Validator());
@@ -122,7 +126,7 @@ public class SLJavaInteropConversionTest {
                         "  obj.b = new();\n" +
                         "  return validator.validateMap(obj, obj);\n" +
                         "}";
-        try (Context context = Context.newBuilder(SLLanguage.ID).build()) {
+        try (Context context = newContextBuilder(SLLanguage.ID).build()) {
             context.eval(Source.newBuilder(SLLanguage.ID, sourceText, "Test").build());
             Value test = context.getBindings(SLLanguage.ID).getMember("test");
             Value res = test.execute(new Validator());
@@ -137,7 +141,7 @@ public class SLJavaInteropConversionTest {
                         "  array[1] = new();\n" +
                         "  return validator.validateList(array, array);\n" +
                         "}";
-        try (Context context = Context.newBuilder(SLLanguage.ID).build()) {
+        try (Context context = newContextBuilder(SLLanguage.ID).allowHostAccess(HostAccess.ALL).build()) {
             context.eval(Source.newBuilder(SLLanguage.ID, sourceText, "Test").build());
             Value test = context.getBindings(SLLanguage.ID).getMember("test");
             Value res = test.execute(new Validator(), new Object[2]);

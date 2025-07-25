@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2025, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -42,19 +42,35 @@ package org.graalvm.polyglot;
 
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.lang.ref.Reference;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalTime;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Objects;
+import java.util.concurrent.TimeoutException;
+import java.util.function.Consumer;
 import java.util.function.Predicate;
 import java.util.logging.Handler;
 import java.util.logging.Level;
+import java.util.stream.StreamSupport;
 
-import org.graalvm.polyglot.impl.AbstractPolyglotImpl.AbstractContextImpl;
-import org.graalvm.polyglot.proxy.Proxy;
+import org.graalvm.polyglot.impl.AbstractPolyglotImpl.AbstractContextDispatch;
+import org.graalvm.polyglot.impl.AbstractPolyglotImpl.IOAccessor;
 import org.graalvm.polyglot.io.FileSystem;
+import org.graalvm.polyglot.io.IOAccess;
 import org.graalvm.polyglot.io.MessageTransport;
+import org.graalvm.polyglot.io.ProcessHandler;
+import org.graalvm.polyglot.proxy.Proxy;
 
 /**
  * A polyglot context for Graal guest languages that allows to {@link #eval(Source) evaluate} code.
@@ -88,9 +104,10 @@ import org.graalvm.polyglot.io.MessageTransport;
  * {@link #initialize(String) initialized}.
  * <li>Then, we assert the result value by converting the result value as primitive <code>int</code>
  * .
- * <li>Finally, if the context is no longer needed, it is necessary to close it to ensure that all
- * resources are freed. Contexts are also {@link AutoCloseable} for use with the Java
- * {@code try-with-resources} statement.
+ * <li>Finally, when a context is no longer needed, it is recommended to explicitly close it to
+ * ensure timely release of resources. While contexts are automatically closed when no longer
+ * strongly reachable, explicit closure is still preferred. Contexts are also {@link AutoCloseable},
+ * allowing them to be used with the Java {@code try-with-resources} statement.
  * </ul>
  *
  * <h3>Configuration</h3>
@@ -204,14 +221,20 @@ import org.graalvm.polyglot.io.MessageTransport;
  * objects are referred to as <i>host objects</i>. Every Java value that is passed to a Graal
  * language is interpreted according to the specification described in {@link #asValue(Object)}.
  * Also see {@link Value#as(Class)} for further details.
+ * <p>
+ * By default only public classes, methods, and fields that are annotated with
+ * {@link HostAccess.Export @HostAccess.Export} are accessible to the guest language. This policy
+ * can be customized using {@link Builder#allowHostAccess(HostAccess)} when constructing the
+ * context.
  *
  * <p>
  * <b>Example</b> using a Java object from JavaScript:
  *
  * <pre>
  * public class JavaRecord {
- *     public int x;
+ *     &#64;HostAccess.Export public int x;
  *
+ *     &#64;HostAccess.Export
  *     public String name() {
  *         return "foo";
  *     }
@@ -247,6 +270,10 @@ import org.graalvm.polyglot.io.MessageTransport;
  * like ASTs or optimized code by specifying a single underlying engine. See {@link Engine} for more
  * details about code sharing.
  *
+ * <p>
+ * Context can be configured to allow value sharing between multiple contexts (allowed by default).
+ * See {@link Builder#allowValueSharing(boolean)} for details.
+ *
  * <h3>Proxies</h3>
  *
  * The {@link Proxy proxy interfaces} allow to mimic guest language objects, arrays, executables,
@@ -272,37 +299,91 @@ import org.graalvm.polyglot.io.MessageTransport;
  * currently executing code. If the context is currently executing some code, a different thread may
  * kill the running execution and close the context using {@link #close(boolean)}.
  *
+ * <h3>Context Exit</h3>
+ *
+ * A context is exited naturally by calling the {@link #close} method. A context may also be exited
+ * at the guest application request. There are two ways a guest language may exit.
+ * <ul>
+ * <li>Soft exit. A guest language throws a special exception that causes the embedder thread to
+ * eventually throw a {@link PolyglotException} with {@link PolyglotException#isExit()} returning
+ * <code>true</code> and {@link PolyglotException#getExitStatus()} returning the exit status code
+ * specified by the guest application. The special exception does not influence other threads and
+ * does not trigger context close on its own. Closing the context is up to the embedder.
+ * <li>Hard exit. A guest language uses a builtin command that unwinds all context threads and
+ * closes the context by force. Embedder threads also throw a {@link PolyglotException} with
+ * {@link PolyglotException#isExit()} returning <code>true</code> and
+ * {@link PolyglotException#getExitStatus()} returning the exit status code specified by the guest
+ * application. However, the context is closed automatically. The hard exit can be customized using
+ * {@link Builder#useSystemExit(boolean)}. If <code>true</code>, the context threads are unwound by
+ * calling {@link System#exit(int)} with the exit status parameter specified by the guest
+ * application. This operation terminates the whole host application.
+ * </ul>
+ *
  * <h3>Pre-Initialization</h3>
  *
  * The context pre-initialization can be used to perform expensive builtin creation in the time of
  * native compilation.
  * <p>
  * The context pre-initialization is enabled by setting the system property
- * {@code polyglot.engine.PreinitializeContexts} to a comma separated list of language ids which
- * should be pre-initialized, for example: {@code -Dpolyglot.engine.PreinitializeContexts=js,python}
+ * {@code polyglot.image-build-time.PreinitializeContexts} to a comma separated list of language ids
+ * which should be pre-initialized, for example:
+ * {@code -Dpolyglot.image-build-time.PreinitializeContexts=js,python}
  * <p>
  * See
  * {@code com.oracle.truffle.api.TruffleLanguage.patchContext(java.lang.Object, com.oracle.truffle.api.TruffleLanguage.Env)}
  * for details about pre-initialization for language implementers.
  *
- * @since 1.0
+ * @since 19.0
  */
 public final class Context implements AutoCloseable {
 
-    final AbstractContextImpl impl;
+    final AbstractContextDispatch dispatch;
+    final Object receiver;
+    final Context currentAPI;
+    final Context parent;
+    /**
+     * Strong reference to the creator {@link Context} to prevent it from being garbage collected
+     * and closed while API {@link Context} is still reachable.
+     */
+    final Context creatorContext;
+    final Engine engine;
 
-    Context(AbstractContextImpl impl) {
-        this.impl = impl;
+    @SuppressWarnings("unchecked")
+    <T> Context(AbstractContextDispatch dispatch, T receiver, Context parentContext, Engine engine) {
+        this.dispatch = dispatch;
+        this.receiver = receiver;
+        this.engine = engine;
+        this.currentAPI = new Context(this);
+        this.parent = parentContext;
+        this.creatorContext = this;
+    }
+
+    private Context() {
+        this.dispatch = null;
+        this.receiver = null;
+        this.engine = null;
+        this.currentAPI = null;
+        this.parent = null;
+        this.creatorContext = null;
+    }
+
+    private <T> Context(Context creatorAPI) {
+        this.dispatch = creatorAPI.dispatch;
+        this.receiver = creatorAPI.receiver;
+        this.engine = creatorAPI.engine.currentAPI;
+        this.currentAPI = null;
+        this.parent = creatorAPI.parent != null ? creatorAPI.parent.currentAPI : null;
+        this.creatorContext = creatorAPI;
     }
 
     /**
      * Provides access to meta-data about the underlying Graal {@linkplain Engine engine}.
      *
      * @return Graal {@link Engine} being used by this context
-     * @since 1.0
+     * @since 19.0
      */
     public Engine getEngine() {
-        return impl.getEngineImpl(this);
+        return engine;
     }
 
     /**
@@ -314,11 +395,11 @@ public final class Context implements AutoCloseable {
      * <b>Basic Example:</b>
      *
      * <pre>
-     * Context context = Context.create();
-     * Source source = Source.newBuilder("js", "42").name("mysource.js").build();
-     * Value result = context.eval(source);
-     * assert result.asInt() == 42;
-     * context.close();
+     * try (Context context = Context.create()) {
+     *     Source source = Source.newBuilder("js", "42", "mysource.js").build();
+     *     Value result = context.eval(source);
+     *     assert result.asInt() == 42;
+     * }
      * </pre>
      *
      * @param source a source object to evaluate
@@ -326,13 +407,19 @@ public final class Context implements AutoCloseable {
      * @throws IllegalStateException if the context is already closed and the current thread is not
      *             allowed to access it.
      * @throws IllegalArgumentException if the language of the given source is not installed or the
-     *             {@link Source#getMimeType() MIME type} is not supported with the language.
+     *             {@link Source#getMimeType() MIME type} is not supported with the language or the
+     *             validation of a {@link Source.Builder#option(String, String) source option}
+     *             failed.
      * @return the evaluation result. The returned instance is never <code>null</code>, but the
      *         result might represent a {@link Value#isNull() null} value.
-     * @since 1.0
+     * @since 19.0
      */
     public Value eval(Source source) {
-        return impl.eval(source.getLanguage(), source.impl);
+        try {
+            return (Value) dispatch.eval(receiver, source.getLanguage(), source);
+        } finally {
+            Reference.reachabilityFence(creatorContext);
+        }
     }
 
     /**
@@ -343,10 +430,10 @@ public final class Context implements AutoCloseable {
      * <b>Basic Example:</b>
      *
      * <pre>
-     * Context context = Context.create();
-     * Value result = context.eval("js", "42");
-     * assert result.asInt() == 42;
-     * context.close();
+     * try (Context context = Context.create()) {
+     *     Value result = context.eval("js", "42");
+     *     assert result.asInt() == 42;
+     * }
      * </pre>
      *
      * @throws PolyglotException in case the guest language code parsing or evaluation failed.
@@ -355,10 +442,123 @@ public final class Context implements AutoCloseable {
      *             allowed to access it, or if the given language is not installed.
      * @return the evaluation result. The returned instance is never <code>null</code>, but the
      *         result might represent a {@link Value#isNull() null} value.
-     * @since 1.0
+     * @since 19.0
      */
     public Value eval(String languageId, CharSequence source) {
-        return eval(Source.create(languageId, source));
+        try {
+            return eval(Source.create(languageId, source));
+        } finally {
+            Reference.reachabilityFence(creatorContext);
+        }
+    }
+
+    /**
+     * Parses but does not evaluate a given source by using the {@linkplain Source#getLanguage()
+     * language} specified in the source and returns a {@link Value value} that can be
+     * {@link Value#execute(Object...) executed}. If a parsing fails, e.g. due to a syntax error in
+     * the source, then a {@link PolyglotException} will be thrown. In case of a syntax error the
+     * {@link PolyglotException#isSyntaxError()} will return <code>true</code>. There is no
+     * guarantee that only syntax errors will be thrown by this method. Any other guest language
+     * exception might be thrown. If the validation succeeds then the method completes without
+     * throwing an exception.
+     * <p>
+     * The result value only supports an empty set of arguments to {@link Value#execute(Object...)
+     * execute}. If executed repeatedly then the source is evaluated multiple times.
+     * {@link Source.Builder#interactive(boolean) Interactive} sources will print their result for
+     * each execution of the parsing result to the {@link Builder#out(OutputStream) output} stream.
+     * <p>
+     * If the parsing succeeds and the source is {@link Source.Builder#cached(boolean) cached} then
+     * the result will automatically be reused for consecutive calls to {@link #parse(Source)} or
+     * {@link #eval(Source)}. If the validation should be performed for each invocation or the
+     * result should not be remembered then {@link Source.Builder#cached(boolean) cached} can be set
+     * to <code>false</code>. By default sources are cached.
+     * <p>
+     * <b>Basic Example:</b>
+     *
+     * <pre>
+     * try (Context context = Context.create()) {
+     *     Source source = Source.create("js", "42");
+     *     Value value;
+     *     try {
+     *         value = context.parse(source);
+     *         // parsing succeeded
+     *     } catch (PolyglotException e) {
+     *         if (e.isSyntaxError()) {
+     *             SourceSection location = e.getSourceLocation();
+     *             // syntax error detected at location
+     *         } else {
+     *             // other guest error detected
+     *         }
+     *         throw e;
+     *     }
+     *     // evaluate the parsed script
+     *     value.execute();
+     * }
+     * </pre>
+     *
+     * @param source a source object to parse
+     * @throws PolyglotException in case the guest language code parsing or validation failed.
+     * @throws IllegalArgumentException if the language of the given source is not installed or the
+     *             {@link Source#getMimeType() MIME type} is not supported with the language or the
+     *             validation of a {@link Source.Builder#option(String, String) source option}
+     *             failed.
+     * @throws IllegalStateException if the context is already closed and the current thread is not
+     *             allowed to access it, or if the given language is not installed.
+     * @since 20.2
+     */
+    public Value parse(Source source) throws PolyglotException {
+        try {
+            return (Value) dispatch.parse(receiver, source.getLanguage(), source);
+        } finally {
+            Reference.reachabilityFence(creatorContext);
+        }
+    }
+
+    /**
+     * Parses but does not evaluate a guest language code literal using a provided
+     * {@link Language#getId() language id} and character sequence and returns a {@link Value value}
+     * that can be {@link Value#execute(Object...) executed}. The provided {@link CharSequence} must
+     * represent an immutable String. This method represents a short-hand for {@link #parse(Source)}
+     * .
+     * <p>
+     * The result value only supports an empty set of arguments to {@link Value#execute(Object...)
+     * execute}. If executed repeatedly then the source is evaluated multiple times.
+     * {@link Source.Builder#interactive(boolean) Interactive} sources will print their result for
+     * each execution of the parsing result to the {@link Builder#out(OutputStream) output} stream.
+     * <p>
+     *
+     * <pre>
+     * try (Context context = Context.create()) {
+     *     Value value;
+     *     try {
+     *         value = context.parse("js", "42");
+     *         // parsing succeeded
+     *     } catch (PolyglotException e) {
+     *         if (e.isSyntaxError()) {
+     *             SourceSection location = e.getSourceLocation();
+     *             // syntax error detected at location
+     *         } else {
+     *             // other guest error detected
+     *         }
+     *         throw e;
+     *     }
+     *     // evaluate the parsed script
+     *     value.execute();
+     * }
+     * </pre>
+     *
+     * @throws PolyglotException in case the guest language code parsing or evaluation failed.
+     * @throws IllegalArgumentException if the language does not exist or is not accessible.
+     * @throws IllegalStateException if the context is already closed and the current thread is not
+     *             allowed to access it, or if the given language is not installed.
+     * @since 20.2
+     */
+    public Value parse(String languageId, CharSequence source) {
+        try {
+            return parse(Source.create(languageId, source));
+        } finally {
+            Reference.reachabilityFence(creatorContext);
+        }
     }
 
     /**
@@ -375,10 +575,14 @@ public final class Context implements AutoCloseable {
      * how to access these symbols.
      *
      * @throws IllegalStateException if context is already closed.
-     * @since 1.0
+     * @since 19.0
      */
     public Value getPolyglotBindings() {
-        return impl.getPolyglotBindings();
+        try {
+            return (Value) dispatch.getPolyglotBindings(receiver);
+        } finally {
+            Reference.reachabilityFence(creatorContext);
+        }
     }
 
     /**
@@ -392,10 +596,14 @@ public final class Context implements AutoCloseable {
      * @throws IllegalStateException if the context is already closed.
      * @throws PolyglotException in case the lazy initialization failed due to a guest language
      *             error.
-     * @since 1.0
+     * @since 19.0
      */
     public Value getBindings(String languageId) {
-        return impl.getBindings(languageId);
+        try {
+            return (Value) dispatch.getBindings(receiver, languageId);
+        } finally {
+            Reference.reachabilityFence(creatorContext);
+        }
     }
 
     /**
@@ -408,10 +616,24 @@ public final class Context implements AutoCloseable {
      * @throws PolyglotException in case the initialization failed due to a guest language error.
      * @throws IllegalArgumentException if the language does not exist or is not accessible.
      * @throws IllegalStateException if the context is already closed.
-     * @since 1.0
+     * @since 19.0
      */
     public boolean initialize(String languageId) {
-        return impl.initializeLanguage(languageId);
+        try {
+            return dispatch.initializeLanguage(receiver, languageId);
+        } finally {
+            Reference.reachabilityFence(creatorContext);
+        }
+    }
+
+    /**
+     * Resets all accumulators of resource limits for the associated context to zero.
+     *
+     * @since 19.3
+     */
+    public void resetLimits() {
+        dispatch.resetLimits(receiver);
+        Reference.reachabilityFence(creatorContext);
     }
 
     /**
@@ -439,6 +661,22 @@ public final class Context implements AutoCloseable {
      * it will be interpreted as polyglot {@link Value#isString() string}.
      * <li>If the <code>hostValue</code> is an instance of {@link Boolean}, then it will be
      * interpreted as polyglot {@link Value#isBoolean() boolean}.
+     * <li>If the <code>hostValue</code> is an instance of {@link Instant}, {@link LocalTime},
+     * {@link ZonedDateTime}, {@link java.util.Date} but not {@link java.sql.Date} or
+     * {@link java.sql.Time} then it will be interpreted as polyglot {@link Value#isTime() time}.
+     * <li>If the <code>hostValue</code> is an instance of {@link Instant}, {@link LocalDate},
+     * {@link ZonedDateTime}, {@link java.util.Date} but not {@link java.sql.Time} or
+     * {@link java.sql.Date} then it will be interpreted as polyglot {@link Value#isDate() date}.
+     * <li>If the <code>hostValue</code> is an instance of {@link ZoneId}, {@link Instant},
+     * {@link ZonedDateTime}, {@link java.util.Date} but not {@link java.sql.Time} and
+     * {@link java.sql.Date} then it will be interpreted as polyglot {@link Value#isTimeZone() time
+     * zone}.
+     * <li>If the <code>hostValue</code> is an instance of {@link ZonedDateTime}, {@link Instant},
+     * {@link ZonedDateTime}, {@link java.util.Date} but not {@link java.sql.Time} and
+     * {@link java.sql.Date} then it will be interpreted as polyglot {@link Value#isInstant()
+     * instant}.
+     * <li>If the <code>hostValue</code> is an instance of {@link Duration} then it will be
+     * interpreted as polyglot {@link Value#isDuration() duration}.
      * <li>If the <code>hostValue</code> is a {@link Proxy polyglot proxy}, then it will be
      * interpreted according to the behavior specified by the proxy. See the javadoc of the proxy
      * subclass for further details.
@@ -448,12 +686,15 @@ public final class Context implements AutoCloseable {
      * back to a polyglot value.
      * <li>Any other <code>hostValue</code> will be interpreted as {@link Value#isHostObject() host
      * object}. Host objects expose all their public java fields and methods as
-     * {@link Value#getMember(String) members}. In addition, Java arrays and subtypes of
-     * {@link List} will be interpreted as a value with {@link Value#hasArrayElements() array
-     * elements} and single method interfaces annotated with {@link FunctionalInterface} are
-     * {@link Value#execute(Object...) executable} directly. Java {@link Class} instances are
-     * interpreted as {@link Value#canInstantiate() instantiable}, but they do not expose Class
-     * methods as members.
+     * {@link Value#getMember(String) members}. In addition, Java arrays, subtypes of {@link List}
+     * and {@link Entry} will be interpreted as a value with {@link Value#hasArrayElements() array
+     * elements}. The subtypes of {@link Iterable} will be interpreted as a value with
+     * {@link Value#hasIterator()} iterator}. The subtypes of {@link Iterator} will be interpreted
+     * as an {@link Value#isIterator() iterator} value. The subtypes of {@link Map} will be
+     * interpreted as a value with {@link Value#hasHashEntries()} hash entries}. And single method
+     * interfaces annotated with {@link FunctionalInterface} are {@link Value#execute(Object...)
+     * executable} directly. Java {@link Class} instances are interpreted as
+     * {@link Value#canInstantiate() instantiable}, but they do not expose Class methods as members.
      * </ol>
      * <p>
      * <b>Basic Examples:</b>
@@ -467,9 +708,9 @@ public final class Context implements AutoCloseable {
      * assert context.asValue("42").isString();
      * assert context.asValue('c').isString();
      * assert context.asValue(new String[0]).hasArrayElements();
-     * assert context.asValue(new ArrayList<>()).isHostObject();
-     * assert context.asValue(new ArrayList<>()).hasArrayElements();
-     * assert context.asValue((Supplier<Integer>) () -> 42).execute().asInt() == 42;
+     * assert context.asValue(new ArrayList&lt;&gt;()).isHostObject();
+     * assert context.asValue(new ArrayList&lt;&gt;()).hasArrayElements();
+     * assert context.asValue((Supplier&lt;Integer&gt;) () -> 42).execute().asInt() == 42;
      * </pre>
      *
      * <h1>Mapping to Java methods and fields</h1>
@@ -539,10 +780,14 @@ public final class Context implements AutoCloseable {
      * @throws IllegalStateException if the context is already closed
      * @param hostValue the host value to convert to a polyglot value.
      * @return the polyglot value.
-     * @since 1.0
+     * @since 19.0
      */
     public Value asValue(Object hostValue) {
-        return impl.asValue(hostValue);
+        try {
+            return (Value) dispatch.asValue(receiver, hostValue);
+        } finally {
+            Reference.reachabilityFence(creatorContext);
+        }
     }
 
     /**
@@ -556,10 +801,36 @@ public final class Context implements AutoCloseable {
      * @throws IllegalStateException if the context is already {@link #close() closed}.
      * @throws PolyglotException if a language has denied execution on the current thread.
      * @see #leave() leave a context.
-     * @since 1.0
+     * @since 19.0
      */
     public void enter() {
-        impl.explicitEnter(this);
+        checkCreatorAccess("entered");
+        dispatch.explicitEnter(receiver);
+        Reference.reachabilityFence(creatorContext);
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * @since 19.0
+     */
+    @Override
+    public boolean equals(Object obj) {
+        if (obj instanceof Context) {
+            Context other = ((Context) obj);
+            return receiver.equals(other.receiver);
+        }
+        return false;
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * @since 19.0
+     */
+    @Override
+    public int hashCode() {
+        return Objects.hashCode(receiver);
     }
 
     /**
@@ -569,10 +840,17 @@ public final class Context implements AutoCloseable {
      * @throws IllegalStateException if the context is already closed or if the context was not
      *             {@link #enter() entered} on the current thread.
      * @see #enter() enter a context.
-     * @since 1.0
+     * @since 19.0
      */
     public void leave() {
-        impl.explicitLeave(this);
+        checkCreatorAccess("left");
+        dispatch.explicitLeave(receiver);
+    }
+
+    private void checkCreatorAccess(String operation) {
+        if (this.currentAPI == null) {
+            throw new IllegalStateException(String.format("Context instances that were received using Context.get() cannot be %s.", operation));
+        }
     }
 
     /**
@@ -588,18 +866,26 @@ public final class Context implements AutoCloseable {
      * {@link Builder#err(OutputStream) error output stream}. If a context was closed, then its
      * methods will throw an {@link IllegalStateException} when invoked. If an attempt to close a
      * context was successful, then consecutive calls to close have no effect.
+     * <p>
+     * For convenience, before the actual closing process begins, the close method leaves the
+     * context on the current thread, if it was entered {@link #enter() explicitly}.
      *
      * @param cancelIfExecuting if <code>true</code> then currently executing contexts will be
      *            {@link PolyglotException#isCancelled() cancelled}, else an
      *            {@link IllegalStateException} is thrown.
      * @see Engine#close() close an engine.
-     * @throws PolyglotException in case the close failed due to a guest language error.
+     * @throws PolyglotException in case the close failed due to a guest language error, or, if
+     *             cancelIfExecuting is <code>false</code>, the exception is also thrown when the
+     *             context was {@link PolyglotException#isCancelled() cancelled} or the context was
+     *             {@link PolyglotException#isExit() exited} at request of the guest application.
      * @throws IllegalStateException if the context is still running and cancelIfExecuting is
      *             <code>false</code>
-     * @since 1.0
+     * @since 19.0
      */
     public void close(boolean cancelIfExecuting) {
-        impl.close(this, cancelIfExecuting);
+        checkCreatorAccess("closed");
+        dispatch.close(receiver, cancelIfExecuting);
+        Reference.reachabilityFence(creatorContext);
     }
 
     /**
@@ -613,14 +899,92 @@ public final class Context implements AutoCloseable {
      * {@link Builder#err(OutputStream) error output stream}. If a context was closed, then its
      * methods will throw an {@link IllegalStateException}, when invoked. If an attempt to close a
      * context was successful, then consecutive calls to close have no effect.
+     * <p>
+     * For convenience, before the actual closing process begins, the close method leaves the
+     * context on the current thread, if it was entered {@link #enter() explicitly}.
      *
-     * @throws PolyglotException in case the close failed due to a guest language error.
+     * @throws PolyglotException in case the close failed due to a guest language error, or the
+     *             context was {@link PolyglotException#isCancelled() cancelled} or the context was
+     *             {@link PolyglotException#isExit() exited} at request of the guest application.
      * @throws IllegalStateException if the context is currently executing on another thread.
      * @see Engine#close() close an engine.
-     * @since 1.0
+     * @since 19.0
      */
     public void close() {
         close(false);
+    }
+
+    /**
+     * Use this method to interrupt this context. The interruption is non-destructive meaning the
+     * context is still usable after this method finishes. Please note that guest finally blocks are
+     * executed during interrupt. A context thread may not be interruptiple if it uses
+     * non-interruptible waiting or executes non-interruptible host code.
+     *
+     * This method may be used as a "soft cancel", meaning that it can be used before
+     * {@link #close(boolean) close(true)} is executed.
+     *
+     * @param timeout specifies the duration the interrupt method will wait for the active threads
+     *            of the context to be finished. Setting the duration to {@link Duration#ZERO 0}
+     *            means wait indefinitely.
+     * @throws IllegalStateException in case the context is entered in the current thread.
+     * @throws TimeoutException in case the interrupt was not successful, i.e., not all threads were
+     *             finished within the specified time limit.
+     *
+     * @since 20.3
+     */
+    public void interrupt(Duration timeout) throws TimeoutException {
+        checkCreatorAccess("interrupted");
+        if (!dispatch.interrupt(receiver, timeout)) {
+            throw new TimeoutException("Interrupt timed out.");
+        }
+        Reference.reachabilityFence(creatorContext);
+    }
+
+    /**
+     * Polls safepoints events and executes them for the current thread. This allows guest languages
+     * to run actions between long-running host method calls. Polyglot embeddings that rely on
+     * cancellation should call this method whenever a potentially long-running host operation is
+     * executed. For example, iterating an unbounded array. Guest language code and operations
+     * automatically poll safepoints regularly.
+     *
+     * <p>
+     * In this example we allow {@link Context#interrupt(Duration) interruption} and
+     * {@link Context#close(boolean) cancellation} to stop the processing of our event queue.
+     *
+     * <pre>
+     * class EventProcessor {
+     *
+     *   List<Object> events = new ArrayDeque(); // list of arbitrary size
+     *
+     *   public void processEvents() {
+     *     Context context = Context.getCurrent();
+     *
+     *     while (Object event = events.pop()) {
+     *
+     *         // process event
+     *
+     *         // allow cancellation and interruptions
+     *         try {
+     *             context.safepoint();
+     *         } catch (PolyglotException e) {
+     *             if (e.isInterrupted() || e.isCancelled()) {
+     *                 // break event processing if interrupted or cancelled
+     *                 throw e;
+     *             }
+     *             // other handling of guest errors or rethrow
+     *         }
+     *     }
+     *  }
+     * }
+     * </pre>
+     *
+     * @throws PolyglotException in case the close failed due to a guest language error.
+     * @throws IllegalStateException if the context is already {@link #close() closed}.
+     * @since 21.1
+     */
+    public void safepoint() {
+        dispatch.safepoint(receiver);
+        Reference.reachabilityFence(creatorContext);
     }
 
     /**
@@ -638,7 +1002,7 @@ public final class Context implements AutoCloseable {
      * {@link Engine#getOptions() options} of the {@link #getEngine() engine}.
      * </ul>
      * <p>
-     * The returned context may <b>not</b> be used to {@link #enter() enter} , {@link #leave()
+     * The returned context can <b>not</b> be used to {@link #enter() enter} , {@link #leave()
      * leave} or {@link #close() close} the context or {@link #getEngine() engine}. Invoking such
      * methods will cause an {@link IllegalStateException} to be thrown. This ensures that only the
      * {@link #create(String...) creator} of a context is allowed to enter, leave or close a
@@ -649,19 +1013,23 @@ public final class Context implements AutoCloseable {
      * in static fields.
      *
      * @throws IllegalStateException if no context is currently entered.
-     * @since 1.0
+     * @since 19.0
      */
     public static Context getCurrent() {
-        return Engine.getImpl().getCurrentContext();
+        Context context = (Context) Engine.getImpl().getCurrentContext();
+        if (context.currentAPI == null) {
+            return context;
+        } else {
+            return context.currentAPI;
+        }
     }
 
     /**
-     * Creates a context with default configuration.
+     * Creates a context with default configuration. This method is a shortcut for
+     * {@link #newBuilder(String...) newBuilder(permittedLanuages).build()}.
      *
-     * @param permittedLanguages names of languages permitted in this context. If no languages are
-     *            provided, then all installed languages will be permitted.
-     * @return a new context
-     * @since 1.0
+     * @see #newBuilder(String...)
+     * @since 19.0
      */
     public static Context create(String... permittedLanguages) {
         return newBuilder(permittedLanguages).build();
@@ -671,52 +1039,122 @@ public final class Context implements AutoCloseable {
      * Creates a builder for constructing a context with custom configuration.
      *
      * @param permittedLanguages names of languages permitted in the context. If no languages are
-     *            provided, then all installed languages will be permitted.
+     *            provided, then all installed languages will be permitted. If an explicit
+     *            {@link Builder#engine(Engine) engine} was specified then only those languages may
+     *            be used that were installed and {@link Engine#newBuilder(String...) permitted} by
+     *            the specified engine. Languages are validated when the context is
+     *            {@link Builder#build() built}. An {@link IllegalArgumentException} will be thrown
+     *            if an unknown or a language denied by the engine was used.
      * @return a builder that can create a context
-     * @since 1.0
+     * @since 19.0
      */
     public static Builder newBuilder(String... permittedLanguages) {
         return EMPTY.new Builder(permittedLanguages);
     }
 
-    private static final Context EMPTY = new Context(null);
+    private static final Context EMPTY = new Context();
+
+    static final Predicate<String> UNSET_HOST_LOOKUP = new Predicate<>() {
+        public boolean test(String t) {
+            return false;
+        }
+    };
+
+    static final Predicate<String> NO_HOST_CLASSES = new Predicate<>() {
+        public boolean test(String t) {
+            return false;
+        }
+    };
+
+    static final Predicate<String> ALL_HOST_CLASSES = new Predicate<>() {
+        public boolean test(String t) {
+            return true;
+        }
+    };
 
     /**
      * Builder class to construct {@link Context} instances. A builder instance is not thread-safe
      * and must not be used from multiple threads at the same time.
      *
      * @see Context
-     * @since 1.0
+     * @since 19.0
      */
     @SuppressWarnings("hiding")
     public final class Builder {
 
         private Engine sharedEngine;
-        private String[] onlyLanguages;
+        private String[] permittedLanguages;
 
         private OutputStream out;
         private OutputStream err;
         private InputStream in;
         private Map<String, String> options;
         private Map<String, String[]> arguments;
-        private Predicate<String> hostClassFilter;
-        private Boolean allowHostAccess;
+        private Predicate<String> hostClassFilter = UNSET_HOST_LOOKUP;
         private Boolean allowNativeAccess;
         private Boolean allowCreateThread;
         private boolean allowAllAccess;
         private Boolean allowIO;
         private Boolean allowHostClassLoading;
         private Boolean allowExperimentalOptions;
+        private Boolean allowHostAccess;
+        private boolean allowValueSharing = true;
+        private Boolean allowInnerContextOptions;
+        private PolyglotAccess polyglotAccess;
+        private HostAccess hostAccess;
+        private IOAccess ioAccess;
         private FileSystem customFileSystem;
         private MessageTransport messageTransport;
         private Object customLogHandler;
+        private Boolean allowCreateProcess;
+        private ProcessHandler processHandler;
+        private EnvironmentAccess environmentAccess;
+        private ResourceLimits resourceLimits;
+        private Map<String, String> environment;
+        private ZoneId zone;
+        private Path currentWorkingDirectory;
+        private ClassLoader hostClassLoader;
+        private boolean useSystemExit;
+        private SandboxPolicy sandboxPolicy;
 
-        Builder(String... onlyLanguages) {
-            Objects.requireNonNull(onlyLanguages);
-            for (String onlyLanguage : onlyLanguages) {
-                Objects.requireNonNull(onlyLanguage);
+        Builder(String... permittedLanguages) {
+            Objects.requireNonNull(permittedLanguages);
+            for (String language : permittedLanguages) {
+                Objects.requireNonNull(language);
             }
-            this.onlyLanguages = onlyLanguages;
+            this.permittedLanguages = permittedLanguages;
+        }
+
+        /**
+         * Applies the provided Consumer to this Builder instance.
+         * <p>
+         * This method allows encapsulating complex Builder configuration logic into separate
+         * methods while maintaining the fluent API of {@link Context.Builder}.
+         * <p>
+         * Example
+         *
+         * <pre>
+         * private void configureEnv(Builder builder) {
+         *     return builder.environment("DEBUG", appConfiguration.isDebugMode())
+         *                   .environment("APP_NAME", appConfiguration.getApplicationName())
+         *                   .environment("JAVA_VER", System.getProperty("java.version"))&#64;
+         * }
+         *
+         * public Context createContext() {
+         *     return Context.newBuilder()
+         *                   .apply(this::configureEnv)
+         *                   .allowNativeAccess(true)
+         *                   .build();
+         * }
+         * </pre>
+         *
+         * @param action The Consumer that configures this Builder instance; it is not supposed to
+         *            finalize the Builder using {@link #build()}.
+         * @since 25.0
+         */
+        public Builder apply(Consumer<Builder> action) {
+            action.accept(this);
+            return this;
         }
 
         /**
@@ -725,7 +1163,7 @@ public final class Context implements AutoCloseable {
          * share/cache certain system resources like ASTs or optimized code by specifying a single
          * underlying engine. See {@link Engine} for more details about system resource sharing.
          *
-         * @since 1.0
+         * @since 19.0
          */
         public Builder engine(Engine engine) {
             Objects.requireNonNull(engine);
@@ -738,7 +1176,7 @@ public final class Context implements AutoCloseable {
          * output stream configured for the {@link #engine(Engine) engine} or standard error stream
          * is used.
          *
-         * @since 1.0
+         * @since 19.0
          */
         public Builder out(OutputStream out) {
             Objects.requireNonNull(out);
@@ -751,7 +1189,7 @@ public final class Context implements AutoCloseable {
          * error stream configured for the {@link #engine(Engine) engine} or standard error stream
          * is used.
          *
-         * @since 1.0
+         * @since 19.0
          */
         public Builder err(OutputStream err) {
             Objects.requireNonNull(err);
@@ -763,7 +1201,7 @@ public final class Context implements AutoCloseable {
          * Sets the input stream to be used for the context. If not set, then either the input
          * stream configured for the {@link #engine(Engine) engine} or standard in stream is used.
          *
-         * @since 1.0
+         * @since 19.0
          */
         public Builder in(InputStream in) {
             Objects.requireNonNull(in);
@@ -774,19 +1212,112 @@ public final class Context implements AutoCloseable {
         /**
          * Allows guest languages to access the host language by loading new classes. Default is
          * <code>false</code>. If {@link #allowAllAccess(boolean) all access} is set to
-         * <code>true</code>, then host access is enabled if not allowed explicitly.
+         * <code>true</code>, then host access is enabled if not disallowed explicitly.
          *
-         * @since 1.0
+         * @since 19.0
+         * @deprecated use {@link #allowHostAccess(HostAccess)} or
+         *             {@link #allowHostClassLookup(Predicate)} instead.
          */
+        @Deprecated(since = "19.0")
         public Builder allowHostAccess(boolean enabled) {
             this.allowHostAccess = enabled;
             return this;
         }
 
         /**
+         * Configures which public constructors, methods or fields of public classes are accessible
+         * by guest applications. By default if {@link #allowAllAccess(boolean)} is
+         * <code>false</code> the {@link HostAccess#EXPLICIT} policy will be used, otherwise
+         * {@link HostAccess#ALL}.
+         * <p>
+         * Repeated calls of this method on the same {@link Context.Builder} instance override the
+         * previously set {@link HostAccess} configuration. Use
+         * {@link #extendHostAccess(HostAccess, Consumer)} for composable {@link HostAccess}
+         * configuration.
+         *
+         * @see HostAccess#EXPLICIT EXPLICIT - to allow explicitly annotated constructors, methods
+         *      or fields.
+         * @see HostAccess#ALL ALL - to allow unrestricted access (use only for trusted guest
+         *      applications).
+         * @see HostAccess#NONE NONE - to not allow any access.
+         * @see HostAccess#newBuilder() newBuilder() - to create a custom configuration.
+         * @see #extendHostAccess(HostAccess, Consumer) - for composable {@code HostAccess}
+         *      configuration.
+         *
+         * @since 19.0
+         */
+        public Builder allowHostAccess(HostAccess config) {
+            this.hostAccess = config;
+            return this;
+        }
+
+        /**
+         * Extends the existing host access configuration that determines, which public
+         * constructors, methods or fields of public classes are accessible by guest applications.
+         * <p>
+         * This method allows composing code that configures {@link HostAccess}.
+         * <p>
+         * The provided {@code setup} is applied to a {@link HostAccess.Builder} instance, which is
+         * initialized with the current {@link HostAccess} configuration. If no {@link HostAccess}
+         * configuration exists, the {@code defaultInitialValue} is used to initialize the builder.
+         * <p>
+         * Example usage
+         *
+         * <pre>
+         * public static final class MyArrayWrapper {
+         *     private final Value v;
+         *
+         *     private MyArrayWrapper(Value v) {
+         *         this.v = v;
+         *     }
+         *
+         *     // ...
+         *
+         *     public static void addMapping(Context.Builder builder) {
+         *         builder.extendHostAccess(HostAccess.NONE,
+         *                         b -> b.targetTypeMapping(Value.class, MyArrayWrapper.class,
+         *                                         Value::hasArrayElements,
+         *                                         MyArrayWrapper::new));
+         *     }
+         * }
+         *
+         * // ...
+         *
+         * public Context createContext() {
+         *     return Context.newBuilder().
+         *                   .allowHostAccess(HostAccess.ALL)
+         *                   .apply(MyArrayWrapper::addMapping)
+         *                     // ...
+         *                   .build();
+         * }
+         * </pre>
+         *
+         * In this example the call to {@code extendHostAccess} in
+         * {@code MyArrayWrapper::addMapping} does not override the {@link HostAccess#ALL}
+         * configured before. Using {@link #allowHostAccess(HostAccess)} in this situation would
+         * override the previous configuration.
+         *
+         * @see #allowHostAccess - to set or override existing {@code HostAccess} configuration.
+         * @see #extendIO(IOAccess, Consumer) - to extend existing {@code IOAccess} configuration.
+         * @param defaultInitialValue - the initial value to use if no {@code HostAccess} is
+         *            configured.
+         * @param setup - Consumer that receives a {@link HostAccess.Builder} preconfigured with the
+         *            current {@link HostAccess} configuration.
+         * @return the {@link Builder}
+         * @since 25.0
+         */
+        public Builder extendHostAccess(HostAccess defaultInitialValue, Consumer<HostAccess.Builder> setup) {
+            HostAccess prototype = hostAccess != null ? hostAccess : defaultInitialValue;
+            HostAccess.Builder builder = HostAccess.newBuilder(prototype);
+            setup.accept(builder);
+            allowHostAccess(builder.build());
+            return this;
+        }
+
+        /**
          * Allows guest languages to access the native interface.
          *
-         * @since 1.0
+         * @since 19.0
          */
         public Builder allowNativeAccess(boolean enabled) {
             this.allowNativeAccess = enabled;
@@ -800,7 +1331,7 @@ public final class Context implements AutoCloseable {
          * Threads created by guest languages are closed, when the context is {@link Context#close()
          * closed}.
          *
-         * @since 1.0
+         * @since 19.0
          */
         public Builder allowCreateThread(boolean enabled) {
             this.allowCreateThread = enabled;
@@ -811,7 +1342,8 @@ public final class Context implements AutoCloseable {
          * Sets the default value for all privileges. If not explicitly specified, then all access
          * is <code>false</code>. If all access is enabled then certain privileges may still be
          * disabled by configuring it explicitly using the builder (either before or after the call
-         * to {@link #allowAllAccess(boolean) allowAllAccess()}).
+         * to {@link #allowAllAccess(boolean) allowAllAccess()}). Allowing all access should only be
+         * set if the guest application is fully trusted.
          * <p>
          * If <code>true</code>, grants the context the same access privileges as the host virtual
          * machine. If the host VM runs without a {@link SecurityManager security manager} enabled,
@@ -823,17 +1355,22 @@ public final class Context implements AutoCloseable {
          * Grants full access to the following privileges by default:
          * <ul>
          * <li>The {@link #allowCreateThread(boolean) creation} and use of new threads.
-         * <li>The access to public {@link #allowHostAccess(boolean) host classes}.
+         * <li>The access to public {@link #allowHostAccess(HostAccess) host classes}.
          * <li>The loading of new {@link #allowHostClassLoading(boolean) host classes} by adding
          * entries to the class path.
          * <li>Exporting new members into the polyglot {@link Context#getPolyglotBindings()
          * bindings}.
-         * <li>Unrestricted {@link #allowIO(boolean) IO operations} on host system.
+         * <li>Unrestricted {@link #allowIO(IOAccess) IO operations} on host system.
          * <li>Passing {@link #allowExperimentalOptions(boolean) experimental options}.
+         * <li>The {@link #allowCreateProcess(boolean) creation} and use of new sub-processes.
+         * <li>The {@link #allowEnvironmentAccess(org.graalvm.polyglot.EnvironmentAccess) access} to
+         * process environment variables.
+         * <li>The {@link #allowInnerContextOptions(boolean) changing} of options for of inner
+         * contexts spawned by the language.
          * </ul>
          *
          * @param enabled <code>true</code> for all access by default.
-         * @since 1.0
+         * @since 19.0
          */
         public Builder allowAllAccess(boolean enabled) {
             this.allowAllAccess = enabled;
@@ -844,13 +1381,96 @@ public final class Context implements AutoCloseable {
          * If host class loading is enabled, then the guest language is allowed to load new host
          * classes via jar or class files. If {@link #allowAllAccess(boolean) all access} is set to
          * <code>true</code>, then the host class loading is enabled if it is not disallowed
-         * explicitly. For host class loading to be useful, {@link #allowIO(boolean) IO} operations
-         * and {@link #allowHostAccess(boolean) host access} need to be allowed as well.
+         * explicitly. For host class loading to be useful, {@link #allowIO(IOAccess) IO} operations
+         * {@link #allowHostClassLookup(Predicate) host class lookup}, and the
+         * {@link #allowHostAccess(org.graalvm.polyglot.HostAccess) host access policy} needs to be
+         * configured as well.
          *
-         * @since 1.0
+         * @see #allowHostAccess(HostAccess)
+         * @see #allowHostClassLookup(Predicate)
+         * @since 19.0
          */
         public Builder allowHostClassLoading(boolean enabled) {
             this.allowHostClassLoading = enabled;
+            return this;
+        }
+
+        /**
+         * Sets a filter that specifies the Java host classes that can be looked up by the guest
+         * application. If set to <code>null</code> then no class lookup is allowed and relevant
+         * language builtins are not available (e.g. <code>Java.type</code> in JavaScript). If the
+         * <code>classFilter</code> parameter is set to a filter predicate, then language builtins
+         * are available and classes can be looked up if the filter predicate returns
+         * <code>true</code> for the fully qualified class name. If the filter returns
+         * <code>false</code>, then the class cannot be looked up and as a result throws a guest
+         * language error when accessed. By default and if {@link #allowAllAccess(boolean) all
+         * access} is <code>false</code>, host class lookup is disabled. By default and if
+         * {@link #allowAllAccess(boolean) all access} is <code>true</code>, then all classes may be
+         * looked up by the guest application.
+         * <p>
+         * In order to access class members looked up by the guest application a
+         * {@link #allowHostAccess(org.graalvm.polyglot.HostAccess) host access policy} needs to be
+         * set or {@link #allowAllAccess(boolean) all access} needs to be set to <code>true</code>.
+         * <p>
+         * To load new classes the context uses the
+         * {@link Context.Builder#hostClassLoader(java.lang.ClassLoader) hostClassLoader} if
+         * specified or the {@link Thread#getContextClassLoader() context class loader} that will be
+         * captured when the context is {@link #build() built}. If an explicit
+         * {@link #engine(Engine) engine} was specified, then the context class loader at engine
+         * {@link Engine.Builder#build() build-time} will be used instead. When the Java module
+         * system is available (>= JDK 9) then only classes are accessible that are exported to the
+         * unnamed module of the captured class loader.
+         * <p>
+         * <h3>Example usage with JavaScript:</h3>
+         *
+         * <pre>
+         * public class MyClass {
+         *     &#64;HostAccess.Export
+         *     public int accessibleMethod() {
+         *         return 42;
+         *     }
+         *
+         *     public static void main(String[] args) {
+         *         try (Context context = Context.newBuilder() //
+         *                         .allowHostClassLookup(c -> c.equals("myPackage.MyClass")) //
+         *                         .build()) {
+         *             int result = context.eval("js", "" +
+         *                             "var MyClass = Java.type('myPackage.MyClass');" +
+         *                             "new MyClass().accessibleMethod()").asInt();
+         *             assert result == 42;
+         *         }
+         *     }
+         * }
+         * </pre>
+         *
+         * <h4>In this example:</h4>
+         * <ul>
+         * <li>We create a new context with the {@link Builder#allowHostClassLookup(Predicate)
+         * permission} to look up the class <code>myPackage.MyClass</code> in the guest language
+         * application.
+         * <li>We evaluate a JavaScript code snippet that accesses the Java class
+         * <code>myPackage.MyClass</code> using the <code>Java.type</code> builtin provided by the
+         * JavaScript language implementation. Other classes can only be looked up if the provided
+         * class filter returns <code>true</code> for their name.
+         * <li>We create a new instance of the Java class <code>MyClass</code> by using the
+         * JavaScript <code>new</code> keyword.
+         * <li>We call the method <code>accessibleMethod</code> which returns <code>42</code>. The
+         * method is accessible to the guest language because because the enclosing class and the
+         * declared method are public, as well as annotated with the
+         * {@link HostAccess.Export @HostAccess.Export} annotation. Which Java members of classes
+         * are accessible can be configured using the {@link #allowHostAccess(HostAccess) host
+         * access policy}.
+         * </ul>
+         *
+         * @param classFilter a predicate that returns <code>true</code> or <code>false</code> for a
+         *            qualified Java class name or <code>null</code> to disable host class lookup.
+         * @see #allowHostClassLoading(boolean) allowHostClassLoading - to allow loading of classes.
+         * @see #allowHostAccess(HostAccess) allowHostAccess - to configure the access policy of
+         *      host values for guest languages.
+         * @since 19.0
+         */
+        public Builder allowHostClassLookup(Predicate<String> classFilter) {
+            this.hostClassFilter = classFilter;
             return this;
         }
 
@@ -859,8 +1479,11 @@ public final class Context implements AutoCloseable {
          * options in production environments. If set to {@code false} (the default), then passing
          * an experimental option results in an {@link IllegalArgumentException} when the context is
          * built.
+         * <p>
+         * Alternatively {@link Engine.Builder#allowExperimentalOptions(boolean)} may be used when
+         * constructing the context using an {@link #engine(Engine) explicit engine}.
          *
-         * @since 1.0
+         * @since 19.0
          */
         public Builder allowExperimentalOptions(boolean enabled) {
             this.allowExperimentalOptions = enabled;
@@ -868,16 +1491,90 @@ public final class Context implements AutoCloseable {
         }
 
         /**
+         * Allow polyglot access using the provided policy. If {@link #allowAllAccess(boolean) all
+         * access} is <code>true</code> then the default polyglot access policy is
+         * {@link PolyglotAccess#ALL}, otherwise {@link PolyglotAccess#NONE}. The provided access
+         * policy must not be <code>null</code>.
+         *
+         * @since 19.0
+         */
+        public Builder allowPolyglotAccess(PolyglotAccess accessPolicy) {
+            Objects.requireNonNull(accessPolicy);
+            this.polyglotAccess = accessPolicy;
+            return this;
+        }
+
+        /**
+         * Enables or disables sharing of any {@link Value value} between contexts. Value sharing is
+         * enabled by default and is not affected by {@link #allowAllAccess(boolean)}.
+         * <p>
+         * If this option is set to <code>true</code> (default) then any value that is associated
+         * with one context will be automatically migrated when passed to another context.
+         * Primitive, {@link Value#isHostObject() host} and {@link Value#isHostObject() proxy}
+         * values can be migrated without limitation. When guest language values are migrated, they
+         * capture and remember their original context. Guest language objects need to be accessed
+         * when their respective context is {@link Context#enter() entered}, therefore before any
+         * access their original context is entered and subsequently left. Entering the original
+         * context may fail, for example when the context of a original context value only allows
+         * single threaded access to values or if it was {@link Context#close() closed} in the mean
+         * time.
+         * <p>
+         * If this option is set to <code>false</code> then any value passed from one context to
+         * another will fail with an error indicating that sharing is disallowed. Turning sharing
+         * off can be useful when strict safety is required and it would be considered an error if a
+         * value of one context is passed to another.
+         * <p>
+         * Values of a guest language that are passed from one context to another are restricted to
+         * using the interoperability protocol only. In practice this often leads to slight changes
+         * and incompatibilities in behavior. For example, the prototype of a JavaScript object
+         * passed from one context to another is not writable, as the interoperability protocol does
+         * not allow such an operation (yet). A typical use-case is passing big immutable data
+         * structures that are infrequently accessed from one context to another, without copying
+         * them. In practice, passing values from one context to another should be avoided if
+         * possible, as their access is slower and their language compatibility reduced. This
+         * feature was introduced in 21.3. Older versions fail when guest values are passed from one
+         * context to another.
+         *
+         * @since 21.3
+         */
+        public Builder allowValueSharing(boolean enabled) {
+            this.allowValueSharing = enabled;
+            return this;
+        }
+
+        /**
+         * Allows this context to spawn inner contexts that may change option values set for the
+         * outer context. If this privilege is set to <code>false</code> then inner contexts are
+         * only allowed to use the same option values as its outer context. If this privilege is set
+         * to <code>true</code> then the context may modify option values for inner contexts it
+         * creates. This privilege should not be enabled for security sensitive use-cases. The
+         * default value for this privilege is inherited from {@link #allowAllAccess(boolean)}.
+         * <p>
+         * Inner contexts are spawned by language implementations to implement language embeddings
+         * of their own. For example, some languages provide dedicated APIs to spawn language
+         * virtual machines. Such APIs are often implemented using the inner context mechanism.
+         *
+         * @see #allowAllAccess(boolean)
+         * @since 22.3
+         */
+        public Builder allowInnerContextOptions(boolean enabled) {
+            this.allowInnerContextOptions = enabled;
+            return this;
+        }
+
+        /**
          * Sets a class filter that allows to limit the classes that are allowed to be loaded by
          * guest languages. If the filter returns <code>true</code>, then the class is accessible,
          * otherwise it is not accessible and throws a guest language error when accessed. In order
-         * to have an effect, {@link #allowHostAccess(boolean)} or {@link #allowAllAccess(boolean)}
-         * needs to be set to <code>true</code>.
+         * to have an effect, {@link #allowHostAccess(org.graalvm.polyglot.HostAccess)} or
+         * {@link #allowAllAccess(boolean)} needs to be set to <code>true</code>.
          *
          * @param classFilter a predicate that returns <code>true</code> or <code>false</code> for a
          *            java qualified class name.
-         * @since 1.0
+         * @since 19.0
+         * @deprecated use {@link #allowHostClassLookup(Predicate)} instead.
          */
+        @Deprecated(since = "19.0")
         public Builder hostClassFilter(Predicate<String> classFilter) {
             Objects.requireNonNull(classFilter);
             this.hostClassFilter = classFilter;
@@ -898,7 +1595,7 @@ public final class Context implements AutoCloseable {
          * The given key and value must not be <code>null</code>.
          *
          * @see Engine.Builder#option(String, String) To specify an option for the engine.
-         * @since 1.0
+         * @since 19.0
          */
         public Builder option(String key, String value) {
             Objects.requireNonNull(key);
@@ -916,11 +1613,11 @@ public final class Context implements AutoCloseable {
          *
          * @param options a map options.
          * @see #option(String, String) To set a single option.
-         * @since 1.0
+         * @since 19.0
          */
         public Builder options(Map<String, String> options) {
-            for (String key : options.keySet()) {
-                option(key, options.get(key));
+            for (var entry : options.entrySet()) {
+                option(entry.getKey(), entry.getValue());
             }
             return this;
         }
@@ -935,7 +1632,7 @@ public final class Context implements AutoCloseable {
          * @param language the language id of the primary language.
          * @param args an array of arguments passed to the guest language program.
          * @throws IllegalArgumentException if an invalid language id was specified.
-         * @since 1.0
+         * @since 19.0
          */
         public Builder arguments(String language, String[] args) {
             Objects.requireNonNull(language);
@@ -955,14 +1652,88 @@ public final class Context implements AutoCloseable {
         }
 
         /**
+         * Configures guest language access to host IO. Default is {@link IOAccess#NONE}. If
+         * {@link #allowAllAccess(boolean) all access} is set to {@code true}, then
+         * {@link IOAccess#ALL} is used unless explicitly set. This method can be used to virtualize
+         * file system access in the guest language by using an {@link IOAccess} with a custom
+         * filesystem.
+         * <p>
+         * Repeated calls of this method on the same {@link Context.Builder} instance override the
+         * previously set {@link IOAccess} configuration. Use {@link #extendIO(IOAccess, Consumer)}
+         * for composable {@link IOAccess} configuration.
+         *
+         * @see IOAccess#ALL - to allow full host IO access.
+         * @see IOAccess#NONE - to disable host IO access.
+         * @see IOAccess#newBuilder() - to create a custom configuration.
+         * @see #extendIO(IOAccess, Consumer) - for composable IOAccess configuration.
+         *
+         * @param ioAccess the IO configuration
+         * @return the {@link Builder}
+         * @since 23.0
+         */
+        public Builder allowIO(IOAccess ioAccess) {
+            this.ioAccess = ioAccess;
+            return this;
+        }
+
+        /**
+         * Extends the existing guest language access to host IO configuration. This method allows
+         * composing code that configures {@link IOAccess}.
+         * <p>
+         * The provided {@code setup} is applied to a {@link IOAccess.Builder} instance, which is
+         * initialized with the current {@link IOAccess} configuration. If no {@link IOAccess}
+         * configuration exists, the {@code defaultInitialValue} is used to initialize the builder.
+         * <p>
+         * Example usage
+         *
+         * <pre>
+         * private void addFileSystem(IOAccess.Builder builder) {
+         *     builder.fileSystem(new MyCustomFileSystem());
+         * }
+         *
+         * public Context createContext() {
+         *     return Context.newBuilder().extendIOAccess(IOAccess.NONE, this::addFileSystem)
+         *                     // ...
+         *                     .extendIOAccess(IOAccess.NONE, b -> b.allowHostSocketAccess(true))
+         *                     // ...
+         *                     .build();
+         * }
+         * </pre>
+         *
+         * In this example the call to {@code extendIOAccess} does not override the
+         * {@link FileSystem} configured in {@code addFileSystem}. Using {@link #allowIO(IOAccess)}
+         * in this situation would override the configured {@link FileSystem}.
+         *
+         * @see #allowIO(IOAccess) - to set or override existing {@code IOAccess}.
+         * @see #extendHostAccess(HostAccess, Consumer) - to extend existing {@code HostAccess}
+         *      configuration.
+         * @param defaultInitialValue - the initial value to use if no {@link IOAccess} is
+         *            configured.
+         * @param setup - Consumer that receives a {@link IOAccess.Builder} preconfigured with the
+         *            current {@link IOAccess} configuration.
+         * @return the {@link Builder}
+         * @since 25.0
+         */
+        public Builder extendIO(IOAccess defaultInitialValue, Consumer<IOAccess.Builder> setup) {
+            IOAccess prototype = ioAccess != null ? ioAccess : defaultInitialValue;
+            IOAccess.Builder builder = IOAccess.newBuilder(prototype);
+            setup.accept(builder);
+            allowIO(builder.build());
+            return this;
+        }
+
+        /**
          * If <code>true</code>, allows guest language to perform unrestricted IO operations on host
          * system. Default is <code>false</code>. If {@link #allowAllAccess(boolean) all access} is
          * set to <code>true</code>, then IO is enabled if not allowed explicitly.
          *
          * @param enabled {@code true} to enable Input/Output
          * @return the {@link Builder}
-         * @since 1.0
+         * @since 19.0
+         * @deprecated If the value was previously {@code true} pass {@link IOAccess#ALL}, otherwise
+         *             pass {@link IOAccess#NONE}.
          */
+        @Deprecated(since = "23.0")
         public Builder allowIO(final boolean enabled) {
             allowIO = enabled;
             return this;
@@ -973,8 +1744,11 @@ public final class Context implements AutoCloseable {
          *
          * @param fileSystem the file system to be installed
          * @return the {@link Builder}
-         * @since 1.0
+         * @since 19.0
+         * @deprecated If a file system was previously set use
+         *             {@code allowIO(IOAccess.newBuilder().fileSystem(fileSystem).build())}.
          */
+        @Deprecated(since = "23.0")
         public Builder fileSystem(final FileSystem fileSystem) {
             Objects.requireNonNull(fileSystem, "FileSystem must be non null.");
             this.customFileSystem = fileSystem;
@@ -990,7 +1764,7 @@ public final class Context implements AutoCloseable {
          *
          * @param serverTransport an implementation of message transport interceptor
          * @see MessageTransport
-         * @since 1.0
+         * @since 19.0
          */
         public Builder serverTransport(final MessageTransport serverTransport) {
             Objects.requireNonNull(serverTransport, "MessageTransport must be non null.");
@@ -1022,11 +1796,25 @@ public final class Context implements AutoCloseable {
          *            passed {@code logHandler} is closed when the context is {@link Context#close()
          *            closed}.
          * @return the {@link Builder}
-         * @since 1.0
+         * @since 19.0
          */
         public Builder logHandler(final Handler logHandler) {
             Objects.requireNonNull(logHandler, "Handler must be non null.");
             this.customLogHandler = logHandler;
+            return this;
+        }
+
+        /**
+         * Sets the default time zone to be used for this context. If not set, or explicitly set to
+         * <code>null</code> then the {@link ZoneId#systemDefault() system default} zone will be
+         * used.
+         *
+         * @return the {@link Builder}
+         * @see ZoneId#systemDefault()
+         * @since 19.2.0
+         */
+        public Builder timeZone(final ZoneId zone) {
+            this.zone = zone;
             return this;
         }
 
@@ -1055,7 +1843,7 @@ public final class Context implements AutoCloseable {
          *            passed {@code logOut} stream is closed when the context is
          *            {@link Context#close() closed}.
          * @return the {@link Builder}
-         * @since 1.0
+         * @since 19.0
          */
         public Builder logHandler(final OutputStream logOut) {
             Objects.requireNonNull(logOut, "LogOut must be non null.");
@@ -1064,24 +1852,267 @@ public final class Context implements AutoCloseable {
         }
 
         /**
+         * If <code>true</code>, allows guest language to execute external processes. Default is
+         * <code>false</code>. If {@link #allowAllAccess(boolean) all access} is set to
+         * <code>true</code>, then process creation is enabled if not denied explicitly.
+         *
+         * @param enabled {@code true} to enable external process creation
+         * @since 19.1.0
+         */
+        public Builder allowCreateProcess(boolean enabled) {
+            this.allowCreateProcess = enabled;
+            return this;
+        }
+
+        /**
+         * Installs a {@link ProcessHandler} responsible for external process creation.
+         *
+         * @param handler the handler to be installed
+         * @since 19.1.0
+         */
+        public Builder processHandler(ProcessHandler handler) {
+            Objects.requireNonNull(handler, "Handler must be non null.");
+            this.processHandler = handler;
+            return this;
+        }
+
+        /**
+         * Assigns resource limit configuration to a context. By default no resource limits are
+         * assigned. The limits will be enabled for all contexts created using this builder.
+         * Assigning a limit may have performance impact of all contexts that run with the same
+         * engine.
+         *
+         * @see ResourceLimits for usage examples
+         * @since 19.3.0
+         */
+        public Builder resourceLimits(ResourceLimits limits) {
+            this.resourceLimits = limits;
+            return this;
+        }
+
+        /**
+         * Sets a code sandbox policy to a context. By default, the context's sandbox policy is
+         * {@link SandboxPolicy#TRUSTED}, there are no restrictions to the context configuration.
+         *
+         * @see SandboxPolicy
+         * @since 23.0
+         */
+        public Builder sandbox(SandboxPolicy policy) {
+            Engine.validateSandboxPolicy(this.sandboxPolicy, policy);
+            this.sandboxPolicy = policy;
+            return this;
+        }
+
+        /**
+         * Allow environment access using the provided policy. If {@link #allowAllAccess(boolean)
+         * all access} is {@code true} then the default environment access policy is
+         * {@link EnvironmentAccess#INHERIT}, otherwise {@link EnvironmentAccess#NONE}. The provided
+         * access policy must not be {@code null}.
+         *
+         * @param accessPolicy the {@link EnvironmentAccess environment access policy}
+         * @since 19.1.0
+         */
+        public Builder allowEnvironmentAccess(EnvironmentAccess accessPolicy) {
+            Objects.requireNonNull(accessPolicy, "AccessPolicy must be non null.");
+            this.environmentAccess = accessPolicy;
+            return this;
+        }
+
+        /**
+         * Sets an environment variable.
+         *
+         * @param name the environment variable name
+         * @param value the environment variable value
+         * @since 19.1.0
+         */
+        public Builder environment(String name, String value) {
+            Objects.requireNonNull(name, "Name must be non null.");
+            Objects.requireNonNull(value, "Value must be non null.");
+            if (this.environment == null) {
+                this.environment = new HashMap<>();
+            }
+            this.environment.put(name, value);
+            return this;
+        }
+
+        /**
+         * Shortcut for setting multiple {@link #environment(String, String) environment variables}
+         * using a map. All values of the provided map must be non-null.
+         *
+         * @param env environment variables
+         * @see #environment(String, String) To set a single environment variable.
+         * @since 19.1.0
+         */
+        public Builder environment(Map<String, String> env) {
+            Objects.requireNonNull(env, "Env must be non null.");
+            for (Map.Entry<String, String> e : env.entrySet()) {
+                environment(e.getKey(), e.getValue());
+            }
+            return this;
+        }
+
+        /**
+         * Sets the current working directory used by the guest application to resolve relative
+         * paths. When the Context is built, the given directory is set as the current working
+         * directory on the Context's file system using the
+         * {@link FileSystem#setCurrentWorkingDirectory(java.nio.file.Path)
+         * FileSystem.setCurrentWorkingDirectory} method.
+         *
+         * @param workingDirectory the new current working directory
+         * @throws NullPointerException when {@code workingDirectory} is {@code null}
+         * @throws IllegalArgumentException when {@code workingDirectory} is a relative path
+         * @since 20.0.0
+         */
+        public Builder currentWorkingDirectory(Path workingDirectory) {
+            Objects.requireNonNull(workingDirectory, "WorkingDirectory must be non null.");
+            if (!workingDirectory.isAbsolute()) {
+                throw new IllegalArgumentException("WorkingDirectory must be an absolute path.");
+            }
+            this.currentWorkingDirectory = workingDirectory;
+            return this;
+        }
+
+        /**
+         * Sets a host class loader. If set the given {@code classLoader} is used to load host
+         * classes and it's also set as a {@link Thread#setContextClassLoader(java.lang.ClassLoader)
+         * context ClassLoader} during code execution. Otherwise the ClassLoader that was captured
+         * when the context was {@link #build() built} is used to to load host classes and the
+         * {@link Thread#setContextClassLoader(java.lang.ClassLoader) context ClassLoader} is not
+         * set during code execution. Setting the hostClassLoader has a negative effect on enter and
+         * leave performance.
+         *
+         * @param classLoader the host class loader
+         * @since 20.1.0
+         */
+        public Builder hostClassLoader(ClassLoader classLoader) {
+            Objects.requireNonNull(classLoader, "ClassLoader must be non null.");
+            this.hostClassLoader = classLoader;
+            return this;
+        }
+
+        /**
+         * Specifies whether {@link System#exit(int)} may be used to improve efficiency of stack
+         * unwinding for context exit requested by the guest application.
+         *
+         * @since 22.0
+         * @see Context
+         */
+        public Builder useSystemExit(boolean enabled) {
+            this.useSystemExit = enabled;
+            return this;
+        }
+
+        /**
          * Creates a new context instance from the configuration provided in the builder. The same
          * context builder can be used to create multiple context instances.
          *
-         * @since 1.0
+         * @since 19.0
          */
         public Context build() {
-            boolean hostAccess = orAllAccess(allowHostAccess);
+
             boolean nativeAccess = orAllAccess(allowNativeAccess);
             boolean createThread = orAllAccess(allowCreateThread);
-            boolean io = orAllAccess(allowIO);
             boolean hostClassLoading = orAllAccess(allowHostClassLoading);
             boolean experimentalOptions = orAllAccess(allowExperimentalOptions);
-            if (!io && customFileSystem != null) {
-                throw new IllegalStateException("Cannot install custom FileSystem when IO is disabled.");
+            boolean innerContextOptions = orAllAccess(allowInnerContextOptions);
+
+            if (this.allowHostAccess != null && this.hostAccess != null) {
+                throw new IllegalArgumentException("The method Context.Builder.allowHostAccess(boolean) and the method Context.Builder.allowHostAccess(HostAccess) are mutually exclusive.");
             }
+            if (ioAccess != null && allowIO != null) {
+                throw new IllegalArgumentException(
+                                "The method Context.Builder.allowIO(boolean) and the method Context.Builder.allowIO(IOAccess) or Context.Builder.extendIO(IOAccess, Consumer<IOAccess.Builder>) are mutually exclusive.");
+            }
+            if (ioAccess != null && customFileSystem != null) {
+                throw new IllegalArgumentException(
+                                "The method Context.Builder.allowIO(IOAccess) or Context.Builder.extendIO(IOAccess, Consumer<IOAccess.Builder>) and the method Context.Builder.fileSystem(FileSystem) are mutually exclusive.");
+            }
+            SandboxPolicy useSandboxPolicy = resolveSandboxPolicy();
+            validateSandbox(useSandboxPolicy);
+
+            Predicate<String> localHostLookupFilter = this.hostClassFilter;
+            HostAccess hostAccess = this.hostAccess;
+
+            if (this.allowHostAccess != null && this.allowHostAccess) {
+                if (localHostLookupFilter == UNSET_HOST_LOOKUP) {
+                    // legacy behavior support
+                    localHostLookupFilter = ALL_HOST_CLASSES;
+                }
+                // legacy behavior support
+                hostAccess = HostAccess.ALL;
+            }
+            if (hostAccess == null) {
+                hostAccess = switch (useSandboxPolicy) {
+                    case TRUSTED -> allowAllAccess ? HostAccess.ALL : HostAccess.EXPLICIT;
+                    case CONSTRAINED -> HostAccess.CONSTRAINED;
+                    case ISOLATED -> HostAccess.ISOLATED;
+                    case UNTRUSTED -> HostAccess.UNTRUSTED;
+                    default -> throw new IllegalArgumentException(String.valueOf(useSandboxPolicy));
+                };
+            }
+
+            PolyglotAccess polyglotAccess = this.polyglotAccess;
+            if (polyglotAccess == null) {
+                polyglotAccess = this.allowAllAccess ? PolyglotAccess.ALL : PolyglotAccess.NONE;
+            }
+
+            if (localHostLookupFilter == UNSET_HOST_LOOKUP) {
+                if (allowAllAccess) {
+                    localHostLookupFilter = ALL_HOST_CLASSES;
+                } else {
+                    localHostLookupFilter = null;
+                }
+            }
+            boolean hostClassLookupEnabled = localHostLookupFilter != null;
+            if (localHostLookupFilter == null) {
+                localHostLookupFilter = NO_HOST_CLASSES;
+            }
+
+            boolean createProcess = orAllAccess(allowCreateProcess);
+            EnvironmentAccess useEnvironmentAccess = environmentAccess != null ? environmentAccess : allowAllAccess ? EnvironmentAccess.INHERIT : EnvironmentAccess.NONE;
+            Object limits;
+            if (resourceLimits != null) {
+                limits = resourceLimits.receiver;
+            } else {
+                limits = null;
+            }
+
+            IOAccess useIOAccess;
+            if (ioAccess != null) {
+                useIOAccess = ioAccess;
+            } else if (allowIO != null || customFileSystem != null) {
+                if (orAllAccess(allowIO)) {
+                    if (customFileSystem != null) {
+                        useIOAccess = IOAccess.newBuilder().fileSystem(customFileSystem).build();
+                    } else {
+                        useIOAccess = IOAccess.ALL;
+                    }
+                } else {
+                    if (customFileSystem != null) {
+                        throw new IllegalStateException("Cannot install custom FileSystem when IO is disabled.");
+                    } else {
+                        useIOAccess = IOAccess.NONE;
+                    }
+                }
+            } else {
+                useIOAccess = allowAllAccess ? IOAccess.ALL : IOAccess.NONE;
+            }
+            String localCurrentWorkingDirectory = currentWorkingDirectory == null ? null : currentWorkingDirectory.toString();
             Engine engine = this.sharedEngine;
+            Context ctx;
+            OutputStream contextOut;
+            OutputStream contextErr;
+            InputStream contextIn;
+            Map<String, String> contextOptions;
             if (engine == null) {
-                org.graalvm.polyglot.Engine.Builder engineBuilder = Engine.newBuilder().options(options == null ? Collections.emptyMap() : options);
+                org.graalvm.polyglot.Engine.Builder engineBuilder = Engine.newBuilder(permittedLanguages).options(options == null ? Collections.emptyMap() : options);
+                // for bound engines we just pass all the options to the engine so they can be
+                // processed in one step.
+                contextOptions = Collections.emptyMap();
+                contextOut = null;
+                contextErr = null;
+                contextIn = null;
+
                 if (out != null) {
                     engineBuilder.out(out);
                 }
@@ -1099,28 +2130,238 @@ public final class Context implements AutoCloseable {
                 } else if (customLogHandler instanceof OutputStream) {
                     engineBuilder.logHandler((OutputStream) customLogHandler);
                 }
+                engineBuilder.sandbox(useSandboxPolicy);
                 engineBuilder.allowExperimentalOptions(experimentalOptions);
                 engineBuilder.setBoundEngine(true);
                 engine = engineBuilder.build();
-
-                return engine.impl.createContext(null, null, null, hostAccess, nativeAccess, createThread, io,
-                                hostClassLoading, experimentalOptions,
-                                hostClassFilter, Collections.emptyMap(), arguments == null ? Collections.emptyMap() : arguments,
-                                onlyLanguages, customFileSystem, customLogHandler);
             } else {
                 if (messageTransport != null) {
                     throw new IllegalStateException("Cannot use MessageTransport in a context that shares an Engine.");
                 }
-                return engine.impl.createContext(out, err, in, hostAccess, nativeAccess, createThread, io,
-                                hostClassLoading, experimentalOptions,
-                                hostClassFilter, options == null ? Collections.emptyMap() : options, arguments == null ? Collections.emptyMap() : arguments,
-                                onlyLanguages, customFileSystem, customLogHandler);
+                contextOptions = options == null ? Collections.emptyMap() : options;
+                contextOut = out;
+                contextErr = err;
+                contextIn = in;
             }
+            Object logHandler = customLogHandler != null ? Engine.getImpl().newLogHandler(customLogHandler) : null;
+            String tmpDir = Engine.getImpl().getIO().hasHostFileAccess(useIOAccess) ? System.getProperty("java.io.tmpdir") : null;
+            ctx = engine.dispatch.createContext(engine.receiver, engine, useSandboxPolicy, contextOut, contextErr, contextIn, hostClassLookupEnabled,
+                            hostAccess, polyglotAccess, nativeAccess, createThread, hostClassLoading, innerContextOptions,
+                            experimentalOptions, localHostLookupFilter, contextOptions, arguments == null ? Collections.emptyMap() : arguments,
+                            permittedLanguages, useIOAccess, logHandler, createProcess, processHandler, useEnvironmentAccess, environment, zone, limits,
+                            localCurrentWorkingDirectory, tmpDir, hostClassLoader, allowValueSharing, useSystemExit, true);
+            return ctx;
         }
 
         private boolean orAllAccess(Boolean optionalBoolean) {
             return optionalBoolean != null ? optionalBoolean : allowAllAccess;
         }
-    }
 
+        /**
+         * Resolves the actual value of {@code sandboxPolicy}. It can be explicitly set by the
+         * embedder or inherited from a shared engine.
+         */
+        private SandboxPolicy resolveSandboxPolicy() {
+            SandboxPolicy engineSandboxPolicy = sharedEngine != null ? sharedEngine.dispatch.getSandboxPolicy(sharedEngine.receiver) : null;
+            if (sandboxPolicy != null && engineSandboxPolicy != null && sandboxPolicy != engineSandboxPolicy) {
+                throw Engine.Builder.throwSandboxException(sandboxPolicy,
+                                String.format("The engine and context must have the same SandboxPolicy. The Engine.Builder.sandbox(SandboxPolicy) is set to %s, while the Context.Builder.sandbox(SandboxPolicy) is set to %s.",
+                                                engineSandboxPolicy, sandboxPolicy),
+                                String.format("set Engine.Builder.sandbox(SandboxPolicy) to SandboxPolicy.%s or set Context.Builder.sandbox(SandboxPolicy) to SandboxPolicy.%s",
+                                                sandboxPolicy,
+                                                engineSandboxPolicy));
+            }
+            SandboxPolicy useSandboxPolicy;
+            if (sandboxPolicy != null) {
+                useSandboxPolicy = sandboxPolicy;
+            } else if (engineSandboxPolicy != null) {
+                useSandboxPolicy = engineSandboxPolicy;
+            } else {
+                useSandboxPolicy = SandboxPolicy.TRUSTED;
+            }
+            return useSandboxPolicy;
+        }
+
+        /**
+         * Validates configured sandbox policy constrains.
+         *
+         * @throws IllegalArgumentException if the context configuration is not compatible with the
+         *             requested sandbox policy.
+         */
+        private void validateSandbox(SandboxPolicy useSandboxPolicy) {
+            if (useSandboxPolicy == SandboxPolicy.TRUSTED) {
+                return;
+            }
+            if (useSandboxPolicy.isStricterOrEqual(SandboxPolicy.CONSTRAINED)) {
+                if (permittedLanguages.length == 0 && sharedEngine == null) {
+                    throw Engine.Builder.throwSandboxException(useSandboxPolicy, "Builder does not have a list of permitted languages.",
+                                    "create a Builder with a list of permitted languages, for example, Context.newBuilder(\"js\")");
+                }
+                if (allowAllAccess) {
+                    throw Engine.Builder.throwSandboxException(useSandboxPolicy, "Builder.allowAllAccess(boolean) is set to true, but must not be set to true.",
+                                    "do not set Builder.allowAllAccess(boolean)");
+                }
+                if (Boolean.TRUE.equals(allowNativeAccess)) {
+                    throw Engine.Builder.throwSandboxException(useSandboxPolicy, "Builder.allowNativeAccess(boolean) is set to true, but must not be set to true.",
+                                    "do not set Builder.allowNativeAccess(boolean)");
+                }
+                if (Boolean.TRUE.equals(allowHostClassLoading)) {
+                    throw Engine.Builder.throwSandboxException(useSandboxPolicy, "Builder.allowHostClassLoading(boolean) is set to true, but must not be set to true.",
+                                    "do not set Builder.allowHostClassLoading(boolean)");
+                }
+                if (Boolean.TRUE.equals(allowCreateProcess)) {
+                    throw Engine.Builder.throwSandboxException(useSandboxPolicy, "Builder.allowCreateProcess(boolean) is set to true, but must not be set to true.",
+                                    "do not set Builder.allowCreateProcess(boolean)");
+                }
+                if (useSystemExit) {
+                    throw Engine.Builder.throwSandboxException(useSandboxPolicy, "Builder.useSystemExit(boolean) is set to true, but must not be set to true.",
+                                    "do not set Builder.useSystemExit(boolean)");
+                }
+                if (Engine.isSystemStream(in)) {
+                    throw Engine.Builder.throwSandboxException(useSandboxPolicy, "Builder uses the standard input stream, but the input must be redirected.",
+                                    "do not set Builder.in(InputStream) to use InputStream.nullInputStream() or redirect it to other stream than System.in");
+                }
+                if (Engine.isSystemStream(out)) {
+                    throw Engine.Builder.throwSandboxException(useSandboxPolicy, "Builder uses the standard output stream, but the output must be redirected.",
+                                    "set Builder.out(OutputStream)");
+                }
+                if (Engine.isSystemStream(err)) {
+                    throw Engine.Builder.throwSandboxException(useSandboxPolicy, "Builder uses the standard error stream, but the error output must be redirected.",
+                                    "set Builder.err(OutputStream)");
+                }
+                FileSystem fileSystem;
+                if (ioAccess != null) {
+                    IOAccessor ioAccessor = Engine.getImpl().getIO();
+                    if (ioAccessor.hasHostFileAccess(ioAccess)) {
+                        throw Engine.Builder.throwSandboxException(useSandboxPolicy,
+                                        "Builder.allowIO(IOAccess) is set to an IOAccess, which allows access to the host file system, but access to the host file system must be disabled.",
+                                        "disable filesystem access using Builder.allowIO(IOAccess.NONE) or install a custom filesystem using Builder.allowIO(IOAccess.newBuilder().fileSystem(customFs))");
+                    }
+                    if (ioAccessor.hasHostSocketAccess(ioAccess)) {
+                        throw Engine.Builder.throwSandboxException(useSandboxPolicy,
+                                        "Builder.allowIO(IOAccess) is set to an IOAccess, which allows access to host sockets, but access to host sockets must be disabled.",
+                                        "do not set IOAccess.Builder.allowHostSocketAccess(boolean)");
+                    }
+                    assert customFileSystem == null;
+                    fileSystem = ioAccessor.getFileSystem(ioAccess);
+                } else {
+                    fileSystem = customFileSystem;
+                }
+                if (fileSystem != null && Engine.getImpl().isHostFileSystem(fileSystem)) {
+                    throw Engine.Builder.throwSandboxException(useSandboxPolicy,
+                                    "Builder.allowIO(IOAccess) is set to an IOAccess, which has a custom file system that allows access to the host file system, but access to the host file system must be disabled.",
+                                    "disable filesystem access using Builder.allowIO(IOAccess.NONE) or install a non-host custom filesystem using Builder.allowIO(IOAccess.newBuilder().fileSystem(customFs))");
+
+                }
+                if (Boolean.TRUE.equals(allowIO)) {
+                    throw Engine.Builder.throwSandboxException(useSandboxPolicy, "Builder.allowIO(boolean) is set to true, but must not be set to true.",
+                                    "disable filesystem access using Builder.allowIO(IOAccess.NONE) or install a custom filesystem using Builder.allowIO(IOAccess.newBuilder().fileSystem(customFs))");
+                }
+                if (environmentAccess != null && environmentAccess != EnvironmentAccess.NONE) {
+                    throw Engine.Builder.throwSandboxException(useSandboxPolicy,
+                                    "Builder.allowEnvironmentAccess(EnvironmentAccess) is set to " + environmentAccess + ", but must be set to EnvironmentAccess.NONE.",
+                                    "do not set Builder.allowEnvironmentAccess(EnvironmentAccess) or set it to EnvironmentAccess.NONE");
+                }
+                if (Boolean.TRUE.equals(allowHostAccess)) {
+                    throw Engine.Builder.throwSandboxException(useSandboxPolicy, "Builder.allowHostAccess(boolean) is set to true, but must not be set to true.",
+                                    "do not set Builder.allowHostAccess(boolean) to use the sandbox policy preset or set Builder.allowHostAccess(HostAccess)");
+                }
+                if (hostAccess != null) {
+                    if (hostAccess.allowPublic) {
+                        throw Engine.Builder.throwSandboxException(useSandboxPolicy,
+                                        "Builder.allowHostAccess(HostAccess) is set to a HostAccess which was created with HostAccess.Builder.allowPublicAccess(boolean) set to true, " +
+                                                        "but HostAccess.Builder.allowPublicAccess(boolean) must not be set to true.",
+                                        "do not set HostAccess.Builder.allowPublicAccess(boolean)");
+                    }
+                    if (hostAccess.allowAccessInheritance) {
+                        throw Engine.Builder.throwSandboxException(useSandboxPolicy,
+                                        "Builder.allowHostAccess(HostAccess) is set to a HostAccess which was created with HostAccess.Builder.allowAccessInheritance(boolean) set to true, " +
+                                                        "but HostAccess.Builder.allowAccessInheritance(boolean) must not be set to true.",
+                                        "do not set HostAccess.Builder.allowAccessInheritance(boolean)");
+                    }
+                    if (hostAccess.allowAllInterfaceImplementations) {
+                        throw Engine.Builder.throwSandboxException(useSandboxPolicy,
+                                        "Builder.allowHostAccess(HostAccess) is set to a HostAccess which was created with HostAccess.Builder.allowAllImplementations(boolean) set to true, " +
+                                                        "but HostAccess.Builder.allowAllImplementations(boolean) must not be set to true.",
+                                        "do not set HostAccess.Builder.allowAllImplementations(boolean)");
+                    }
+                    if (hostAccess.allowAllClassImplementations) {
+                        throw Engine.Builder.throwSandboxException(useSandboxPolicy,
+                                        "Builder.allowHostAccess(HostAccess) is set to a HostAccess which was created with HostAccess.Builder.allowAllClassImplementations(boolean) set to true, " +
+                                                        "but HostAccess.Builder.allowAllClassImplementations(boolean) must not be set to true.",
+                                        "do not set HostAccess.Builder.allowAllClassImplementations(boolean)");
+                    }
+                    if (hostAccess.implementableAnnotations != null && hostAccess.implementableAnnotations.contains(FunctionalInterface.class)) {
+                        throw Engine.Builder.throwSandboxException(useSandboxPolicy,
+                                        "Builder.allowHostAccess(HostAccess) is set to a HostAccess which allows FunctionalInterface implementations, " +
+                                                        "but FunctionalInterface implementations must not be enabled.",
+                                        "do not set HostAccess.Builder.allowImplementationsAnnotatedBy(FunctionalInterface.class)");
+                    }
+                    HostAccess.MutableTargetMapping[] mutableTargetMappings = hostAccess.getMutableTargetMappings();
+                    if (mutableTargetMappings.length > 0) {
+                        throw Engine.Builder.throwSandboxException(useSandboxPolicy,
+                                        "Builder.allowHostAccess(HostAccess) is set to a HostAccess which allows host object mappings of mutable target types, but it must not be enabled.",
+                                        "disable host object mappings of mutable target types by setting HostAccess.Builder.allowMutableTargetMappings(MutableTargetMapping...) to an empty array");
+                    }
+                }
+            }
+            if (useSandboxPolicy.isStricterOrEqual(SandboxPolicy.ISOLATED)) {
+                if (hostAccess != null && !hostAccess.isMethodScopingEnabled()) {
+                    throw Engine.Builder.throwSandboxException(useSandboxPolicy,
+                                    "Builder.allowHostAccess(HostAccess) is set to a HostAccess which has no HostAccess.Builder.methodScoping(boolean) set to true, " +
+                                                    "but HostAccess.Builder.methodScoping(boolean) must be enabled.",
+                                    "set HostAccess.Builder.methodScoping(boolean)");
+                }
+            }
+            if (useSandboxPolicy.isStricterOrEqual(SandboxPolicy.UNTRUSTED)) {
+                if (hostAccess != null) {
+                    if (hostAccess.allowArrayAccess) {
+                        throw Engine.Builder.throwSandboxException(useSandboxPolicy,
+                                        "Builder.allowHostAccess(HostAccess) is set to a HostAccess which was created with HostAccess.Builder.allowArrayAccess(boolean) set to true, " +
+                                                        "but HostAccess.Builder.allowArrayAccess(boolean) must not be set to true.",
+                                        "do not set HostAccess.Builder.allowArrayAccess(boolean)");
+                    }
+                    if (hostAccess.allowListAccess) {
+                        throw Engine.Builder.throwSandboxException(useSandboxPolicy,
+                                        "Builder.allowHostAccess(HostAccess) is set to a HostAccess which was created with HostAccess.Builder.allowListAccess(boolean) set to true, " +
+                                                        "but HostAccess.Builder.allowListAccess(boolean) must not be set to true.",
+                                        "do not set HostAccess.Builder.allowListAccess(boolean)");
+                    }
+                    if (hostAccess.allowMapAccess) {
+                        throw Engine.Builder.throwSandboxException(useSandboxPolicy,
+                                        "Builder.allowHostAccess(HostAccess) is set to a HostAccess which was created with HostAccess.Builder.allowMapAccess(boolean) set to true, " +
+                                                        "but HostAccess.Builder.allowMapAccess(boolean) must not be set to true.",
+                                        "do not set HostAccess.Builder.allowMapAccess(boolean)");
+                    }
+                    if (hostAccess.allowBufferAccess) {
+                        throw Engine.Builder.throwSandboxException(useSandboxPolicy,
+                                        "Builder.allowHostAccess(HostAccess) is set to a HostAccess which was created with HostAccess.Builder.allowBufferAccess(boolean) set to true, " +
+                                                        "but HostAccess.Builder.allowBufferAccess(boolean) must not be set to true.",
+                                        "do not set HostAccess.Builder.allowBufferAccess(boolean)");
+                    }
+                    if (hostAccess.allowIterableAccess) {
+                        throw Engine.Builder.throwSandboxException(useSandboxPolicy,
+                                        "Builder.allowHostAccess(HostAccess) is set to a HostAccess which was created with HostAccess.Builder.allowIterableAccess(boolean) set to true, " +
+                                                        "but HostAccess.Builder.allowIterableAccess(boolean) must not be set to true.",
+                                        "do not set HostAccess.Builder.allowIterableAccess(boolean)");
+                    }
+                    if (hostAccess.allowIteratorAccess) {
+                        throw Engine.Builder.throwSandboxException(useSandboxPolicy,
+                                        "Builder.allowHostAccess(HostAccess) is set to a HostAccess which was created with HostAccess.Builder.allowIteratorAccess(boolean) set to true, " +
+                                                        "but HostAccess.Builder.allowIteratorAccess(boolean) must not be set to true.",
+                                        "do not set HostAccess.Builder.allowIteratorAccess(boolean)");
+                    }
+                    if (hostAccess.implementableAnnotations != null && !hostAccess.implementableAnnotations.isEmpty()) {
+                        var annotations = StreamSupport.stream(hostAccess.implementableAnnotations.spliterator(), false).map(Class::getSimpleName).toList();
+                        var builderCommands = annotations.stream().map((n) -> String.format("HostAccess.Builder.allowImplementationsAnnotatedBy(%s.class)", n)).toList();
+                        throw Engine.Builder.throwSandboxException(useSandboxPolicy, String.format(
+                                        "Builder.allowHostAccess(HostAccess) is set to a HostAccess which allows implementations of types annotated by %s, " +
+                                                        "but implementations of annotated types must not be enabled.",
+                                        String.join(", ", annotations)),
+                                        String.format("do not set %s", String.join(", ", builderCommands)));
+                    }
+                }
+            }
+        }
+    }
 }

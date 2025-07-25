@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2025, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -42,17 +42,19 @@ package com.oracle.truffle.api.object;
 
 import com.oracle.truffle.api.Assumption;
 import com.oracle.truffle.api.CompilerDirectives;
-import com.oracle.truffle.api.utilities.NeverValidAssumption;
+import com.oracle.truffle.api.nodes.UnexpectedResultException;
 
 /**
  * Property location.
+ *
+ * Planned to be deprecated.
  *
  * @see Shape
  * @see Property
  * @see DynamicObject
  * @since 0.8 or earlier
  */
-public abstract class Location {
+public abstract sealed class Location permits LocationImpl {
     /**
      * Constructor for subclasses.
      *
@@ -62,15 +64,19 @@ public abstract class Location {
     }
 
     /** @since 0.8 or earlier */
+    @SuppressWarnings("deprecation")
+    @Deprecated(since = "22.2")
     protected static IncompatibleLocationException incompatibleLocation() throws IncompatibleLocationException {
         CompilerDirectives.transferToInterpreterAndInvalidate();
-        throw new IncompatibleLocationException();
+        throw IncompatibleLocationException.instance();
     }
 
     /** @since 0.8 or earlier */
+    @SuppressWarnings("deprecation")
+    @Deprecated(since = "22.2")
     protected static FinalLocationException finalLocation() throws FinalLocationException {
         CompilerDirectives.transferToInterpreterAndInvalidate();
-        throw new FinalLocationException();
+        throw FinalLocationException.instance();
     }
 
     /**
@@ -79,20 +85,23 @@ public abstract class Location {
      * @param shape the current shape of the object, which must contain this location
      * @since 0.8 or earlier
      */
+    @Deprecated(since = "22.2")
     public final Object get(DynamicObject store, Shape shape) {
-        return get(store, checkShape(store, shape));
+        return get(store, store.getShape() == shape);
     }
 
     /**
      * Get object value as object at this location in store. For internal use only and subject to
      * change, use {@link #get(DynamicObject, Shape)} instead.
      *
+     * @param store storage object
      * @param condition the result of a shape check or {@code false}
      * @see #get(DynamicObject, Shape)
      * @since 0.8 or earlier
      */
+    @Deprecated(since = "22.2")
     public Object get(DynamicObject store, boolean condition) {
-        return getInternal(store);
+        throw CompilerDirectives.shouldNotReachHere();
     }
 
     /**
@@ -100,20 +109,61 @@ public abstract class Location {
      *
      * @since 0.8 or earlier
      */
+    @Deprecated(since = "22.2")
     public final Object get(DynamicObject store) {
         return get(store, false);
     }
 
     /**
+     * Gets this location's value as int.
+     *
+     * @param store storage object
+     * @param guard the result of a shape check or {@code false}
+     * @throws UnexpectedResultException if the location does not contain an int value.
+     * @since 22.2
+     */
+    protected int getInt(DynamicObject store, boolean guard) throws UnexpectedResultException {
+        throw CompilerDirectives.shouldNotReachHere();
+    }
+
+    /**
+     * Gets this location's value as long.
+     *
+     * @param store storage object
+     * @param guard the result of a shape check or {@code false}
+     * @throws UnexpectedResultException if the location does not contain a long value.
+     * @since 22.2
+     */
+    protected long getLong(DynamicObject store, boolean guard) throws UnexpectedResultException {
+        throw CompilerDirectives.shouldNotReachHere();
+    }
+
+    /**
+     * Gets this location's value as double.
+     *
+     * @param store storage object
+     * @param guard the result of a shape check or {@code false}
+     * @throws UnexpectedResultException if the location does not contain a double value.
+     * @since 22.2
+     */
+    protected double getDouble(DynamicObject store, boolean guard) throws UnexpectedResultException {
+        throw CompilerDirectives.shouldNotReachHere();
+    }
+
+    /**
      * Set object value at this location in store.
      *
+     * @param store storage object
+     * @param value the value to set
      * @param shape the current shape of the storage object
      * @throws IncompatibleLocationException for storage type invalidations
      * @throws FinalLocationException for effectively final fields
      * @since 0.8 or earlier
      */
+    @SuppressWarnings("deprecation")
+    @Deprecated(since = "22.2")
     public void set(DynamicObject store, Object value, Shape shape) throws IncompatibleLocationException, FinalLocationException {
-        setInternal(store, value);
+        throw CompilerDirectives.shouldNotReachHere();
     }
 
     /**
@@ -124,52 +174,10 @@ public abstract class Location {
      * @throws IncompatibleLocationException if value is of non-assignable type
      * @since 0.8 or earlier
      */
-    public final void set(DynamicObject store, Object value, Shape oldShape, Shape newShape) throws IncompatibleLocationException {
-        if (canStore(value)) {
-            store.setShapeAndGrow(oldShape, newShape);
-            try {
-                setInternal(store, value);
-            } catch (IncompatibleLocationException ex) {
-                throw new IllegalStateException();
-            }
-        } else {
-            throw incompatibleLocation();
-        }
-    }
-
-    /**
-     * Set object value at this location in store.
-     *
-     * @throws IncompatibleLocationException for storage type invalidations
-     * @throws FinalLocationException for effectively final fields
-     * @since 0.8 or earlier
-     */
-    public final void set(DynamicObject store, Object value) throws IncompatibleLocationException, FinalLocationException {
-        set(store, value, null);
-    }
-
-    /** @since 0.8 or earlier */
-    protected abstract Object getInternal(DynamicObject store);
-
-    /**
-     * Like {@link #set(DynamicObject, Object, Shape)}, but does not invalidate final locations. For
-     * internal use only and subject to change, use {@link DynamicObjectFactory} to create objects
-     * with predefined properties.
-     *
-     * @throws IncompatibleLocationException if value is of non-assignable type
-     * @since 0.8 or earlier
-     */
-    protected abstract void setInternal(DynamicObject store, Object value) throws IncompatibleLocationException;
-
-    /**
-     * Returns {@code true} if the location can be set to the given value.
-     *
-     * @param store the receiver object
-     * @param value the value in question
-     * @since 0.8 or earlier
-     */
-    public boolean canSet(DynamicObject store, Object value) {
-        return canStore(value);
+    @Deprecated(since = "22.2")
+    @SuppressWarnings({"unused", "deprecation"})
+    public void set(DynamicObject store, Object value, Shape oldShape, Shape newShape) throws IncompatibleLocationException {
+        throw incompatibleLocation();
     }
 
     /**
@@ -177,16 +185,15 @@ public abstract class Location {
      *
      * @param value the value in question
      * @since 0.8 or earlier
+     * @deprecated Equivalent to {@link #canStore(Object)}.
      */
+    @Deprecated(since = "22.2")
     public boolean canSet(Object value) {
         return canStore(value);
     }
 
     /**
      * Returns {@code true} if the location is compatible with the type of the value.
-     *
-     * The actual value may still be rejected if {@link #canSet(DynamicObject, Object)} returns
-     * false.
      *
      * @param value the value in question
      * @since 0.8 or earlier
@@ -198,8 +205,11 @@ public abstract class Location {
     /**
      * Returns {@code true} if this is a final location, i.e. readonly once set.
      *
+     * @see #isAssumedFinal()
      * @since 0.8 or earlier
+     * @deprecated Use {@link #isAssumedFinal()} instead or replace by {@code false}.
      */
+    @Deprecated(since = "26.0")
     public boolean isFinal() {
         return false;
     }
@@ -233,7 +243,9 @@ public abstract class Location {
      * Returns {@code true} if this is a declared value location.
      *
      * @since 0.18
+     * @deprecated No longer needed. Declared locations can only be created with deprecated APIs.
      */
+    @Deprecated(since = "22.2")
     public boolean isDeclared() {
         return false;
     }
@@ -242,7 +254,6 @@ public abstract class Location {
      * Returns {@code true} if this is a value location.
      *
      * @see #isConstant()
-     * @see #isDeclared()
      * @since 0.18
      */
     public boolean isValue() {
@@ -266,15 +277,32 @@ public abstract class Location {
      * @since 0.18
      */
     public Assumption getFinalAssumption() {
-        return NeverValidAssumption.INSTANCE;
+        return Assumption.NEVER_VALID;
     }
 
     /**
-     * Equivalent to {@link Shape#check(DynamicObject)}.
+     * Returns {@code true} if this location can only store primitive types and cannot contain any
+     * object references.
      *
-     * @since 0.8 or earlier
+     * @since 22.2
      */
-    protected static boolean checkShape(DynamicObject store, Shape shape) {
-        return store.getShape() == shape;
+    @SuppressWarnings("deprecation")
+    public boolean isPrimitive() {
+        return this instanceof DoubleLocation || this instanceof IntLocation || this instanceof LongLocation || this instanceof BooleanLocation;
+    }
+
+    /**
+     * If this is a constant location, returns the constant value bound to this location. Otherwise,
+     * returns null.
+     *
+     * @since 22.2
+     */
+    @SuppressWarnings("deprecation")
+    public Object getConstantValue() {
+        if (isConstant()) {
+            return get(null);
+        } else {
+            return null;
+        }
     }
 }

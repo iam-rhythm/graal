@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -52,8 +52,7 @@ import org.junit.After;
 import org.junit.Before;
 
 import com.oracle.truffle.api.TruffleLanguage.Env;
-import com.oracle.truffle.api.interop.ForeignAccess;
-import com.oracle.truffle.api.interop.Message;
+import com.oracle.truffle.api.interop.InteropLibrary;
 import com.oracle.truffle.api.interop.TruffleObject;
 import com.oracle.truffle.api.interop.UnknownIdentifierException;
 import com.oracle.truffle.api.interop.UnsupportedMessageException;
@@ -117,7 +116,7 @@ public abstract class ProxyLanguageEnvTest {
 
     TruffleObject toJavaClass(TruffleObject obj) {
         try {
-            return (TruffleObject) ForeignAccess.sendRead(Message.READ.createNode(), obj, "class");
+            return (TruffleObject) InteropLibrary.getFactory().getUncached().readMember(obj, "class");
         } catch (UnknownIdentifierException | UnsupportedMessageException e) {
             throw new AssertionError(e);
         }
@@ -127,7 +126,7 @@ public abstract class ProxyLanguageEnvTest {
         return (TruffleObject) env.lookupHostSymbol(clazz.getTypeName());
     }
 
-    protected <T> T asJavaObject(Class<T> type, TruffleObject truffleObject) {
+    protected <T> T asJavaObject(Class<T> type, Object truffleObject) {
         return context.asValue(truffleObject).as(type);
     }
 }

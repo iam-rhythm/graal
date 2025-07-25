@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,27 +40,14 @@
  */
 package com.oracle.truffle.api.impl;
 
-import com.oracle.truffle.api.nodes.Node;
+import com.oracle.truffle.api.impl.Accessor.RuntimeSupport;
+import com.oracle.truffle.api.impl.DefaultRuntimeAccessor.DefaultRuntimeSupport;
 
 final class DefaultTVMCI extends TVMCI {
 
     @Override
-    protected void onLoopCount(Node source, int count) {
-        // do nothing
-    }
-
-    void onFirstExecution(DefaultCallTarget callTarget) {
-        super.onFirstExecution(callTarget.getRootNode());
-    }
-
-    void onLoad(DefaultCallTarget callTarget) {
-        super.onLoad(callTarget.getRootNode());
-    }
-
-    @Override
-    protected boolean isGuestCallStackFrame(StackTraceElement e) {
-        String methodName = e.getMethodName();
-        return (methodName.startsWith(DefaultCallTarget.CALL_BOUNDARY_METHOD_PREFIX)) && e.getClassName().equals(DefaultCallTarget.class.getName());
+    protected RuntimeSupport createRuntimeSupport(Object permission) {
+        return new DefaultRuntimeSupport(permission);
     }
 
 }

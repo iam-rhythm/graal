@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2019, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,14 +24,12 @@
  */
 package com.oracle.truffle.tools.chromeinspector.objects;
 
-import com.oracle.truffle.api.interop.ForeignAccess;
-import com.oracle.truffle.api.interop.Message;
-import com.oracle.truffle.api.interop.TruffleObject;
+import com.oracle.truffle.api.interop.InteropLibrary;
+import com.oracle.truffle.api.interop.InvalidArrayIndexException;
 import com.oracle.truffle.api.interop.UnknownIdentifierException;
 import com.oracle.truffle.api.interop.UnsupportedMessageException;
-import com.oracle.truffle.api.nodes.Node;
-import com.oracle.truffle.tools.utils.json.JSONArray;
-import com.oracle.truffle.tools.utils.json.JSONObject;
+import org.graalvm.shadowed.org.json.JSONArray;
+import org.graalvm.shadowed.org.json.JSONObject;
 
 /**
  * Converts TruffleObject to JSONObject.
@@ -41,29 +39,29 @@ final class TruffleObject2JSON {
     private TruffleObject2JSON() {
     }
 
-    static JSONObject fromObject(TruffleObject object) {
+    private static final InteropLibrary INTEROP = InteropLibrary.getFactory().getUncached();
+
+    static JSONObject fromObject(Object object) {
         JSONObject json = new JSONObject();
-        TruffleObject keys;
+        Object keys;
         try {
-            keys = ForeignAccess.sendKeys(Message.KEYS.createNode(), object);
+            keys = INTEROP.getMembers(object);
         } catch (UnsupportedMessageException ex) {
             return json;
         }
-        int size;
+        long size;
         try {
-            size = ((Number) ForeignAccess.sendGetSize(Message.GET_SIZE.createNode(), keys)).intValue();
+            size = INTEROP.getArraySize(keys);
         } catch (UnsupportedMessageException ex) {
             return json;
         }
         if (size > 0) {
-            Node nodeHasSize = Message.HAS_SIZE.createNode();
-            Node nodeRead = Message.READ.createNode();
-            for (int i = 0; i < size; i++) {
+            for (long i = 0; i < size; i++) {
                 try {
-                    Object key = ForeignAccess.sendRead(nodeRead, keys, i);
-                    Object value = ForeignAccess.sendRead(nodeRead, object, key);
-                    json.put(key.toString(), from(value, nodeHasSize));
-                } catch (UnknownIdentifierException | UnsupportedMessageException ex) {
+                    Object key = INTEROP.readArrayElement(keys, i);
+                    Object value = INTEROP.readMember(object, INTEROP.asString(key));
+                    json.put(key.toString(), from(value));
+                } catch (UnknownIdentifierException | UnsupportedMessageException | InvalidArrayIndexException ex) {
                     // ignore that key
                 }
             }
@@ -71,22 +69,20 @@ final class TruffleObject2JSON {
         return json;
     }
 
-    static JSONArray fromArray(TruffleObject array) {
+    static JSONArray fromArray(Object array) {
         JSONArray json = new JSONArray();
-        int size;
+        long size;
         try {
-            size = ((Number) ForeignAccess.sendGetSize(Message.GET_SIZE.createNode(), array)).intValue();
+            size = INTEROP.getArraySize(array);
         } catch (UnsupportedMessageException ex) {
             return json;
         }
         if (size > 0) {
-            Node nodeHasSize = Message.HAS_SIZE.createNode();
-            Node nodeRead = Message.READ.createNode();
-            for (int i = 0; i < size; i++) {
+            for (long i = 0; i < size; i++) {
                 try {
-                    Object value = ForeignAccess.sendRead(nodeRead, array, i);
-                    json.put(i, from(value, nodeHasSize));
-                } catch (UnknownIdentifierException | UnsupportedMessageException ex) {
+                    Object value = INTEROP.readArrayElement(array, i);
+                    json.put((int) i, from(value));
+                } catch (UnsupportedMessageException | InvalidArrayIndexException ex) {
                     // ignore that element
                     break;
                 }
@@ -95,14 +91,17 @@ final class TruffleObject2JSON {
         return json;
     }
 
-    private static Object from(Object object, Node nodeHasSize) {
-        if (object instanceof TruffleObject) {
-            TruffleObject truffleObject = (TruffleObject) object;
-            if (ForeignAccess.sendHasSize(nodeHasSize, truffleObject)) {
-                return fromArray(truffleObject);
-            } else {
-                return fromObject(truffleObject);
+    private static Object from(Object object) {
+        if (INTEROP.isString(object)) {
+            try {
+                return INTEROP.asString(object);
+            } catch (UnsupportedMessageException e) {
+                return object;
             }
+        } else if (INTEROP.hasArrayElements(object)) {
+            return fromArray(object);
+        } else if (INTEROP.hasMembers(object)) {
+            return fromObject(object);
         } else {
             return object;
         }

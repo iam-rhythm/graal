@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,9 +40,15 @@
  */
 package com.oracle.truffle.api.nodes;
 
+import static com.oracle.truffle.api.nodes.NodeAccessor.ENGINE;
+import static com.oracle.truffle.api.nodes.NodeAccessor.LANGUAGE;
+
 import com.oracle.truffle.api.CompilerAsserts;
 import com.oracle.truffle.api.CompilerDirectives;
+import com.oracle.truffle.api.CompilerDirectives.CompilationFinal;
 import com.oracle.truffle.api.TruffleLanguage;
+import com.oracle.truffle.api.TruffleLanguage.InlineParsingRequest;
+import com.oracle.truffle.api.TruffleLanguage.LanguageReference;
 import com.oracle.truffle.api.frame.VirtualFrame;
 
 /**
@@ -55,7 +61,10 @@ import com.oracle.truffle.api.frame.VirtualFrame;
  */
 public abstract class ExecutableNode extends Node {
 
-    final TruffleLanguage<?> language;
+    /*
+     * Instance of PolyglotSharingLayer.
+     */
+    @CompilationFinal private Object polyglotRef;
 
     /**
      * Creates new executable node with a given language instance. The language instance is
@@ -66,10 +75,45 @@ public abstract class ExecutableNode extends Node {
      */
     protected ExecutableNode(TruffleLanguage<?> language) {
         CompilerAsserts.neverPartOfCompilation();
-        this.language = language;
-        if (language != null && getLanguageInfo() == null) {
-            throw new IllegalArgumentException("Truffle language instance is not initialized.");
+        if (language != null) {
+            assert !NodeAccessor.HOST.isHostLanguage(language.getClass()) : "do not create create executable nodes with host language";
+            this.polyglotRef = language;
+        } else {
+            this.polyglotRef = ENGINE.getCurrentSharingLayer();
         }
+        /*
+         * This can no longer happen for normal languages. It could only happen for language
+         * instances that were created directly without service provider. This case is rare enough,
+         * to not be worth a check for every root node.
+         */
+        assert language == null || getLanguageInfo() != null : "Truffle language instance is not initialized.";
+    }
+
+    final TruffleLanguage<?> getLanguage() {
+        Object ref = polyglotRef;
+        if (ref instanceof TruffleLanguage<?>) {
+            return (TruffleLanguage<?>) ref;
+        } else {
+            return null;
+        }
+    }
+
+    final void applyEngineRef(ExecutableNode node) {
+        this.polyglotRef = node.polyglotRef;
+    }
+
+    final Object getSharingLayer() {
+        Object ref = polyglotRef;
+        if (ref instanceof TruffleLanguage<?>) {
+            return ENGINE.getPolyglotSharingLayer(LANGUAGE.getPolyglotLanguageInstance((TruffleLanguage<?>) ref));
+        } else {
+            return ref;
+        }
+    }
+
+    final void setSharingLayer(Object layer) {
+        assert !(polyglotRef instanceof TruffleLanguage<?>) : "not allowed overwrite language";
+        this.polyglotRef = layer;
     }
 
     /**
@@ -85,13 +129,14 @@ public abstract class ExecutableNode extends Node {
     /**
      * Returns public information about the language. The language can be assumed equal if the
      * instances of the language info instance are the same. To access internal details of the
-     * language within the language implementation use {@link #getLanguage(Class)}.
+     * language within the language implementation use a {@link LanguageReference}.
      *
      * @since 0.31
      */
     public final LanguageInfo getLanguageInfo() {
+        TruffleLanguage<?> language = getLanguage();
         if (language != null) {
-            return Node.ACCESSOR.languageSupport().getLanguageInfo(language);
+            return LANGUAGE.getLanguageInfo(language);
         } else {
             return null;
         }
@@ -102,24 +147,23 @@ public abstract class ExecutableNode extends Node {
      * intended for internal use in languages and is only accessible if the concrete type of the
      * language is known. Public information about the language can be accessed using
      * {@link #getLanguageInfo()}. The language is <code>null</code> if the executable node is not
-     * associated with a <code>null</code> language.
+     * associated with a language. This method is guaranteed to return a
+     * {@link CompilerDirectives#isPartialEvaluationConstant(Object) PE constant} if the root node
+     * is also a PE constant.
      *
      * @see #getLanguageInfo()
      * @since 0.31
      */
     @SuppressWarnings({"rawtypes", "unchecked"})
     public final <C extends TruffleLanguage> C getLanguage(Class<C> languageClass) {
+        TruffleLanguage<?> language = getLanguage();
         if (language == null) {
             return null;
         }
-        TruffleLanguage<?> spi = this.language;
-        if (spi.getClass() != languageClass) {
-            if (!languageClass.isInstance(spi) || languageClass == TruffleLanguage.class || !TruffleLanguage.class.isAssignableFrom(languageClass)) {
-                CompilerDirectives.transferToInterpreter();
-                throw new ClassCastException("Illegal language class specified. Expected " + spi.getClass().getName() + ".");
-            }
+        if (language.getClass() != languageClass) {
+            CompilerDirectives.transferToInterpreterAndInvalidate();
+            throw new ClassCastException(String.format("Illegal language class specified. Expected '%s'.", language.getClass().getName()));
         }
-        return (C) spi;
+        return (C) language;
     }
-
 }

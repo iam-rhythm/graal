@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2014, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -65,7 +65,7 @@ import org.graalvm.word.WordBase;
  * The receiver is the pointer to the struct that is accessed, i.e., the base address of the memory
  * access.
  * <p>
- * The {@code FieldType} must be must be a primitive integer type or a {@link WordBase word type}.
+ * The {@code FieldType} must be a primitive integer type or a {@link WordBase word type}.
  * <p>
  * The optional parameter {@code locationIdentity} specifies the {@link LocationIdentity} to be used
  * for the memory access. Two memory accesses with two different location identities are guaranteed
@@ -73,8 +73,8 @@ import org.graalvm.word.WordBase;
  * <p>
  * Multiple accessor methods, with different signatures according to the rules of allowed
  * signatures, are allowed for a single field.
- * 
- * @since 1.0
+ *
+ * @since 19.0
  */
 @Retention(RetentionPolicy.RUNTIME)
 @Target({ElementType.METHOD})
@@ -85,7 +85,7 @@ public @interface CBitfield {
      * method name is used as the field name. A possible "get" or "set" prefix of the method name is
      * removed.
      *
-     * @since 1.0
+     * @since 19.0
      */
     String value() default "";
 }

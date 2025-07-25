@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -42,11 +42,24 @@ package org.graalvm.nativeimage.impl;
 
 import java.lang.reflect.Executable;
 import java.lang.reflect.Field;
+import java.util.Arrays;
 
 public interface ReflectionRegistry {
-    void register(Class<?>... classes);
+    default void register(ConfigurationCondition condition, Class<?>... classes) {
+        Arrays.stream(classes).forEach(clazz -> register(condition, false, clazz));
+    }
 
-    void register(Executable... methods);
+    void register(ConfigurationCondition condition, boolean unsafeAllocated, Class<?> clazz);
 
-    void register(boolean finalIsWritable, Field... fields);
+    void register(ConfigurationCondition condition, boolean queriedOnly, Executable... methods);
+
+    void register(ConfigurationCondition condition, boolean finalIsWritable, Field... fields);
+
+    void registerClassLookup(ConfigurationCondition condition, String typeName);
+
+    void registerFieldLookup(ConfigurationCondition condition, Class<?> declaringClass, String fieldName);
+
+    void registerMethodLookup(ConfigurationCondition condition, Class<?> declaringClass, String methodName, Class<?>... parameterTypes);
+
+    void registerConstructorLookup(ConfigurationCondition condition, Class<?> declaringClass, Class<?>... parameterTypes);
 }

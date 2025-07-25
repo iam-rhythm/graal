@@ -26,130 +26,121 @@ package com.oracle.svm.core.genscavenge;
 
 import org.graalvm.nativeimage.CurrentIsolate;
 import org.graalvm.nativeimage.IsolateThread;
+import org.graalvm.nativeimage.Platform;
+import org.graalvm.nativeimage.Platforms;
 import org.graalvm.nativeimage.c.function.CodePointer;
 import org.graalvm.word.Pointer;
 
-import com.oracle.svm.core.SubstrateOptions;
-import com.oracle.svm.core.annotate.RestrictHeapAccess;
+import com.oracle.svm.core.NeverInline;
+import com.oracle.svm.core.code.CodeInfo;
 import com.oracle.svm.core.code.CodeInfoTable;
 import com.oracle.svm.core.deopt.DeoptimizedFrame;
 import com.oracle.svm.core.heap.ObjectReferenceVisitor;
-import com.oracle.svm.core.heap.ReferenceAccess;
-import com.oracle.svm.core.log.Log;
+import com.oracle.svm.core.heap.RestrictHeapAccess;
+import com.oracle.svm.core.snippets.KnownIntrinsics;
 import com.oracle.svm.core.stack.JavaStackWalker;
 import com.oracle.svm.core.stack.StackFrameVisitor;
 import com.oracle.svm.core.thread.VMThreads;
 
-/**
- * Walk a thread stack verifying the Objects pointed to from the frames.
- *
- * This duplicates a lot of the other stack walking and pointer map iteration code, but that's
- * intentional, in case that code is broken.
- */
-public final class StackVerifier {
+import jdk.graal.compiler.word.Word;
 
-    /*
-     * Final state.
-     */
+/** Walk the stack and verify all objects that are referenced from stack frames. */
+final class StackVerifier {
+    private static final StackFrameVerificationVisitor STACK_FRAME_VISITOR = new StackFrameVerificationVisitor();
 
-    /** A singleton instance of the ObjectReferenceVisitor. */
-    private static final VerifyFrameReferencesVisitor verifyFrameReferencesVisitor = new VerifyFrameReferencesVisitor();
-
-    /** A singleton instance of the StackFrameVerifierVisitor. */
-    private final StackFrameVerifierVisitor stackFrameVisitor = new StackFrameVerifierVisitor();
-
-    /** Constructor. */
-    StackVerifier() {
-        // Mutable data are passed as arguments.
+    @Platforms(Platform.HOSTED_ONLY.class)
+    private StackVerifier() {
     }
 
-    public boolean verifyInAllThreads(Pointer currentSp, CodePointer currentIp, String message) {
-        final Log trace = getTraceLog();
-        trace.string("[StackVerifier.verifyInAllThreads:").string(message).newline();
-        // Flush thread-local allocation data.
-        ThreadLocalAllocation.disableThreadLocalAllocation();
-        trace.string("Current thread ").hex(CurrentIsolate.getCurrentThread()).string(": [").newline();
-        if (!JavaStackWalker.walkCurrentThread(currentSp, currentIp, stackFrameVisitor)) {
-            return false;
-        }
-        trace.string("]").newline();
-        if (SubstrateOptions.MultiThreaded.getValue()) {
-            for (IsolateThread vmThread = VMThreads.firstThread(); VMThreads.isNonNullThread(vmThread); vmThread = VMThreads.nextThread(vmThread)) {
-                if (vmThread == CurrentIsolate.getCurrentThread()) {
-                    continue;
-                }
-                trace.string("Thread ").hex(vmThread).string(": [").newline();
-                if (!JavaStackWalker.walkThread(vmThread, stackFrameVisitor)) {
-                    return false;
-                }
-                trace.string("]").newline();
+    @NeverInline("Starts a stack walk in the caller frame")
+    public static boolean verifyAllThreads() {
+        boolean result = true;
+
+        STACK_FRAME_VISITOR.initialize();
+        JavaStackWalker.walkCurrentThread(KnownIntrinsics.readCallerStackPointer(), STACK_FRAME_VISITOR);
+        result &= STACK_FRAME_VISITOR.result;
+
+        for (IsolateThread thread = VMThreads.firstThread(); thread.isNonNull(); thread = VMThreads.nextThread(thread)) {
+            if (thread == CurrentIsolate.getCurrentThread()) {
+                continue;
             }
+
+            STACK_FRAME_VISITOR.initialize();
+            JavaStackWalker.walkThread(thread, STACK_FRAME_VISITOR);
+            result &= STACK_FRAME_VISITOR.result;
         }
-        trace.string("]").newline();
-        return true;
+        return result;
     }
 
-    private static boolean verifyFrame(Pointer frameSP, CodePointer frameIP, DeoptimizedFrame deoptimizedFrame) {
-        final Log trace = getTraceLog();
-        trace.string("[StackVerifier.verifyFrame:");
-        trace.string("  frameSP: ").hex(frameSP);
-        trace.string("  frameIP: ").hex(frameIP);
-        trace.string("  pc: ").hex(frameIP);
-        trace.newline();
+    private static class StackFrameVerificationVisitor extends StackFrameVisitor {
+        private final VerifyFrameReferencesVisitor verifyFrameReferencesVisitor;
 
-        if (!CodeInfoTable.visitObjectReferences(frameSP, frameIP, deoptimizedFrame, verifyFrameReferencesVisitor)) {
-            return false;
+        private boolean result;
+
+        @Platforms(Platform.HOSTED_ONLY.class)
+        StackFrameVerificationVisitor() {
+            verifyFrameReferencesVisitor = new VerifyFrameReferencesVisitor();
         }
 
-        trace.string("  returns true]").newline();
-        return true;
-    }
-
-    /** A StackFrameVisitor to verify a frame. */
-    private static class StackFrameVerifierVisitor implements StackFrameVisitor {
+        public void initialize() {
+            this.result = true;
+        }
 
         @Override
         @RestrictHeapAccess(access = RestrictHeapAccess.Access.NO_ALLOCATION, reason = "Must not allocate while verifying the stack.")
-        public boolean visitFrame(Pointer currentSP, CodePointer currentIP, DeoptimizedFrame deoptimizedFrame) {
-            final Log trace = getTraceLog();
-            long totalFrameSize = CodeInfoTable.lookupTotalFrameSize(currentIP);
-            trace.string("  currentIP: ").hex(currentIP);
-            trace.string("  currentSP: ").hex(currentSP);
-            trace.string("  frameSize: ").signed(totalFrameSize).newline();
-
-            if (!verifyFrame(currentSP, currentIP, deoptimizedFrame)) {
-                final Log witness = Log.log();
-                witness.string("  frame fails to verify");
-                witness.string("  returns false]").newline();
-                return false;
-            }
+        public boolean visitRegularFrame(Pointer currentSP, CodePointer currentIP, CodeInfo codeInfo) {
+            verifyFrameReferencesVisitor.initialize(currentSP, currentIP);
+            CodeInfoTable.visitObjectReferences(currentSP, currentIP, codeInfo, verifyFrameReferencesVisitor);
+            result &= verifyFrameReferencesVisitor.result;
             return true;
         }
-    }
-
-    /** An ObjectReferenceVisitor to verify references from stack frames. */
-    private static class VerifyFrameReferencesVisitor implements ObjectReferenceVisitor {
 
         @Override
-        public boolean visitObjectReference(Pointer objRef, boolean compressed) {
-            Pointer objAddr = ReferenceAccess.singleton().readObjectAsUntrackedPointer(objRef, compressed);
-
-            final Log trace = StackVerifier.getTraceLog();
-            trace.string("  objAddr: ").hex(objAddr);
-            trace.newline();
-            if (!objAddr.isNull() && !HeapImpl.getHeapImpl().getHeapVerifier().verifyObjectAt(objAddr)) {
-                final Log witness = HeapImpl.getHeapImpl().getHeapVerifier().getWitnessLog();
-                witness.string("[StackVerifier.verifyFrame:");
-                witness.string("  objAddr: ").hex(objAddr);
-                witness.string("  fails to verify");
-                witness.string("]").newline();
-                return false;
-            }
+        @RestrictHeapAccess(access = RestrictHeapAccess.Access.NO_ALLOCATION, reason = "Must not allocate while verifying the stack.")
+        protected boolean visitDeoptimizedFrame(Pointer originalSP, CodePointer deoptStubIP, DeoptimizedFrame deoptimizedFrame) {
+            /* Nothing to do. */
             return true;
         }
     }
 
-    private static Log getTraceLog() {
-        return (HeapOptions.TraceStackVerification.getValue() ? Log.log() : Log.noopLog());
+    public static class VerifyFrameReferencesVisitor implements ObjectReferenceVisitor {
+        private Pointer sp;
+        private CodePointer ip;
+        private boolean result;
+
+        @Platforms(Platform.HOSTED_ONLY.class)
+        VerifyFrameReferencesVisitor() {
+        }
+
+        @SuppressWarnings("hiding")
+        public void initialize(Pointer sp, CodePointer ip) {
+            this.sp = sp;
+            this.ip = ip;
+            this.result = true;
+        }
+
+        public Pointer getSP() {
+            return sp;
+        }
+
+        public CodePointer getIP() {
+            return ip;
+        }
+
+        @Override
+        public void visitObjectReferences(Pointer firstObjRef, boolean compressed, int referenceSize, Object holderObject, int count) {
+            assert holderObject == null;
+
+            Pointer pos = firstObjRef;
+            Pointer end = firstObjRef.add(Word.unsigned(count).multiply(referenceSize));
+            while (pos.belowThan(end)) {
+                visitObjectReference(pos, compressed);
+                pos = pos.add(referenceSize);
+            }
+        }
+
+        private void visitObjectReference(Pointer objRef, boolean compressed) {
+            result &= HeapVerifier.verifyReference(this, objRef, compressed);
+        }
     }
 }

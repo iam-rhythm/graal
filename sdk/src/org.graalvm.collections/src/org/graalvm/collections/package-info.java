@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,15 +40,15 @@
  */
 /*
  @ApiInfo(
- group="Graal SDK"
+ group="Collections"
  )
  */
 /**
- * The Graal-SDK collections package contains memory efficient data structures.
+ * The GraalVM SDK collections package contains memory efficient data structures.
  *
  * @see org.graalvm.collections.EconomicMap
  * @see org.graalvm.collections.EconomicSet
  *
- * @since 1.0
+ * @since 19.0
  */
 package org.graalvm.collections;

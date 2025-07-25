@@ -24,16 +24,12 @@
  */
 package com.oracle.graal.pointsto.flow;
 
-import org.graalvm.compiler.nodes.ValueNode;
-
-import com.oracle.graal.pointsto.BigBang;
-import com.oracle.graal.pointsto.api.PointstoOptions;
+import com.oracle.graal.pointsto.PointsToAnalysis;
 import com.oracle.graal.pointsto.flow.context.AnalysisContext;
-import com.oracle.graal.pointsto.flow.context.BytecodeLocation;
-import com.oracle.graal.pointsto.flow.context.object.AnalysisObject;
-import com.oracle.graal.pointsto.meta.AnalysisField;
 import com.oracle.graal.pointsto.meta.AnalysisType;
 import com.oracle.graal.pointsto.typestate.TypeState;
+
+import jdk.vm.ci.code.BytecodePosition;
 
 /**
  * Implements a clone operation. This flow observes the state changes of the input flow, clones its
@@ -41,120 +37,92 @@ import com.oracle.graal.pointsto.typestate.TypeState;
  * elements, i.e., array elements if the type is array or field values if the type is non-array,
  * into the clones.
  */
-public class CloneTypeFlow extends TypeFlow<ValueNode> {
+public class CloneTypeFlow extends TypeFlow<BytecodePosition> {
 
-    private BytecodeLocation cloneSite;
     private TypeFlow<?> input;
-
     /** The allocation context for the generated clone object. Null if this is not a clone. */
     protected final AnalysisContext allocationContext;
 
-    public CloneTypeFlow(ValueNode node, BytecodeLocation cloneLabel, TypeFlow<?> input) {
-        super(node, null);
-        this.cloneSite = cloneLabel;
+    public CloneTypeFlow(BytecodePosition cloneLocation, AnalysisType inputType, TypeFlow<?> input) {
+        super(cloneLocation, inputType);
         this.allocationContext = null;
         this.input = input;
     }
 
-    public CloneTypeFlow(BigBang bb, CloneTypeFlow original, MethodFlowsGraph methodFlows, AnalysisContext allocationContext) {
+    public CloneTypeFlow(PointsToAnalysis bb, CloneTypeFlow original, MethodFlowsGraph methodFlows, AnalysisContext allocationContext) {
         super(original, methodFlows);
-        this.cloneSite = original.cloneSite;
         this.allocationContext = allocationContext;
         this.input = methodFlows.lookupCloneOf(bb, original.input);
     }
 
     @Override
-    public TypeFlow<ValueNode> copy(BigBang bb, MethodFlowsGraph methodFlows) {
-        AnalysisContext enclosingContext = methodFlows.context();
-        AnalysisContext allocContext = bb.contextPolicy().allocationContext(enclosingContext, PointstoOptions.MaxHeapContextDepth.getValue(bb.getOptions()));
-
+    public TypeFlow<BytecodePosition> copy(PointsToAnalysis bb, MethodFlowsGraph methodFlows) {
+        AnalysisContext allocContext = bb.analysisPolicy().allocationContext(bb, methodFlows);
         return new CloneTypeFlow(bb, this, methodFlows, allocContext);
     }
 
     @Override
-    public void onObservedUpdate(BigBang bb) {
-        /* Only a clone should be updated */
-        assert this.isClone() && context != null;
+    protected void onFlowEnabled(PointsToAnalysis bb) {
+        if (input.isFlowEnabled()) {
+            bb.postTask(() -> onObservedUpdate(bb));
+        }
+    }
 
+    @Override
+    public void onObservedUpdate(PointsToAnalysis bb) {
+        if (!isFlowEnabled()) {
+            return;
+        }
         /* The input state has changed, clone its objects. */
         TypeState inputState = input.getState();
-        TypeState currentState = getState();
-        TypeState resultState;
 
         /*
          * The clone type flow creates a clone of it's input state. It intercepts the input state
          * and it creates a new state with the same types. The object abstractions can be the same
-         * or different depending on the analysis policy. IF new heap objects are created they
+         * or different depending on the analysis policy. If new heap objects are created they
          * encapsulate the location of the cloning. From the point of view of the analysis a clone
          * flow is a source.
          */
-
-        if (inputState.isEmpty() || inputState.isNull()) {
-            /* Nothing to be cloned if the input state is not a concrete type state. */
-            resultState = inputState.forNonNull(bb);
-        } else {
-            resultState = inputState.typesStream()
-                            .filter(t -> !currentState.containsType(t))
-                            .map(type -> TypeState.forClone(bb, source, cloneSite, type, allocationContext))
-                            .reduce(TypeState.forEmpty(), (s1, s2) -> TypeState.forUnion(bb, s1, s2));
-
-            assert !resultState.canBeNull();
-        }
+        TypeState resultState = bb.analysisPolicy().cloneState(bb, getState(), inputState, source, allocationContext);
 
         /* Update the clone flow state. */
         addState(bb, resultState);
     }
 
     @Override
-    public void update(BigBang bb) {
-
-        assert this.isClone();
-
-        TypeState inputState = input.getState();
-        TypeState cloneState = this.getState();
-
-        for (AnalysisType type : inputState.types()) {
-            if (type.isArray()) {
-                /* The object array clones must also get the elements flows of the originals. */
-                for (AnalysisObject originalObject : inputState.objects(type)) {
-                    if (originalObject.isPrimitiveArray() || originalObject.isEmptyObjectArrayConstant(bb)) {
-                        /* Nothing to read from a primitive array or an empty array constant. */
-                        continue;
-                    }
-                    ArrayElementsTypeFlow originalObjectElementsFlow = originalObject.getArrayElementsFlow(bb, false);
-
-                    for (AnalysisObject cloneObject : cloneState.objects(type)) {
-                        if (cloneObject.isPrimitiveArray() || cloneObject.isEmptyObjectArrayConstant(bb)) {
-                            /* Cannot write to a primitive array or an empty array constant. */
-                            continue;
-                        }
-                        ArrayElementsTypeFlow cloneObjectElementsFlow = cloneObject.getArrayElementsFlow(bb, true);
-                        originalObjectElementsFlow.addUse(bb, cloneObjectElementsFlow);
-                    }
-                }
-            } else {
-
-                /* The object clones must get field flows of the originals. */
-                for (AnalysisObject originalObject : inputState.objects(type)) {
-                    /* Link all the field flows of the original to the clone. */
-                    for (AnalysisField field : type.getInstanceFields(true)) {
-                        FieldTypeFlow originalObjectFieldFlow = originalObject.getInstanceFieldFlow(bb, this.method(), field, false);
-
-                        for (AnalysisObject cloneObject : cloneState.objects(type)) {
-                            FieldTypeFlow cloneObjectFieldFlow = cloneObject.getInstanceFieldFlow(bb, this.method(), field, true);
-                            originalObjectFieldFlow.addUse(bb, cloneObjectFieldFlow);
-                        }
-                    }
-                }
-            }
-        }
+    public void update(PointsToAnalysis bb) {
+        /* Link the elements of the cloned objects to the elements of the source objects. */
+        bb.analysisPolicy().linkClonedObjects(bb, input, this, source);
 
         /* Element flows of array clones (if any) have been updated, update the uses. */
         super.update(bb);
     }
 
-    public BytecodeLocation getCloneSite() {
-        return cloneSite;
+    @Override
+    public void onObservedSaturated(PointsToAnalysis bb, TypeFlow<?> observed) {
+        if (bb.isClosed(declaredType)) {
+            if (!isSaturated()) {
+                /*
+                 * When the input flow saturates start observing the flow of the declared type,
+                 * unless the clone is already saturated.
+                 */
+                replaceObservedWith(bb, declaredType);
+            }
+        } else {
+            /* Propagate the saturation stamp through the clone flow. */
+            onSaturated(bb);
+        }
+    }
+
+    @Override
+    protected void onSaturated() {
+        /* Deregister the clone as an observer of the input. */
+        input.removeObserver(this);
+    }
+
+    @Override
+    public void setObserved(TypeFlow<?> newInputFlow) {
+        this.input = newInputFlow;
     }
 
     @Override

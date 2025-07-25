@@ -27,8 +27,8 @@ package com.oracle.svm.truffle.nfi.libffi;
 import org.graalvm.nativeimage.c.CContext;
 import org.graalvm.nativeimage.c.constant.CConstant;
 import org.graalvm.nativeimage.c.function.CFunction;
-import org.graalvm.nativeimage.c.function.CLibrary;
 import org.graalvm.nativeimage.c.function.CFunctionPointer;
+import org.graalvm.nativeimage.c.function.CLibrary;
 import org.graalvm.nativeimage.c.struct.CField;
 import org.graalvm.nativeimage.c.struct.CPointerTo;
 import org.graalvm.nativeimage.c.struct.CStruct;
@@ -40,7 +40,7 @@ import org.graalvm.word.WordBase;
 //Checkstyle: stop
 
 @CContext(LibFFIHeaderDirectives.class)
-@CLibrary("ffi")
+@CLibrary(value = "ffi", requireStatic = true)
 public class LibFFI {
 
     @CPointerTo(ffi_type.class)
@@ -95,9 +95,6 @@ public class LibFFI {
     public static native int ffi_prep_cif_var(ffi_cif cif, int abi, UnsignedWord nFixedArgs, UnsignedWord nargs, ffi_type ret, ffi_type_array args);
 
     @CFunction
-    public static native void ffi_call(ffi_cif cif, PointerBase fn, PointerBase rvalue, WordPointer avalue);
-
-    @CFunction
     public static native <T extends WordBase> T ffi_closure_alloc(UnsignedWord size, WordPointer code);
 
     @CFunction
@@ -105,4 +102,12 @@ public class LibFFI {
 
     @CFunction
     public static native int ffi_prep_closure_loc(ffi_closure closure, ffi_cif cif, ffi_closure_callback fn, WordBase user_data, PointerBase code_loc);
+
+    public static class NoTransitions {
+        @CFunction(transition = CFunction.Transition.NO_TRANSITION)
+        public static native void ffi_call(ffi_cif cif, PointerBase fn, PointerBase rvalue, WordPointer avalue);
+
+        private NoTransitions() {
+        }
+    }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2019, Oracle and/or its affiliates.
+ * Copyright (c) 2016, 2020, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -29,33 +29,35 @@
  */
 package com.oracle.truffle.llvm.parser.model.symbols.constants;
 
-import com.oracle.truffle.llvm.parser.model.SymbolTable;
-import com.oracle.truffle.llvm.parser.model.symbols.constants.aggregate.AggregateConstant;
-import com.oracle.truffle.llvm.parser.model.symbols.constants.floatingpoint.FloatingPointConstant;
-import com.oracle.truffle.llvm.parser.model.symbols.constants.integer.IntegerConstant;
-import com.oracle.truffle.llvm.runtime.except.LLVMParserException;
-import com.oracle.truffle.llvm.runtime.types.Type;
+import java.nio.ByteBuffer;
+
+import com.oracle.truffle.llvm.parser.LLVMParserRuntime;
 import com.oracle.truffle.llvm.parser.model.SymbolImpl;
+import com.oracle.truffle.llvm.runtime.GetStackSpaceFactory;
+import com.oracle.truffle.llvm.runtime.datalayout.DataLayout;
+import com.oracle.truffle.llvm.runtime.nodes.api.LLVMExpressionNode;
+import com.oracle.truffle.llvm.runtime.types.Type;
+import com.oracle.truffle.llvm.runtime.types.Type.TypeOverflowException;
 
 public interface Constant extends SymbolImpl {
 
-    static Constant createFromData(Type type, long datum) {
-        if (Type.isIntegerType(type)) {
-            return IntegerConstant.fromDatum(type, datum);
+    LLVMExpressionNode createNode(LLVMParserRuntime runtime, DataLayout dataLayout, GetStackSpaceFactory stackFactory);
 
-        } else if (Type.isFloatingpointType(type)) {
-            return FloatingPointConstant.create(type, new long[]{datum});
+    /**
+     * This interface can be used by {@link Constant} values in their
+     * {@link Constant#addToBuffer(Buffer, LLVMParserRuntime, DataLayout, GetStackSpaceFactory)}
+     * methods to add values.
+     */
+    interface Buffer {
+        ByteBuffer getBuffer();
 
-        } else {
-            throw new LLVMParserException("No datum constant implementation for " + type);
-        }
+        void addValue(LLVMExpressionNode value, Type type);
     }
 
-    static Constant createFromData(Type type, long[] data) {
-        return AggregateConstant.fromData(type, data);
-    }
-
-    static Constant createFromValues(Type type, SymbolTable symbols, int[] valueIndices) {
-        return AggregateConstant.fromSymbols(symbols, type, valueIndices);
+    /**
+     * @throws TypeOverflowException may be thrown by implementing classes
+     */
+    default void addToBuffer(Buffer buffer, LLVMParserRuntime runtime, DataLayout dataLayout, GetStackSpaceFactory stackFactory) throws TypeOverflowException {
+        buffer.addValue(createNode(runtime, dataLayout, stackFactory), getType());
     }
 }

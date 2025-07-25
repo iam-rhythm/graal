@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2016, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -65,7 +65,7 @@
  * may be used to implement guest language features that require meta-programming capabilities.
  *
  * @see com.oracle.truffle.api.instrumentation.TruffleInstrument
- * @see com.oracle.truffle.api.instrumentation.Instrumentable
+ * @see com.oracle.truffle.api.instrumentation.InstrumentableNode
  * @since 0.8 or older
  */
 package com.oracle.truffle.api.instrumentation;

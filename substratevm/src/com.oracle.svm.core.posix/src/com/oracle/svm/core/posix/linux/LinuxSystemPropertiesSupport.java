@@ -24,30 +24,63 @@
  */
 package com.oracle.svm.core.posix.linux;
 
-import org.graalvm.nativeimage.Feature;
 import org.graalvm.nativeimage.ImageSingletons;
-import org.graalvm.nativeimage.Platform;
-import org.graalvm.nativeimage.Platforms;
-import org.graalvm.nativeimage.StackValue;
+import org.graalvm.nativeimage.c.type.CCharPointer;
 import org.graalvm.nativeimage.c.type.CTypeConversion;
+import org.graalvm.nativeimage.c.type.CTypeConversion.CCharPointerHolder;
+import org.graalvm.nativeimage.impl.RuntimeSystemPropertiesSupport;
 
-import com.oracle.svm.core.annotate.AutomaticFeature;
+import com.oracle.svm.core.feature.AutomaticallyRegisteredFeature;
+import com.oracle.svm.core.feature.InternalFeature;
+import com.oracle.svm.core.graal.stackvalue.UnsafeStackValue;
 import com.oracle.svm.core.jdk.SystemPropertiesSupport;
 import com.oracle.svm.core.posix.PosixSystemPropertiesSupport;
-import com.oracle.svm.core.posix.headers.Paths;
+import com.oracle.svm.core.posix.headers.Stdlib;
 import com.oracle.svm.core.posix.headers.Utsname;
 
-@Platforms({Platform.LINUX_AND_JNI.class})
 public class LinuxSystemPropertiesSupport extends PosixSystemPropertiesSupport {
 
     @Override
-    protected String tmpdirValue() {
-        return Paths._PATH_VARTMP();
+    protected String javaIoTmpdirValue() {
+        /*
+         * The initial value of `java.io.tmpdir` is hard coded in libjava when building the JDK. So
+         * to be completely correct, we would have to use the value from libjava, but since it is
+         * normally initialized to `/tmp` via `P_tmpdir`, this should be fine for now.
+         */
+        return "/tmp";
+    }
+
+    private static final String DEFAULT_LIBPATH = "/usr/lib64:/lib64:/lib:/usr/lib";
+
+    @Override
+    protected String javaLibraryPathValue() {
+        /*
+         * Adapted from `os::init_system_properties_values` in `src/hotspot/os/linux/os_linux.cpp`,
+         * but omits HotSpot specifics.
+         */
+        CCharPointer ldLibraryPath;
+        try (CCharPointerHolder name = CTypeConversion.toCString("LD_LIBRARY_PATH")) {
+            ldLibraryPath = Stdlib.getenv(name.get());
+        }
+
+        if (ldLibraryPath.isNull()) {
+            return DEFAULT_LIBPATH;
+        }
+        return CTypeConversion.toJavaString(ldLibraryPath) + ":" + DEFAULT_LIBPATH;
+    }
+
+    @Override
+    protected String osNameValue() {
+        Utsname.utsname name = UnsafeStackValue.get(Utsname.utsname.class);
+        if (Utsname.uname(name) >= 0) {
+            return CTypeConversion.toJavaString(name.sysname());
+        }
+        return "Unknown";
     }
 
     @Override
     protected String osVersionValue() {
-        Utsname.utsname name = StackValue.get(Utsname.utsname.class);
+        Utsname.utsname name = UnsafeStackValue.get(Utsname.utsname.class);
         if (Utsname.uname(name) >= 0) {
             return CTypeConversion.toJavaString(name.release());
         }
@@ -55,11 +88,13 @@ public class LinuxSystemPropertiesSupport extends PosixSystemPropertiesSupport {
     }
 }
 
-@Platforms({Platform.LINUX_AND_JNI.class})
-@AutomaticFeature
-class LinuxSystemPropertiesFeature implements Feature {
+@AutomaticallyRegisteredFeature
+class LinuxSystemPropertiesFeature implements InternalFeature {
+
     @Override
-    public void afterRegistration(AfterRegistrationAccess access) {
-        ImageSingletons.add(SystemPropertiesSupport.class, new LinuxSystemPropertiesSupport());
+    public void duringSetup(DuringSetupAccess access) {
+        ImageSingletons.add(RuntimeSystemPropertiesSupport.class, new LinuxSystemPropertiesSupport());
+        /* GR-42971 - Remove once SystemPropertiesSupport.class ImageSingletons use is gone. */
+        ImageSingletons.add(SystemPropertiesSupport.class, (SystemPropertiesSupport) ImageSingletons.lookup(RuntimeSystemPropertiesSupport.class));
     }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -50,8 +50,8 @@ import org.graalvm.word.WordFactory;
  * Contains static methods that provide access to the size of <b>dereferenced</b> SystemJava pointer
  * types (i.e. the size of the data structure pointed-to by SystemJava pointer). Note that this
  * semantic differs from the sizeof-operator defined by the C programming language.
- * 
- * @since 1.0
+ *
+ * @since 19.0
  */
 public final class SizeOf {
 
@@ -62,7 +62,7 @@ public final class SizeOf {
      * Returns the size of the data structure pointed to by SystemJava pointer types. The class must
      * be annotated with {@link CStruct}, {@link CPointerTo}, or {@link RawStructure}.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public static int get(Class<? extends PointerBase> clazz) {
         return ImageSingletons.lookup(SizeOfSupport.class).sizeof(clazz);
@@ -71,7 +71,7 @@ public final class SizeOf {
     /**
      * Returns the {@link #get size} cast to {@link UnsignedWord}.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public static UnsignedWord unsigned(Class<? extends PointerBase> clazz) {
         return WordFactory.unsigned(get(clazz));

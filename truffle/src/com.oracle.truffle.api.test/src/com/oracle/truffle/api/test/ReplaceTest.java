@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -44,15 +44,16 @@ import static org.junit.Assert.assertEquals;
 
 import java.util.Iterator;
 
+import com.oracle.truffle.api.CompilerDirectives;
 import org.junit.Assert;
+import org.junit.BeforeClass;
 import org.junit.Test;
 
 import com.oracle.truffle.api.CallTarget;
-import com.oracle.truffle.api.Truffle;
-import com.oracle.truffle.api.TruffleRuntime;
 import com.oracle.truffle.api.frame.VirtualFrame;
 import com.oracle.truffle.api.nodes.Node;
 import com.oracle.truffle.api.nodes.RootNode;
+import com.oracle.truffle.tck.tests.TruffleTestAssumptions;
 
 /**
  * <h3>Replacing Nodes at Run Time</h3>
@@ -75,13 +76,17 @@ import com.oracle.truffle.api.nodes.RootNode;
  */
 public class ReplaceTest {
 
+    @BeforeClass
+    public static void runWithWeakEncapsulationOnly() {
+        TruffleTestAssumptions.assumeWeakEncapsulation();
+    }
+
     @Test
     public void test() {
-        TruffleRuntime runtime = Truffle.getRuntime();
         UnresolvedNode leftChild = new UnresolvedNode("20");
         UnresolvedNode rightChild = new UnresolvedNode("22");
         TestRootNode rootNode = new TestRootNode(new ValueNode[]{leftChild, rightChild});
-        CallTarget target = runtime.createCallTarget(rootNode);
+        CallTarget target = rootNode.getCallTarget();
         assertEquals(rootNode, leftChild.getParent());
         assertEquals(rootNode, rightChild.getParent());
         Iterator<Node> iterator = rootNode.getChildren().iterator();
@@ -139,6 +144,7 @@ public class ReplaceTest {
         @Override
         int execute() {
             int intValue = Integer.parseInt(value);
+            CompilerDirectives.transferToInterpreterAndInvalidate();
             ResolvedNode newNode = this.replace(new ResolvedNode(intValue));
             return newNode.execute();
         }

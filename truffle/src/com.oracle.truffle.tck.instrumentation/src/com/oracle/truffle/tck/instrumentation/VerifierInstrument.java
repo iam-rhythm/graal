@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -42,16 +42,14 @@ package com.oracle.truffle.tck.instrumentation;
 
 import java.util.function.Predicate;
 
-import org.junit.Assert;
-
 import org.graalvm.polyglot.PolyglotException;
 import org.graalvm.polyglot.SourceSection;
 import org.graalvm.polyglot.tck.InlineSnippet;
+import org.junit.Assert;
 
 import com.oracle.truffle.api.CompilerDirectives;
 import com.oracle.truffle.api.CompilerDirectives.CompilationFinal;
 import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
-import com.oracle.truffle.api.frame.FrameSlot;
 import com.oracle.truffle.api.frame.MaterializedFrame;
 import com.oracle.truffle.api.frame.VirtualFrame;
 import com.oracle.truffle.api.impl.Accessor;
@@ -60,13 +58,18 @@ import com.oracle.truffle.api.instrumentation.EventContext;
 import com.oracle.truffle.api.instrumentation.ExecutionEventListener;
 import com.oracle.truffle.api.instrumentation.ExecutionEventNode;
 import com.oracle.truffle.api.instrumentation.ExecutionEventNodeFactory;
+import com.oracle.truffle.api.instrumentation.InstrumentableNode;
 import com.oracle.truffle.api.instrumentation.SourceSectionFilter;
 import com.oracle.truffle.api.instrumentation.StandardTags.CallTag;
 import com.oracle.truffle.api.instrumentation.StandardTags.RootTag;
 import com.oracle.truffle.api.instrumentation.StandardTags.StatementTag;
 import com.oracle.truffle.api.instrumentation.TruffleInstrument;
+import com.oracle.truffle.api.library.Library;
 import com.oracle.truffle.api.nodes.ExecutableNode;
 import com.oracle.truffle.api.nodes.Node;
+import com.oracle.truffle.api.nodes.NodeUtil;
+import com.oracle.truffle.api.nodes.NodeVisitor;
+import com.oracle.truffle.api.nodes.RootNode;
 import com.oracle.truffle.api.source.Source;
 import com.oracle.truffle.tck.common.inline.InlineVerifier;
 
@@ -89,6 +92,15 @@ public class VerifierInstrument extends TruffleInstrument implements InlineVerif
         instrumentEnv.getInstrumenter().attachExecutionEventListener(
                         SourceSectionFilter.newBuilder().tagIs(RootTag.class).build(),
                         new RootFrameChecker());
+        instrumentEnv.getInstrumenter().attachExecutionEventListener(
+                        SourceSectionFilter.newBuilder().tagIs(RootTag.class).build(),
+                        new NodePropertyChecker());
+        instrumentEnv.getInstrumenter().attachExecutionEventFactory(
+                        SourceSectionFilter.newBuilder().tagIs(RootTag.class).build(),
+                        new LibraryChecker());
+        instrumentEnv.getInstrumenter().attachExecutionEventListener(
+                        SourceSectionFilter.newBuilder().build(),
+                        new EmptyExecutionEventListener());
     }
 
     @Override
@@ -148,7 +160,7 @@ public class VerifierInstrument extends TruffleInstrument implements InlineVerif
         }
 
         private boolean canRunAt(com.oracle.truffle.api.source.SourceSection ss) {
-            SourceSection section = TruffleTCKAccessor.instrumentAccess().createSourceSection(env, null, ss);
+            SourceSection section = (SourceSection) TruffleTCKAccessor.instrumentAccess().createPolyglotSourceSection(env, null, ss);
             return predicate.test(section);
         }
 
@@ -209,7 +221,7 @@ public class VerifierInstrument extends TruffleInstrument implements InlineVerif
 
             @TruffleBoundary
             private void verify(final Throwable exception) {
-                final PolyglotException pe = VerifierInstrument.TruffleTCKAccessor.engineAccess().wrapGuestException(snippet.getLanguage(), exception);
+                final PolyglotException pe = (PolyglotException) VerifierInstrument.TruffleTCKAccessor.engineAccess().wrapGuestException(snippet.getLanguage(), exception);
                 resultVerifier.verify(pe);
             }
 
@@ -220,7 +232,29 @@ public class VerifierInstrument extends TruffleInstrument implements InlineVerif
         }
     }
 
-    private static class RootFrameChecker implements ExecutionEventListener {
+    private static final class NodePropertyChecker implements ExecutionEventListener {
+
+        public void onEnter(EventContext context, VirtualFrame frame) {
+            Node instrumentedNode = context.getInstrumentedNode();
+            RootNode root = instrumentedNode.getRootNode();
+            checkRootNames(root);
+        }
+
+        @TruffleBoundary
+        private static void checkRootNames(RootNode root) {
+            Assert.assertNotNull(root);
+            root.getName(); // should not crash
+            root.getQualifiedName(); // should not crash
+        }
+
+        public void onReturnValue(EventContext context, VirtualFrame frame, Object result) {
+        }
+
+        public void onReturnExceptional(EventContext context, VirtualFrame frame, Throwable exception) {
+        }
+    }
+
+    private static final class RootFrameChecker implements ExecutionEventListener {
 
         @Override
         public void onEnter(EventContext context, VirtualFrame frame) {
@@ -228,27 +262,120 @@ public class VerifierInstrument extends TruffleInstrument implements InlineVerif
         }
 
         @TruffleBoundary
-        private void checkFrameIsEmpty(EventContext context, MaterializedFrame frame) {
+        private static void checkFrameIsEmpty(EventContext context, MaterializedFrame frame) {
             Node node = context.getInstrumentedNode();
             if (!hasParentRootTag(node) &&
                             node.getRootNode().getFrameDescriptor() == frame.getFrameDescriptor()) {
-                // Top-most nodes tagged with RootTag should have clean frames.
                 Object defaultValue = frame.getFrameDescriptor().getDefaultValue();
-                for (FrameSlot slot : frame.getFrameDescriptor().getSlots()) {
-                    Assert.assertEquals(defaultValue, frame.getValue(slot));
+                for (int slot = 0; slot < frame.getFrameDescriptor().getNumberOfSlots(); slot++) {
+                    if (frame.isStatic(slot)) {
+                        Assert.assertEquals("Top-most nodes tagged with RootTag should have clean frames.", defaultValue, frame.getObjectStatic(slot));
+                        Assert.assertEquals("Top-most nodes tagged with RootTag should have clean frames.", 0L, frame.getLongStatic(slot));
+                    } else {
+                        Assert.assertEquals("Top-most nodes tagged with RootTag should have clean frames.", defaultValue, frame.getValue(slot));
+                    }
                 }
             }
         }
 
-        private boolean hasParentRootTag(Node node) {
+        private static boolean hasParentRootTag(Node node) {
             Node parent = node.getParent();
             if (parent == null) {
                 return false;
             }
-            if (TruffleTCKAccessor.nodesAccess().isTaggedWith(parent, RootTag.class)) {
+            if (parent instanceof InstrumentableNode && ((InstrumentableNode) parent).hasTag(RootTag.class)) {
                 return true;
             }
             return hasParentRootTag(parent);
+        }
+
+        @Override
+        public void onReturnValue(EventContext context, VirtualFrame frame, Object result) {
+        }
+
+        @Override
+        public void onReturnExceptional(EventContext context, VirtualFrame frame, Throwable exception) {
+        }
+    }
+
+    private static final class LibraryChecker implements ExecutionEventNodeFactory {
+
+        @Override
+        public ExecutionEventNode create(EventContext context) {
+            return new LibraryCheckerNode(context);
+        }
+
+        private static final class LibraryCheckerNode extends ExecutionEventNode {
+
+            private final EventContext context;
+            @CompilationFinal private boolean checked;
+
+            LibraryCheckerNode(EventContext context) {
+                this.context = context;
+            }
+
+            @Override
+            protected void onReturnValue(VirtualFrame frame, Object result) {
+                if (!checked) {
+                    CompilerDirectives.transferToInterpreterAndInvalidate();
+                    checked = true;
+                    check();
+                }
+            }
+
+            @Override
+            protected void onReturnExceptional(VirtualFrame frame, Throwable exception) {
+                if (!checked) {
+                    CompilerDirectives.transferToInterpreterAndInvalidate();
+                    checked = true;
+                    check();
+                }
+            }
+
+            private void check() {
+                Node rootNode = context.getInstrumentedNode();
+                new InstrumentableNodeInLibrary().visit(rootNode);
+            }
+
+            private static final class InstrumentableNodeInLibrary implements NodeVisitor {
+
+                private int inLibrary;
+
+                @Override
+                public boolean visit(Node node) {
+                    preEnter(node);
+                    checkInstrumentable(node);
+                    NodeUtil.forEachChild(node, this);
+                    postEnter(node);
+                    return true;
+                }
+
+                private void checkInstrumentable(Node node) {
+                    if (inLibrary > 0 && node instanceof InstrumentableNode && ((InstrumentableNode) node).isInstrumentable()) {
+                        Assert.assertFalse("Node \"" + node + "\" of class " + node.getClass() + " is instrumentable, but used in Library. " + node.getSourceSection() + "\n" +
+                                        "Library implementation nodes ought not to be instrumentable, because library may be rewritten to uncached and therefore no longer be able to be instrumented.\n" +
+                                        "InstrumentableNode.isInstrumentable() should return false in the context of a Library.", true);
+                    }
+                }
+
+                private void preEnter(Node node) {
+                    if (node instanceof Library) {
+                        inLibrary++;
+                    }
+                }
+
+                private void postEnter(Node node) {
+                    if (node instanceof Library) {
+                        inLibrary--;
+                    }
+                }
+            }
+        }
+    }
+
+    private static final class EmptyExecutionEventListener implements ExecutionEventListener {
+        @Override
+        public void onEnter(EventContext context, VirtualFrame frame) {
         }
 
         @Override
@@ -268,8 +395,8 @@ public class VerifierInstrument extends TruffleInstrument implements InlineVerif
             return ACCESSOR.engineSupport();
         }
 
-        static Accessor.Nodes nodesAccess() {
-            return ACCESSOR.nodes();
+        static NodeSupport nodesAccess() {
+            return ACCESSOR.nodeSupport();
         }
 
         static Accessor.InstrumentSupport instrumentAccess() {

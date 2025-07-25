@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,32 +24,28 @@
  */
 package com.oracle.truffle.tools.chromeinspector.test;
 
-import java.io.ByteArrayOutputStream;
-import java.util.Iterator;
-import java.util.Objects;
-
-import org.junit.After;
 import static org.junit.Assert.assertTrue;
+
+import java.io.ByteArrayOutputStream;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BiFunction;
+
+import org.graalvm.polyglot.Source;
+import org.junit.After;
+import org.junit.Ignore;
 import org.junit.Test;
 
-import com.oracle.truffle.api.Scope;
+import com.oracle.truffle.api.CompilerDirectives;
 import com.oracle.truffle.api.debug.test.TestDebugBuggyLanguage;
 import com.oracle.truffle.api.frame.Frame;
-import com.oracle.truffle.api.interop.ForeignAccess;
-import com.oracle.truffle.api.interop.Message;
-import com.oracle.truffle.api.interop.TruffleObject;
 import com.oracle.truffle.api.interop.UnknownIdentifierException;
 import com.oracle.truffle.api.interop.UnsupportedMessageException;
 import com.oracle.truffle.api.interop.UnsupportedTypeException;
 import com.oracle.truffle.api.nodes.Node;
-import com.oracle.truffle.api.source.SourceSection;
 import com.oracle.truffle.api.test.polyglot.ProxyInteropObject;
 import com.oracle.truffle.api.test.polyglot.ProxyLanguage;
 import com.oracle.truffle.tck.DebuggerTester;
-import com.oracle.truffle.tools.chromeinspector.ScriptsHandler;
 import com.oracle.truffle.tools.chromeinspector.types.Script;
-
-import org.graalvm.polyglot.Source;
 
 /**
  * Test of exception handling.
@@ -57,7 +53,6 @@ import org.graalvm.polyglot.Source;
 public class BuggyLanguageInspectDebugTest {
 
     private InspectorTester tester;
-    private final MessageNodes messageNodes = new MessageNodes();
     private final ByteArrayOutputStream errorStream = new ByteArrayOutputStream();
 
     @After
@@ -68,61 +63,17 @@ public class BuggyLanguageInspectDebugTest {
     }
 
     @Test
-    public void testBuggyToString() throws Exception {
-        testBuggyCalls(new TestDebugBuggyLanguage() {
-            @Override
-            protected String toString(ProxyLanguage.LanguageContext c, Object value) {
-                throwBug(value);
-                return Objects.toString(value);
-            }
-        }, new LanguageCallsVerifier());
-    }
-
-    @Test
-    public void testBuggyFindMetaObject() throws Exception {
-        testBuggyCalls(new TestDebugBuggyLanguage() {
-            @Override
-            protected Object findMetaObject(ProxyLanguage.LanguageContext context, Object value) {
-                throwBug(value);
-                return Objects.toString(value);
-            }
-        }, new LanguageCallsVerifier());
-    }
-
-    @Test
-    public void testBuggyMetaToString() throws Exception {
-        testBuggyCalls(new TestDebugBuggyLanguage() {
-            @Override
-            protected Object findMetaObject(ProxyLanguage.LanguageContext context, Object value) {
-                if (value instanceof Integer) {
-                    return "THROW" + value;
-                }
-                return Objects.toString(value);
-            }
-
-            @Override
-            protected String toString(ProxyLanguage.LanguageContext c, Object value) {
-                if (value instanceof String) {
-                    String str = (String) value;
-                    if (str.startsWith("THROW")) {
-                        throwBug(Integer.parseInt(str.substring(5)));
-                    }
-                }
-                return Objects.toString(value);
-            }
-        }, new LanguageCallsVerifier());
-    }
-
-    @Test
     public void testBuggyScope() throws Exception {
-        testBuggyCalls(new TestDebugBuggyLanguage() {
+        testBuggyCalls(langRef(new TestDebugBuggyLanguage() {
             @Override
-            protected Iterable<Scope> findLocalScopes(ProxyLanguage.LanguageContext context, Node node, Frame frame) {
-                String text = node.getSourceSection().getCharacters().toString();
-                throwBug(Integer.parseInt(text));
-                return super.findLocalScopes(context, node, frame);
+            protected BiFunction<Node, Frame, Object> scopeProvider() {
+                return (node, frame) -> {
+                    String text = node.getSourceSection().getCharacters().toString();
+                    throwBug(Integer.parseInt(text));
+                    throw CompilerDirectives.shouldNotReachHere();
+                };
             }
-        }, "", false, new BugVerifier() {
+        }), "", false, new BugVerifier() {
             @Override
             public void verifyMessages(InspectorTester t, int errNum) throws InterruptedException {
                 // No scope, verified by haveScope = false
@@ -132,77 +83,70 @@ public class BuggyLanguageInspectDebugTest {
 
     @Test
     public void testBuggyRead() throws Exception {
-        testBuggyCalls(new TestDebugBuggyLanguage(),
+        testBuggyCalls(langRef(new TestDebugBuggyLanguage()),
                         "READ", true, new ReadErrorVerifier("READ"));
     }
 
     @Test
+    @Ignore
     public void testBuggyKeyInfo() throws Exception {
-        testBuggyCalls(new TestDebugBuggyLanguage(),
+        testBuggyCalls(langRef(new TestDebugBuggyLanguage()),
                         "KEY_INFO", true, new ReadErrorVerifier("KEY_INFO"));
     }
 
     @Test
     public void testBuggyReadVar() throws Exception {
-        testBuggyCalls(new TestDebugBuggyLanguage() {
+        testBuggyCalls(langRef(new TestDebugBuggyLanguage() {
             @Override
-            protected Iterable<Scope> findLocalScopes(ProxyLanguage.LanguageContext context, Node node, Frame frame) {
-                int errNum = Integer.parseInt(node.getSourceSection().getCharacters().toString());
-                return buggyProxyScopes(super.findLocalScopes(context, node, frame), () -> throwBug(errNum), "READ");
+            protected BiFunction<Node, Frame, Object> scopeProvider() {
+                return (node, frame) -> {
+                    Object scope = getDefaultScope(node, frame, true);
+                    int errNum = Integer.parseInt(node.getSourceSection().getCharacters().toString());
+                    return buggyProxyScope(scope, () -> throwBug(errNum), "READ");
+                };
             }
-        }, new ReadVarErrorVerifier());
+        }), new ReadVarErrorVerifier());
     }
 
     @Test
     public void testBuggyWriteVar() throws Exception {
-        testBuggyCalls(new TestDebugBuggyLanguage() {
+        testBuggyCalls(langRef(new TestDebugBuggyLanguage() {
             @Override
-            protected Iterable<Scope> findLocalScopes(ProxyLanguage.LanguageContext context, Node node, Frame frame) {
-                int errNum = Integer.parseInt(node.getSourceSection().getCharacters().toString());
-                return buggyProxyScopes(super.findLocalScopes(context, node, frame), () -> throwBug(errNum), "WRITE");
+            protected BiFunction<Node, Frame, Object> scopeProvider() {
+                return (node, frame) -> {
+                    Object scope = getDefaultScope(node, frame, true);
+                    int errNum = Integer.parseInt(node.getSourceSection().getCharacters().toString());
+                    return buggyProxyScope(scope, () -> throwBug(errNum), "WRITE");
+                };
             }
-        }, new WriteVarErrorVerifier());
+        }), new WriteVarErrorVerifier());
     }
 
-    @Test
-    public void testBuggySourceLocation() throws Exception {
-        testBuggyCalls(new TestDebugBuggyLanguage() {
-            @Override
-            protected SourceSection findSourceLocation(ProxyLanguage.LanguageContext context, Object value) {
-                if (value instanceof TruffleObject) {
-                    try {
-                        int errNum = (Integer) ForeignAccess.sendRead(messageNodes.read, (TruffleObject) value, "A");
-                        throwBug(errNum);
-                    } catch (UnknownIdentifierException | UnsupportedMessageException ex) {
-                        throw new AssertionError(ex.getLocalizedMessage(), ex);
-                    }
-                }
-                return null;
-            }
-        }, new SourceLocationVerifier());
+    private static AtomicReference<ProxyLanguage> langRef(ProxyLanguage language) {
+        return new AtomicReference<>(language);
     }
 
-    private void testBuggyCalls(ProxyLanguage language, BugVerifier bugVerifier) throws Exception {
+    private void testBuggyCalls(AtomicReference<ProxyLanguage> language, BugVerifier bugVerifier) throws Exception {
         testBuggyCalls(language, "", true, bugVerifier);
     }
 
     // @formatter:off   The default formatting makes unnecessarily big indents and illogical line breaks
     // CheckStyle: stop line length check
-    private void testBuggyCalls(ProxyLanguage language, String prefix, boolean haveScope, BugVerifier bugVerifier) throws Exception {
+    private void testBuggyCalls(AtomicReference<ProxyLanguage> language, String prefix, boolean haveScope, BugVerifier bugVerifier) throws Exception {
         tester = InspectorTester.start(true);
         tester.setErr(errorStream);
         tester.sendMessage("{\"id\":1,\"method\":\"Runtime.enable\"}");
         tester.sendMessage("{\"id\":2,\"method\":\"Debugger.enable\"}");
-        assertTrue(tester.compareReceivedMessages(
+        tester.receiveMessages(
                         "{\"result\":{},\"id\":1}\n" +
-                        "{\"result\":{},\"id\":2}\n"));
+                        "{\"result\":{\"debuggerId\":\"UniqueDebuggerId.", "},\"id\":2}\n");
         tester.sendMessage("{\"id\":3,\"method\":\"Runtime.runIfWaitingForDebugger\"}");
         assertTrue(tester.compareReceivedMessages(
                         "{\"result\":{},\"id\":3}\n" +
                         "{\"method\":\"Runtime.executionContextCreated\",\"params\":{\"context\":{\"origin\":\"\",\"name\":\"test\",\"id\":1}}}\n"));
-        ProxyLanguage.setDelegate(language);
+        ProxyLanguage.setDelegate(language.getAndSet(null)); // Do not keep language reference
         Source source = Source.newBuilder(ProxyLanguage.ID, prefix + "1", "BuggyCall1.bug").build();
-        String sourceURI = ScriptsHandler.getNiceStringFromURI(source.getURI());
+        String sourceURI = InspectorTester.getStringURI(source.getURI());
         String hash = new Script(0, null, DebuggerTester.getSourceImpl(source)).getHash();
         tester.eval(source);
         long id = tester.getContextId();
@@ -224,14 +168,14 @@ public class BuggyLanguageInspectDebugTest {
                         "{\"result\":{},\"id\":8}\n"));
 
         source = Source.newBuilder(ProxyLanguage.ID, prefix + "2", "BuggyCall2.bug").build();
-        sourceURI = ScriptsHandler.getNiceStringFromURI(source.getURI());
+        sourceURI = InspectorTester.getStringURI(source.getURI());
         hash = new Script(0, null, DebuggerTester.getSourceImpl(source)).getHash();
         tester.eval(source);
         assertTrue(tester.compareReceivedMessages(
                         "{\"method\":\"Debugger.scriptParsed\",\"params\":{\"endLine\":" + endLine + ",\"scriptId\":\"1\",\"endColumn\":" + endColumn + ",\"startColumn\":0,\"startLine\":0,\"length\":" +
                                         source.getLength() + ",\"executionContextId\":" + id + ",\"url\":\"" + sourceURI + "\",\"hash\":\"" + hash + "\"}}\n"));
         skipConsoleMessages(tester);
-        assertPaused(prefix + "2", haveScope, haveScope ? 4 : 2, sourceURI, 1);
+        assertPaused(prefix + "2", haveScope, haveScope ? 3 : 2, sourceURI, 1);
         bugVerifier.verifyMessages(tester, 2);
         tester.sendMessage("{\"id\":100,\"method\":\"Debugger.resume\"}");
         assertTrue(tester.compareReceivedMessages(
@@ -242,20 +186,22 @@ public class BuggyLanguageInspectDebugTest {
                         "{\"result\":{},\"id\":11}\n"));
 
         source = Source.newBuilder(ProxyLanguage.ID, prefix + "3", "BuggyCall3.bug").build();
-        sourceURI = ScriptsHandler.getNiceStringFromURI(source.getURI());
+        sourceURI = InspectorTester.getStringURI(source.getURI());
         hash = new Script(0, null, DebuggerTester.getSourceImpl(source)).getHash();
         tester.eval(source);
         assertTrue(tester.compareReceivedMessages(
                         "{\"method\":\"Debugger.scriptParsed\",\"params\":{\"endLine\":" + endLine + ",\"scriptId\":\"2\",\"endColumn\":" + endColumn + ",\"startColumn\":0,\"startLine\":0,\"length\":" +
                                         source.getLength() + ",\"executionContextId\":" + id + ",\"url\":\"" + sourceURI + "\",\"hash\":\"" + hash + "\"}}\n"));
         skipConsoleMessages(tester);
-        assertPaused(prefix + "3", haveScope, haveScope ? 7 : 3, sourceURI, 2);
+        assertPaused(prefix + "3", haveScope, haveScope ? 5 : 3, sourceURI, 2);
         bugVerifier.verifyMessages(tester, 3);
         tester.sendMessage("{\"id\":100,\"method\":\"Debugger.resume\"}");
         assertTrue(tester.compareReceivedMessages(
                         "{\"result\":{},\"id\":100}\n" +
                         "{\"method\":\"Debugger.resumed\"}\n"));
 
+        // Reset the delegate so that we can GC the tested Engine
+        ProxyLanguage.setDelegate(new ProxyLanguage());
         tester.finish();
         assertTrue(errorStream.size() > 0);
     }
@@ -272,25 +218,27 @@ public class BuggyLanguageInspectDebugTest {
         void verifyMessages(InspectorTester tester, int errNum) throws InterruptedException;
     }
 
-    private static class LanguageCallsVerifier implements BugVerifier {
+    private abstract static class ExceptionVerifier implements BugVerifier {
 
-        @Override
-        public void verifyMessages(InspectorTester tester, int errNum) throws InterruptedException {
-            int objectId = 3 * errNum - 2;
-            String description = (errNum == 2) ? "A TruffleException" : Integer.toString(errNum);
-            String errObject = "ErrorObject " + errNum;
-            tester.sendMessage("{\"id\":7,\"method\":\"Runtime.getProperties\",\"params\":{\"objectId\":\"" + objectId + "\"}}");
-            skipConsoleMessages(tester);
-            assertTrue(tester.compareReceivedMessages(
-                            "{\"result\":{\"result\":[{\"isOwn\":true,\"enumerable\":true,\"name\":\"o\",\"value\":{\"description\":\"" + errObject + " " + errObject + "\",\"className\":\"" + errObject + "\",\"type\":\"function\",\"objectId\":\"" + (3 * errNum) + "\"},\"configurable\":true,\"writable\":true}]," +
-                                         "\"internalProperties\":[]," +
-                                         "\"exceptionDetails\":{\"exception\":{\"description\":\"" + description + "\",\"type\":\"string\",\"value\":\"" + description + "\"}," +
-                                                               "\"exceptionId\":" + errNum + ",\"executionContextId\":1,\"text\":\"Uncaught\"," +
-                                                               "\"stackTrace\":{\"callFrames\":[]}}},\"id\":7}\n"));
+        protected static final String getExceptionDetails(int errNum, String rootPrefix) {
+            String exception;
+            String en = Integer.toString(errNum);
+            if (errNum == 2) {
+                exception = "\"subtype\":\"error\",\"description\":\"A TruffleException\\n    at " + rootPrefix + en + " (Unknown)\",\"className\":\"TestTruffleException\",\"type\":\"object\",\"value\":\"A TruffleException\"";
+            } else {
+                exception = "\"description\":\"" + en + "\\n    at " + rootPrefix + en + " (Unknown)\",\"type\":\"string\",\"value\":\"" + en + "\"";
+            }
+            return "\"exceptionDetails\":{\"exception\":{" + exception + "}," +
+                                         "\"exceptionId\":" + en + ",\"executionContextId\":1,\"text\":\"Uncaught\"," +
+                                         "\"stackTrace\":{\"callFrames\":[]}}";
         }
+
+        public abstract void verifyMessages(InspectorTester tester, int errNum) throws InterruptedException;
+
     }
 
-    private static class ReadErrorVerifier implements BugVerifier {
+
+    private static class ReadErrorVerifier extends ExceptionVerifier {
 
         private final String errMessage;
 
@@ -300,53 +248,49 @@ public class BuggyLanguageInspectDebugTest {
 
         @Override
         public void verifyMessages(InspectorTester tester, int errNum) throws InterruptedException {
-            int objectId = 3 * errNum - 2;
-            String description = (errNum == 2) ? "A TruffleException" : Integer.toString(errNum);
-            String errObject = "ErrorObject " + errNum + " " + errMessage;
+            int objectId = 2 * errNum - 1;
+            String errObject = "ErrorObject ErrorObject " + errNum + " " + errMessage;
             tester.sendMessage("{\"id\":7,\"method\":\"Runtime.getProperties\",\"params\":{\"objectId\":\"" + objectId + "\"}}");
             assertTrue(tester.compareReceivedMessages(
                             "{\"result\":{\"result\":[{\"isOwn\":true,\"enumerable\":true,\"name\":\"a\",\"value\":{\"description\":\"" + errNum + "\",\"type\":\"number\",\"value\":" + errNum + "},\"configurable\":true,\"writable\":true}," +
-                                                     "{\"isOwn\":true,\"enumerable\":true,\"name\":\"o\",\"value\":{\"description\":\"" + errObject + " " + errObject + "\",\"className\":\"" + errObject + "\",\"type\":\"function\",\"objectId\":\"" + (3 * errNum) + "\"},\"configurable\":true,\"writable\":true}]," +
+                                                     "{\"isOwn\":true,\"enumerable\":true,\"name\":\"o\",\"value\":{\"description\":\"" + errObject + "\",\"className\":\"ErrorObject\",\"type\":\"function\",\"objectId\":\"" + (2 * errNum) + "\"},\"configurable\":true,\"writable\":true}]," +
                                          "\"internalProperties\":[]},\"id\":7}\n"));
-            tester.sendMessage("{\"id\":8,\"method\":\"Runtime.getProperties\",\"params\":{\"objectId\":\"" + (3 * errNum) + "\"}}");
+            tester.sendMessage("{\"id\":8,\"method\":\"Runtime.getProperties\",\"params\":{\"objectId\":\"" + (2 * errNum) + "\"}}");
             skipConsoleMessages(tester);
             assertTrue(tester.compareReceivedMessages(
                             "{\"result\":{\"result\":[{\"isOwn\":true,\"enumerable\":true,\"name\":\"B\",\"value\":{\"description\":\"42\",\"type\":\"number\",\"value\":42},\"configurable\":true,\"writable\":true}]," +
                                          "\"internalProperties\":[]," +
-                                         "\"exceptionDetails\":{\"exception\":{\"description\":\"" + description + "\",\"type\":\"string\",\"value\":\"" + description + "\"}," +
-                                                               "\"exceptionId\":" + errNum + ",\"executionContextId\":1,\"text\":\"Uncaught\"," +
-                                                               "\"stackTrace\":{\"callFrames\":[]}}},\"id\":8}\n"));
+                                         getExceptionDetails(errNum, "READ") +
+                                         "},\"id\":8}\n"));
         }
     }
 
-    private static class ReadVarErrorVerifier implements BugVerifier {
+    private static final class ReadVarErrorVerifier extends ExceptionVerifier {
 
         @Override
         public void verifyMessages(InspectorTester tester, int errNum) throws InterruptedException {
-            int objectId = 3 * errNum - 2;
-            String description = (errNum == 2) ? "A TruffleException" : Integer.toString(errNum);
-            String errObject = "ErrorObject " + errNum;
+            int objectId = 2 * errNum - 1;
+            String errObject = "ErrorObject ErrorObject " + errNum;
             tester.sendMessage("{\"id\":7,\"method\":\"Runtime.getProperties\",\"params\":{\"objectId\":\"" + objectId + "\"}}");
             skipConsoleMessages(tester);
             assertTrue(tester.compareReceivedMessages(
-                            "{\"result\":{\"result\":[{\"isOwn\":true,\"enumerable\":true,\"name\":\"o\",\"value\":{\"description\":\"" + errObject + " " + errObject + "\",\"className\":\"" + errObject + "\",\"type\":\"function\",\"objectId\":\"" + (3 * errNum) + "\"},\"configurable\":true,\"writable\":true}]," +
+                            "{\"result\":{\"result\":[{\"isOwn\":true,\"enumerable\":true,\"name\":\"o\",\"value\":{\"description\":\"" + errObject + "\",\"className\":\"ErrorObject\",\"type\":\"function\",\"objectId\":\"" + (2 * errNum) + "\"},\"configurable\":true,\"writable\":true}]," +
                                          "\"internalProperties\":[]," +
-                                         "\"exceptionDetails\":{\"exception\":{\"description\":\"" + description + "\",\"type\":\"string\",\"value\":\"" + description + "\"}," +
-                                                               "\"exceptionId\":" + errNum + ",\"executionContextId\":1,\"text\":\"Uncaught\"," +
-                                                               "\"stackTrace\":{\"callFrames\":[]}}},\"id\":7}\n"));
+                                         getExceptionDetails(errNum, "") +
+                                         "},\"id\":7}\n"));
         }
     }
 
-    private static class WriteVarErrorVerifier implements BugVerifier {
+    private static final class WriteVarErrorVerifier implements BugVerifier {
 
         @Override
         public void verifyMessages(InspectorTester tester, int errNum) throws InterruptedException {
-            int objectId = 3 * errNum - 2;
-            String errObject = "ErrorObject " + errNum;
+            int objectId = 2 * errNum - 1;
+            String errObject = "ErrorObject ErrorObject " + errNum;
             tester.sendMessage("{\"id\":7,\"method\":\"Runtime.getProperties\",\"params\":{\"objectId\":\"" + objectId + "\"}}");
             assertTrue(tester.compareReceivedMessages(
                             "{\"result\":{\"result\":[{\"isOwn\":true,\"enumerable\":true,\"name\":\"a\",\"value\":{\"description\":\"" + errNum + "\",\"type\":\"number\",\"value\":" + errNum + "},\"configurable\":true,\"writable\":true}," +
-                                                     "{\"isOwn\":true,\"enumerable\":true,\"name\":\"o\",\"value\":{\"description\":\"" + errObject + " " + errObject + "\",\"className\":\"" + errObject + "\",\"type\":\"function\",\"objectId\":\"" + (3 * errNum) + "\"},\"configurable\":true,\"writable\":true}]," +
+                                                     "{\"isOwn\":true,\"enumerable\":true,\"name\":\"o\",\"value\":{\"description\":\"" + errObject + "\",\"className\":\"ErrorObject\",\"type\":\"function\",\"objectId\":\"" + (2 * errNum) + "\"},\"configurable\":true,\"writable\":true}]," +
                                          "\"internalProperties\":[]},\"id\":7}\n"));
             tester.sendMessage("{\"id\":8,\"method\":\"Debugger.setVariableValue\",\"params\":{\"scopeNumber\":0,\"variableName\":\"a\",\"newValue\":{\"value\":1000},\"callFrameId\":\"0\"}}");
             // The protocol does not allow to provide an exception. It's consumed
@@ -356,29 +300,6 @@ public class BuggyLanguageInspectDebugTest {
         }
     }
 
-    private static class SourceLocationVerifier implements BugVerifier {
-
-        @Override
-        public void verifyMessages(InspectorTester tester, int errNum) throws InterruptedException {
-            int objectId = 3 * errNum - 2;
-            String description = (errNum == 2) ? "A TruffleException" : Integer.toString(errNum);
-            String errObject = "ErrorObject " + errNum;
-            tester.sendMessage("{\"id\":7,\"method\":\"Runtime.getProperties\",\"params\":{\"objectId\":\"" + objectId + "\"}}");
-            assertTrue(tester.compareReceivedMessages(
-                            "{\"result\":{\"result\":[{\"isOwn\":true,\"enumerable\":true,\"name\":\"a\",\"value\":{\"description\":\"" + errNum + "\",\"type\":\"number\",\"value\":" + errNum + "},\"configurable\":true,\"writable\":true}," +
-                                                     "{\"isOwn\":true,\"enumerable\":true,\"name\":\"o\",\"value\":{\"description\":\"" + errObject + " " + errObject + "\",\"className\":\"" + errObject + "\",\"type\":\"function\",\"objectId\":\"" + (3 * errNum) + "\"},\"configurable\":true,\"writable\":true}]," +
-                                         "\"internalProperties\":[]},\"id\":7}\n"));
-            tester.sendMessage("{\"id\":8,\"method\":\"Runtime.getProperties\",\"params\":{\"objectId\":\"" + (3 * errNum) + "\"}}");
-            skipConsoleMessages(tester);
-            assertTrue(tester.compareReceivedMessages(
-                            "{\"result\":{\"result\":[{\"isOwn\":true,\"enumerable\":true,\"name\":\"A\",\"value\":{\"description\":\"" + errNum + "\",\"type\":\"number\",\"value\":" + errNum + "},\"configurable\":true,\"writable\":true}," +
-                                                     "{\"isOwn\":true,\"enumerable\":true,\"name\":\"B\",\"value\":{\"description\":\"42\",\"type\":\"number\",\"value\":42},\"configurable\":true,\"writable\":true}]," +
-                                         "\"internalProperties\":[]," +
-                                         "\"exceptionDetails\":{\"exception\":{\"description\":\"" + description + "\",\"type\":\"string\",\"value\":\"" + description + "\"}," +
-                                                               "\"exceptionId\":" + errNum + ",\"executionContextId\":1,\"text\":\"Uncaught\"," +
-                                                               "\"stackTrace\":{\"callFrames\":[]}}},\"id\":8}\n"));
-        }
-    }
 
     private void assertPaused(String functionName, boolean haveScope, int objectId, String sourceURI, int scriptId) throws InterruptedException {
         assertTrue(tester.compareReceivedMessages(
@@ -387,7 +308,7 @@ public class BuggyLanguageInspectDebugTest {
                                                  (haveScope ?
                                                   "\"scopeChain\":[{\"name\":\"" + functionName + "\",\"type\":\"local\",\"object\":{\"description\":\"" + functionName + "\",\"type\":\"object\",\"objectId\":\"" + objectId + "\"}}]," :
                                                   "\"scopeChain\":[],") +
-                                                 "\"this\":{\"subtype\":\"null\",\"description\":\"null\",\"type\":\"object\",\"objectId\":\"" + (haveScope ? objectId + 1 : objectId) + "\"}," +
+                                                 "\"this\":null," +
                                                  "\"functionLocation\":{\"scriptId\":\"" + scriptId + "\",\"columnNumber\":0,\"lineNumber\":0}," +
                                                  "\"location\":{\"scriptId\":\"" + scriptId + "\",\"columnNumber\":0,\"lineNumber\":0}," +
                                                  "\"url\":\"" + sourceURI + "\"}]}}\n"));
@@ -395,118 +316,35 @@ public class BuggyLanguageInspectDebugTest {
     // @formatter:on
     // CheckStyle: resume line length check
 
-    Iterable<Scope> buggyProxyScopes(Iterable<Scope> scopes, Runnable throwErr, String errMessage) {
-        return new Iterable<Scope>() {
-            @Override
-            public Iterator<Scope> iterator() {
-                Iterator<Scope> iterator = scopes.iterator();
-                return new Iterator<Scope>() {
-                    @Override
-                    public boolean hasNext() {
-                        return iterator.hasNext();
-                    }
-
-                    @Override
-                    public Scope next() {
-                        return buggyProxyScope(iterator.next(), throwErr, errMessage);
-                    }
-                };
-            }
-        };
+    Object buggyProxyScope(Object scope, Runnable throwErr, String errMessage) {
+        return new BuggyProxyVars(scope, throwErr, errMessage);
     }
 
-    Scope buggyProxyScope(Scope scope, Runnable throwErr, String errMessage) {
-        Scope.Builder builder = Scope.newBuilder(scope.getName(), new BuggyProxyVars(scope.getVariables(), throwErr, errMessage));
-        builder.arguments(new BuggyProxyVars(scope.getArguments(), throwErr, errMessage));
-        builder.node(scope.getNode());
-        return builder.build();
-    }
+    private class BuggyProxyVars extends ProxyInteropObject.InteropWrapper {
 
-    private class BuggyProxyVars extends ProxyInteropObject {
-
-        private final TruffleObject vars;
         private final Runnable throwErr;
         private final String errMessage;
 
         BuggyProxyVars(Object vars, Runnable throwErr, String errMessage) {
-            this.vars = (TruffleObject) vars;
+            super(vars);
             this.throwErr = throwErr;
             this.errMessage = errMessage;
         }
 
         @Override
-        public boolean hasKeys() {
-            return ForeignAccess.sendHasKeys(messageNodes.hasKeys, vars);
-        }
-
-        @Override
-        public boolean hasSize() {
-            return ForeignAccess.sendHasSize(messageNodes.hasSize, vars);
-        }
-
-        @Override
-        public int getSize() {
-            try {
-                return (int) ForeignAccess.sendGetSize(messageNodes.getSize, vars);
-            } catch (UnsupportedMessageException ex) {
-                return 0;
-            }
-        }
-
-        @Override
-        public int keyInfo(String key) {
-            return ForeignAccess.sendKeyInfo(messageNodes.keyInfo, vars, key);
-        }
-
-        @Override
-        public Object keys() throws UnsupportedMessageException {
-            return ForeignAccess.sendKeys(messageNodes.keys, vars);
-        }
-
-        @Override
-        public Object read(String key) throws UnsupportedMessageException, UnknownIdentifierException {
-            if ("READ".equals(errMessage) && "a".equals(key)) {
+        protected Object readMember(String member) throws UnsupportedMessageException, UnknownIdentifierException {
+            if ("READ".equals(errMessage) && "a".equals(member)) {
                 throwErr.run();
             }
-            return ForeignAccess.sendRead(messageNodes.read, vars, key);
+            return super.readMember(member);
         }
 
         @Override
-        public Object write(String key, Object value) throws UnsupportedMessageException, UnknownIdentifierException, UnsupportedTypeException {
+        protected void writeMember(String member, Object value) throws UnsupportedMessageException, UnknownIdentifierException, UnsupportedTypeException {
             if ("WRITE".equals(errMessage)) {
                 throwErr.run();
             }
-            return ForeignAccess.sendWrite(messageNodes.write, vars, key, value);
-        }
-
-    }
-
-    static class MessageNodes {
-
-        final Node keyInfo;
-        final Node keys;
-        final Node hasKeys;
-        final Node hasSize;
-        final Node getSize;
-        final Node read;
-        final Node write;
-        final Node isBoxed;
-        final Node unbox;
-        final Node isExecutable;
-        final Node invoke;
-
-        MessageNodes() {
-            keyInfo = Message.KEY_INFO.createNode();
-            keys = Message.KEYS.createNode();
-            hasKeys = Message.HAS_KEYS.createNode();
-            hasSize = Message.HAS_SIZE.createNode();
-            getSize = Message.GET_SIZE.createNode();
-            read = Message.READ.createNode();
-            write = Message.WRITE.createNode();
-            isBoxed = Message.IS_BOXED.createNode();
-            unbox = Message.UNBOX.createNode();
-            isExecutable = Message.IS_EXECUTABLE.createNode();
-            invoke = Message.INVOKE.createNode();
+            super.writeMember(member, value);
         }
     }
 

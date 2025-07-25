@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2016, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -47,8 +47,10 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Predicate;
 
+import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
 import com.oracle.truffle.api.nodes.Node;
 import com.oracle.truffle.api.nodes.RootNode;
 import com.oracle.truffle.api.source.Source;
@@ -74,6 +76,7 @@ public final class SourceSectionFilter {
      * @since 0.18
      */
     public static final SourceSectionFilter ANY = newBuilder().build();
+    private static final ConcurrentHashMap<Set<Class<?>>, TaggedNode> TAGGED_NODE_CACHE = new ConcurrentHashMap<>();
 
     private final EventFilterExpression[] expressions;
 
@@ -128,15 +131,91 @@ public final class SourceSectionFilter {
      *
      * @param node The node to check.
      * @return True of the filter includes the node, false otherwise.
-     * @since 1.0.0.
+     * @since 19.0.
      */
     public boolean includes(Node node) {
-        if (!InstrumentationHandler.isInstrumentableNode(node, node.getSourceSection())) {
+        if (!InstrumentationHandler.isInstrumentableNode(node)) {
             return false;
         }
-        Set<Class<?>> tags = getProvidedTags(node);
+        return includesImpl(node, node.getSourceSection());
+    }
+
+    /**
+     * Checks if the filter includes the given root node, i.e. do the properties of the given source
+     * section meet the conditions set by the filter without an instrumented node.
+     *
+     * @param rootNode The root node to be checked against the filter.
+     * @param nodeSourceSection The source section of the node to be checked against the filter.
+     *
+     * @return {@code true} if the filter includes the source section and node. {@code false}
+     *         otherwise.
+     * @since 21.3.0
+     *
+     */
+    public boolean includes(RootNode rootNode, SourceSection nodeSourceSection, Set<Class<?>> originalTags) {
+        Set<Class<?>> providedTags = getProvidedTags(rootNode);
+        Set<Class<?>> tags = originalTags == null ? Collections.emptySet() : originalTags;
+        TaggedNode node = TAGGED_NODE_CACHE.get(tags);
+        if (node == null) {
+            Set<Class<?>> newTags = new HashSet<>(tags); // defensively copy
+            node = TAGGED_NODE_CACHE.computeIfAbsent(newTags, TaggedNode::new);
+        }
         for (EventFilterExpression exp : expressions) {
-            if (!exp.isIncluded(tags, node, node.getSourceSection())) {
+            if (originalTags == null && isTagExpression(exp)) {
+                continue;
+            }
+            if (!exp.isIncluded(providedTags, node, nodeSourceSection)) {
+                return false;
+            }
+            if (!exp.isRootIncluded(providedTags, nodeSourceSection, rootNode, 0)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean isTagExpression(EventFilterExpression exp) {
+        if (exp instanceof Not) {
+            return isTagExpression(((Not) exp).delegate);
+        } else {
+            return exp instanceof EventFilterExpression.TagIs;
+        }
+    }
+
+    /*
+     * Since root nodes themselves cannot be instrumented, this node is used by the {@link
+     * #includes(RootNode, SourceSection)} method as a substitute node to check the tags
+     */
+    private static final class TaggedNode extends Node implements InstrumentableNode {
+
+        private final Set<Class<?>> tags;
+
+        TaggedNode(Set<Class<?>> tags) {
+            this.tags = tags;
+        }
+
+        @Override
+        public boolean isInstrumentable() {
+            return true;
+        }
+
+        @Override
+        public WrapperNode createWrapper(ProbeNode probe) {
+            // Never used since this is a dummy node
+            return null;
+        }
+
+        @Override
+        @TruffleBoundary
+        public boolean hasTag(Class<? extends Tag> tag) {
+            return tags.contains(tag);
+        }
+    }
+
+    private boolean includesImpl(Node node, SourceSection sourceSection) {
+        Set<Class<?>> tags = node != null ? getProvidedTags(node) : Collections.emptySet();
+        for (EventFilterExpression exp : expressions) {
+            if (!exp.isIncluded(tags, node, sourceSection)) {
                 return false;
             }
         }
@@ -149,11 +228,10 @@ public final class SourceSectionFilter {
         if (root == null) {
             return Collections.emptySet();
         }
-        Object sourceVM = InstrumentationHandler.AccessorInstrumentHandler.nodesAccess().getSourceVM(root);
-        if (sourceVM == null) {
+        InstrumentationHandler handler = (InstrumentationHandler) InstrumentAccessor.engineAccess().getInstrumentationHandler(root);
+        if (handler == null) {
             return Collections.emptySet();
         }
-        InstrumentationHandler handler = (InstrumentationHandler) InstrumentationHandler.AccessorInstrumentHandler.engineAccess().getInstrumentationHandler(sourceVM);
         return handler.getProvidedTags(node);
     }
 
@@ -202,7 +280,7 @@ public final class SourceSectionFilter {
     }
 
     boolean isInstrumentedNode(Set<Class<?>> providedTags, Node instrumentedNode, SourceSection sourceSection) {
-        assert InstrumentationHandler.isInstrumentableNode(instrumentedNode, sourceSection);
+        assert InstrumentationHandler.isInstrumentableNode(instrumentedNode);
         for (EventFilterExpression exp : expressions) {
             if (!exp.isIncluded(providedTags, instrumentedNode, sourceSection)) {
                 return false;
@@ -233,6 +311,7 @@ public final class SourceSectionFilter {
     public final class Builder {
         private List<EventFilterExpression> expressions = new ArrayList<>();
         private boolean includeInternal = true;
+        private boolean availableSections = false;
 
         private Builder() {
         }
@@ -344,6 +423,23 @@ public final class SourceSectionFilter {
         public Builder sourceSectionEquals(SourceSection... section) {
             verifyNotNull(section);
             expressions.add(new EventFilterExpression.SourceSectionEquals(section));
+            return this;
+        }
+
+        /**
+         * Add a filter for available source sections. By default all locations with or without
+         * available source sections are provided. If this flag is set to {@code true} then
+         * {@code null} and not {@link SourceSection#isAvailable() available} source sections are
+         * filtered out.
+         *
+         * @param availableOnly {@code true} to include only non-null and
+         *            {@link SourceSection#isAvailable() available} source sections, {@code false}
+         *            to include all.
+         * @return the builder to chain calls
+         * @since 24.1
+         */
+        public Builder sourceSectionAvailableOnly(boolean availableOnly) {
+            this.availableSections = availableOnly;
             return this;
         }
 
@@ -607,6 +703,9 @@ public final class SourceSectionFilter {
             if (!includeInternal) {
                 expressions.add(new EventFilterExpression.IgnoreInternal());
             }
+            if (availableSections) {
+                expressions.add(new EventFilterExpression.AvailableSections());
+            }
             Collections.sort(expressions);
             return new SourceSectionFilter(expressions.toArray(new EventFilterExpression[0]));
         }
@@ -663,7 +762,7 @@ public final class SourceSectionFilter {
         /**
          * Constructs a new index range between one a first index inclusive and a second index
          * exclusive. Parameters must comply <code>startIndex >= 0</code> and
-         * <code>startIndex <= endIndex</code>.
+         * <code>startIndex &lt;= endIndex</code>.
          *
          * @param startIndex the start index (inclusive)
          * @param endIndex the end index (exclusive)
@@ -1498,11 +1597,16 @@ public final class SourceSectionFilter {
 
             @Override
             boolean isIncluded(Set<Class<?>> providedTags, Node instrumentedNode, SourceSection s) {
-                return true;
+                return s == null || !s.getSource().isInternal();
             }
 
             @Override
             boolean isRootIncluded(Set<Class<?>> providedTags, SourceSection rootSection, RootNode rootNode, int rootNodeBits) {
+                // assert that the RootNode is internal when it's Source is internal
+                assert rootNode == null ||
+                                rootSection == null ||
+                                !rootSection.getSource().isInternal() ||
+                                rootSection.getSource().isInternal() && rootNode.isInternal() : "The root's source is internal, but the root node is not. Root node = " + rootNode.getClass();
                 return rootNode == null || !rootNode.isInternal();
             }
 
@@ -1514,6 +1618,33 @@ public final class SourceSectionFilter {
             @Override
             public String toString() {
                 return "ignore internal";
+            }
+
+        }
+
+        private static final class AvailableSections extends EventFilterExpression {
+
+            AvailableSections() {
+            }
+
+            @Override
+            boolean isIncluded(Set<Class<?>> providedTags, Node instrumentedNode, SourceSection s) {
+                return s != null && s.isAvailable();
+            }
+
+            @Override
+            boolean isRootIncluded(Set<Class<?>> providedTags, SourceSection rootSection, RootNode rootNode, int rootNodeBits) {
+                return true;
+            }
+
+            @Override
+            protected int getOrder() {
+                return 1;
+            }
+
+            @Override
+            public String toString() {
+                return "available source sections";
             }
 
         }

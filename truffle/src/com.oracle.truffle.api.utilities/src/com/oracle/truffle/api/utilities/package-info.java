@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -56,10 +56,6 @@
  * unchanged.</li>
  * <li>{@link com.oracle.truffle.api.utilities.CyclicAssumption} speculates on assumptions that
  * might invalidate more often but are assumed to stabilize over time.</li>
- * <li>{@link com.oracle.truffle.api.utilities.NeverValidAssumption} utility for assumptions that
- * are always invalidated</li>
- * <li>{@link com.oracle.truffle.api.utilities.UnionAssumption} utility for the union of two
- * assumptions</li>
  * </ul>
  * </p>
  *

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -41,26 +41,32 @@
 package com.oracle.truffle.api.dsl.test;
 
 import static com.oracle.truffle.api.dsl.test.TestHelper.createCallTarget;
+import static com.oracle.truffle.api.test.polyglot.AbstractPolyglotTest.assertFails;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
+
+import java.lang.annotation.Repeatable;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.reflect.Method;
 
 import org.junit.Test;
 
+import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
+import com.oracle.truffle.api.dsl.GenerateUncached;
 import com.oracle.truffle.api.dsl.NodeField;
 import com.oracle.truffle.api.dsl.Specialization;
-import com.oracle.truffle.api.dsl.test.NodeFieldTestFactory.IntFieldNoGetterTestNodeFactory;
-import com.oracle.truffle.api.dsl.test.NodeFieldTestFactory.IntFieldTestNodeFactory;
-import com.oracle.truffle.api.dsl.test.NodeFieldTestFactory.MultipleFieldsTestNodeFactory;
-import com.oracle.truffle.api.dsl.test.NodeFieldTestFactory.ObjectContainerNodeFactory;
-import com.oracle.truffle.api.dsl.test.NodeFieldTestFactory.RewriteTestNodeFactory;
-import com.oracle.truffle.api.dsl.test.NodeFieldTestFactory.StringFieldTestNodeFactory;
-import com.oracle.truffle.api.dsl.test.NodeFieldTestFactory.TestContainerFactory;
 import com.oracle.truffle.api.dsl.test.TypeSystemTest.ValueNode;
+import com.oracle.truffle.api.nodes.Node;
+import com.oracle.truffle.api.source.SourceSection;
 
 public class NodeFieldTest {
 
     @Test
     public void testIntField() {
-        assertEquals(42, createCallTarget(IntFieldTestNodeFactory.create(42)).call());
+        assertEquals(42, createCallTarget(NodeFieldTestFactory.IntFieldTestNodeFactory.create(42)).call());
     }
 
     @NodeField(name = "field", type = int.class)
@@ -77,7 +83,7 @@ public class NodeFieldTest {
 
     @Test
     public void testIntFieldNoGetter() {
-        assertEquals(42, createCallTarget(IntFieldNoGetterTestNodeFactory.create(42)).call());
+        assertEquals(42, createCallTarget(NodeFieldTestFactory.IntFieldNoGetterTestNodeFactory.create(42)).call());
     }
 
     @NodeField(name = "field", type = int.class)
@@ -92,7 +98,7 @@ public class NodeFieldTest {
 
     @Test
     public void testMultipleFields() {
-        assertEquals(42, createCallTarget(MultipleFieldsTestNodeFactory.create(21, 21)).call());
+        assertEquals(42, createCallTarget(NodeFieldTestFactory.MultipleFieldsTestNodeFactory.create(21, 21)).call());
     }
 
     @NodeField(name = "field0", type = int.class)
@@ -107,12 +113,11 @@ public class NodeFieldTest {
         int intField() {
             return getField0() + getField1();
         }
-
     }
 
     @Test
     public void testStringField() {
-        assertEquals("42", createCallTarget(StringFieldTestNodeFactory.create("42")).call());
+        assertEquals("42", createCallTarget(NodeFieldTestFactory.StringFieldTestNodeFactory.create("42")).call());
     }
 
     @NodeField(name = "field", type = String.class)
@@ -129,7 +134,7 @@ public class NodeFieldTest {
 
     @Test
     public void testRewrite() {
-        assertEquals("42", createCallTarget(RewriteTestNodeFactory.create("42")).call());
+        assertEquals("42", createCallTarget(NodeFieldTestFactory.RewriteTestNodeFactory.create("42")).call());
     }
 
     @NodeField(name = "field", type = String.class)
@@ -150,7 +155,7 @@ public class NodeFieldTest {
 
     @Test
     public void testStringContainer() {
-        assertEquals(42, createCallTarget(TestContainerFactory.create("42")).call());
+        assertEquals(42, createCallTarget(NodeFieldTestFactory.TestContainerFactory.create("42")).call());
     }
 
     @NodeField(name = "field", type = int.class)
@@ -172,7 +177,7 @@ public class NodeFieldTest {
 
     @Test
     public void testObjectContainer() {
-        assertEquals("42", createCallTarget(ObjectContainerNodeFactory.create("42")).call());
+        assertEquals("42", createCallTarget(NodeFieldTestFactory.ObjectContainerNodeFactory.create("42")).call());
     }
 
     @NodeField(name = "object", type = Object.class)
@@ -185,6 +190,192 @@ public class NodeFieldTest {
             return getObject();
         }
 
+    }
+
+    @Test
+    public void testUncachedNodeIntFieldTest() {
+        assertEquals(42, NodeFieldTestFactory.UncachedNodeIntFieldTestNodeGen.create(42).execute());
+        assertFails(() -> NodeFieldTestFactory.UncachedNodeObjectFieldTestNodeGen.getUncached().execute(), UnsupportedOperationException.class);
+    }
+
+    @GenerateUncached
+    @NodeField(name = "field", type = int.class)
+    public abstract static class UncachedNodeIntFieldTest extends Node {
+
+        abstract Object execute();
+
+        protected abstract int getField();
+
+        @Specialization
+        Object s0() {
+            return getField();
+        }
+
+        @Override
+        public SourceSection getSourceSection() {
+            // uses getSourceLength
+            return null;
+        }
+    }
+
+    @Test
+    public void testUncachedNodeObjectFieldTest() {
+        Object instance = new Object();
+        assertSame(instance, NodeFieldTestFactory.UncachedNodeObjectFieldTestNodeGen.create(instance).execute());
+        assertFails(() -> NodeFieldTestFactory.UncachedNodeObjectFieldTestNodeGen.getUncached().execute(), UnsupportedOperationException.class);
+    }
+
+    @GenerateUncached
+    @NodeField(name = "field", type = Object.class)
+    public abstract static class UncachedNodeObjectFieldTest extends Node {
+
+        abstract Object execute();
+
+        protected abstract Object getField();
+
+        @Specialization
+        Object s0() {
+            return getField();
+        }
+
+        @Override
+        public SourceSection getSourceSection() {
+            // uses getSourceLength
+            return null;
+        }
+    }
+
+    @Test
+    public void testUncachedNodeIntFieldRef() {
+        assertEquals(42, NodeFieldTestFactory.UncachedNodeIntFieldRefNodeGen.create(42).execute());
+        assertEquals(0, NodeFieldTestFactory.UncachedNodeIntFieldRefNodeGen.getUncached().execute());
+    }
+
+    @GenerateUncached
+    @NodeField(name = "foo", type = int.class)
+    public abstract static class UncachedNodeIntFieldRef extends Node {
+
+        abstract Object execute();
+
+        @Specialization
+        static Object s0(int foo) {
+            return foo;
+        }
+    }
+
+    @Test
+    public void testUncachedNodeSettableIntFieldRef() throws Exception {
+        UncachedNodeSettableIntFieldRef cached = NodeFieldTestFactory.UncachedNodeSettableIntFieldRefNodeGen.create();
+        assertEquals(0, cached.execute());
+        assertEquals(0, cached.getFoo());
+        cached.setFoo(42);
+        assertEquals(42, cached.execute());
+        assertEquals(42, cached.getFoo());
+        assertNull(cached.getClass().getDeclaredMethod("getFoo").getAnnotation(TruffleBoundary.class));
+        assertNull(cached.getClass().getDeclaredMethod("setFoo", int.class).getAnnotation(TruffleBoundary.class));
+
+        UncachedNodeSettableIntFieldRef uncached = NodeFieldTestFactory.UncachedNodeSettableIntFieldRefNodeGen.getUncached();
+        assertFails(() -> uncached.execute(), UnsupportedOperationException.class);
+        assertFails(() -> uncached.getFoo(), UnsupportedOperationException.class);
+        assertFails(() -> uncached.setFoo(42), UnsupportedOperationException.class);
+        assertNotNull(uncached.getClass().getDeclaredMethod("getFoo").getAnnotation(TruffleBoundary.class));
+        assertNotNull(uncached.getClass().getDeclaredMethod("setFoo", int.class).getAnnotation(TruffleBoundary.class));
+    }
+
+    @GenerateUncached
+    @NodeField(name = "foo", type = int.class)
+    public abstract static class UncachedNodeSettableIntFieldRef extends Node {
+
+        abstract Object execute();
+
+        abstract int getFoo();
+
+        abstract void setFoo(int foo);
+
+        @Specialization
+        Object s0() {
+            return getFoo();
+        }
+    }
+
+    @Retention(RetentionPolicy.RUNTIME)
+    @interface OtherAnnotations {
+
+        OtherAnnotation[] value();
+
+    }
+
+    @Repeatable(OtherAnnotations.class)
+    @Retention(RetentionPolicy.RUNTIME)
+    @interface OtherAnnotation {
+
+    }
+
+    @Retention(RetentionPolicy.RUNTIME)
+    @interface MyAnnotation {
+
+        String string();
+
+        String[] stringArray();
+
+        int primitive();
+
+        int[] primitiveArray();
+
+        Class<?> type();
+
+        Class<?>[] typeArray();
+
+        OtherAnnotation annotation();
+
+        OtherAnnotation[] annotationArray();
+
+    }
+
+    public abstract static class ConstructorAnnotationsTestNode extends Node {
+
+        private final int field;
+
+        ConstructorAnnotationsTestNode(@MyAnnotation(string = "42", stringArray = {"41", "42"}, //
+                        primitive = 42, primitiveArray = {41, 42}, //
+                        type = ConstructorAnnotationsTestNode.class, //
+                        typeArray = {ConstructorAnnotationsTestNode.class, ConstructorAnnotationsTestNode.class}, //
+                        annotation = @OtherAnnotation, //
+                        annotationArray = {@OtherAnnotation, @OtherAnnotation}) int arg0,
+                        @OtherAnnotation @OtherAnnotation int arg1) { // also test repeatable
+            this.field = arg0 + arg1;
+        }
+
+        abstract Object execute();
+
+        @Specialization
+        int s0() {
+            return field;
+        }
+    }
+
+    @Test
+    public void testConstructorAnnotations() throws NoSuchMethodException, SecurityException {
+        assertEquals(42, NodeFieldTestFactory.ConstructorAnnotationsTestNodeGen.create(21, 21).execute());
+        Method method = NodeFieldTestFactory.ConstructorAnnotationsTestNodeGen.class.getMethod("create", int.class, int.class);
+        MyAnnotation annotation = method.getParameters()[0].getAnnotation(MyAnnotation.class);
+        assertEquals("42", annotation.string());
+        assertEquals("41", annotation.stringArray()[0]);
+        assertEquals("42", annotation.stringArray()[1]);
+        assertEquals(42, annotation.primitive());
+        assertEquals(41, annotation.primitiveArray()[0]);
+        assertEquals(42, annotation.primitiveArray()[1]);
+        assertSame(ConstructorAnnotationsTestNode.class, annotation.type());
+        assertSame(ConstructorAnnotationsTestNode.class, annotation.typeArray()[0]);
+        assertSame(ConstructorAnnotationsTestNode.class, annotation.typeArray()[1]);
+
+        assertNotNull(annotation.annotation());
+        assertNotNull(annotation.annotationArray()[0]);
+        assertNotNull(annotation.annotationArray()[1]);
+
+        OtherAnnotations other = method.getParameters()[1].getAnnotation(OtherAnnotations.class);
+        assertNotNull(other.value()[0]);
+        assertNotNull(other.value()[1]);
     }
 
 }

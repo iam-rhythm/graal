@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates.
+ * Copyright (c) 2017, 2022, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -29,63 +29,62 @@
  */
 package com.oracle.truffle.llvm.runtime.types;
 
-import com.oracle.truffle.api.Assumption;
+import com.oracle.truffle.api.CompilerAsserts;
 import com.oracle.truffle.api.CompilerDirectives;
-import com.oracle.truffle.api.CompilerDirectives.CompilationFinal;
 import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
-import com.oracle.truffle.api.Truffle;
+import com.oracle.truffle.llvm.runtime.GetStackSpaceFactory;
+import com.oracle.truffle.llvm.runtime.NodeFactory;
 import com.oracle.truffle.llvm.runtime.datalayout.DataLayout;
+import com.oracle.truffle.llvm.runtime.nodes.api.LLVMExpressionNode;
 import com.oracle.truffle.llvm.runtime.types.visitors.TypeVisitor;
 
 public final class VectorType extends AggregateType {
 
-    @CompilationFinal private Assumption elementTypeAssumption;
-    @CompilationFinal private Type elementType;
+    private Type elementType;
+    /**
+     * Length of the vector. The value is interpreted as an unsigned 32 bit integer value.
+     */
     private final int length;
 
     public VectorType(Type elementType, int length) {
-        if (elementType != null && !(elementType instanceof PrimitiveType || elementType instanceof PointerType)) {
+        if (elementType != null && !(elementType instanceof PrimitiveType || elementType instanceof PointerType || elementType instanceof VariableBitWidthType)) {
             CompilerDirectives.transferToInterpreterAndInvalidate();
-            throw new AssertionError("Invalid ElementType of Vector: " + elementType);
+            throw new AssertionError("Invalid ElementType of Vector: " + elementType.getClass().getSimpleName());
         }
-        this.elementTypeAssumption = Truffle.getRuntime().createAssumption("VectorType.elementType");
         this.elementType = elementType;
         this.length = length;
     }
 
     public Type getElementType() {
-        if (!elementTypeAssumption.isValid()) {
-            CompilerDirectives.transferToInterpreterAndInvalidate();
-        }
+        CompilerAsserts.neverPartOfCompilation();
         return elementType;
     }
 
     @Override
-    public int getBitSize() {
-        return getElementType().getBitSize() * length;
+    public long getBitSize() throws TypeOverflowException {
+        return multiplyUnsignedExact(getElementType().getBitSize(), length);
     }
 
     @Override
-    public int getNumberOfElements() {
+    public long getNumberOfElements() {
+        return Integer.toUnsignedLong(length);
+    }
+
+    public int getNumberOfElementsInt() {
         return length;
     }
 
     public void setElementType(Type elementType) {
-        CompilerDirectives.transferToInterpreterAndInvalidate();
-        if (elementType == null || !(elementType instanceof PrimitiveType || elementType instanceof PointerType)) {
-            throw new AssertionError("Invalid ElementType of Vector: " + elementType);
+        CompilerAsserts.neverPartOfCompilation();
+        if (!(elementType instanceof PrimitiveType || elementType instanceof PointerType || elementType instanceof VariableBitWidthType)) {
+            throw new AssertionError("Invalid ElementType of Vector: " + (elementType == null ? "null" : elementType.getClass().getSimpleName()));
         }
-        this.elementTypeAssumption.invalidate();
+        verifyCycleFree(elementType);
         this.elementType = elementType;
-        this.elementTypeAssumption = Truffle.getRuntime().createAssumption("VectorType.elementType");
     }
 
     @Override
     public Type getElementType(long index) {
-        if (index >= length) {
-            CompilerDirectives.transferToInterpreter();
-            throw new ArrayIndexOutOfBoundsException();
-        }
         return getElementType();
     }
 
@@ -100,19 +99,21 @@ public final class VectorType extends AggregateType {
     }
 
     @Override
-    public int getSize(DataLayout targetDataLayout) {
-        return getElementType().getSize(targetDataLayout) * length;
+    public long getSize(DataLayout targetDataLayout) throws TypeOverflowException {
+        // See https://llvm.org/docs/LangRef.html#vector-type
+        long bitSize = getElementType().getBitSize();
+        long vecBitSize = multiplyUnsignedExact(bitSize, Integer.toUnsignedLong(length));
+        long size = vecBitSize / Byte.SIZE;
+        if (vecBitSize % Byte.SIZE != 0) {
+            size += 1;
+        }
+        long hiBitSize = Long.highestOneBit(size);
+        return hiBitSize == size ? hiBitSize : hiBitSize << 1;
     }
 
     @Override
-    public Type shallowCopy() {
-        final VectorType copy = new VectorType(getElementType(), length);
-        return copy;
-    }
-
-    @Override
-    public long getOffsetOf(long index, DataLayout targetDataLayout) {
-        return getElementType().getSize(targetDataLayout) * index;
+    public long getOffsetOf(long index, DataLayout targetDataLayout) throws TypeOverflowException {
+        return multiplyUnsignedExact(getElementType().getSize(targetDataLayout), index);
     }
 
     @Override
@@ -153,5 +154,10 @@ public final class VectorType extends AggregateType {
             return false;
         }
         return true;
+    }
+
+    @Override
+    public LLVMExpressionNode createNullConstant(NodeFactory nodeFactory, DataLayout dataLayout, GetStackSpaceFactory stackFactory) {
+        return nodeFactory.createZeroVectorInitializer(getNumberOfElementsInt(), this);
     }
 }

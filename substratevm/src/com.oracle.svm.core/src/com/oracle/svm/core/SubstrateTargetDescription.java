@@ -26,35 +26,33 @@ package com.oracle.svm.core;
 
 import java.util.EnumSet;
 
-import com.oracle.svm.core.deopt.DeoptimizedFrame;
+import org.graalvm.nativeimage.Platform;
+import org.graalvm.nativeimage.Platforms;
 
-import jdk.vm.ci.amd64.AMD64;
+import com.oracle.svm.core.code.RuntimeCodeCache;
+
 import jdk.vm.ci.code.Architecture;
 import jdk.vm.ci.code.TargetDescription;
 
 public class SubstrateTargetDescription extends TargetDescription {
-    private final int deoptScratchSpace;
-
-    public SubstrateTargetDescription(Architecture arch, boolean isMP, int stackAlignment, int implicitNullCheckLimit, boolean inlineObjects, int deoptScratchSpace) {
-        super(arch, isMP, stackAlignment, implicitNullCheckLimit, inlineObjects);
-        this.deoptScratchSpace = deoptScratchSpace;
+    @Platforms(Platform.HOSTED_ONLY.class)
+    public static boolean shouldInlineObjectsInImageCode() {
+        return SubstrateOptions.SpawnIsolates.getValue();
     }
 
-    /**
-     * We include all flags that enable CPU instructions as we want best possible performance for
-     * the code.
-     *
-     * @return All the flags that enable CPU instructions.
-     */
-    public static EnumSet<AMD64.Flag> allFlags() {
-        return EnumSet.of(AMD64.Flag.UseCountLeadingZerosInstruction, AMD64.Flag.UseCountLeadingZerosInstruction);
+    public static boolean shouldInlineObjectsInRuntimeCode() {
+        return SubstrateOptions.SpawnIsolates.getValue() && RuntimeCodeCache.Options.WriteableCodeCache.getValue();
     }
 
-    /**
-     * Returns the amount of scratch space which must be reserved for return value registers in
-     * {@link DeoptimizedFrame}.
-     */
-    public int getDeoptScratchSpace() {
-        return deoptScratchSpace;
+    private final EnumSet<?> runtimeCheckedCPUFeatures;
+
+    @Platforms(Platform.HOSTED_ONLY.class)
+    public SubstrateTargetDescription(Architecture arch, boolean isMP, int stackAlignment, int implicitNullCheckLimit, EnumSet<?> runtimeCheckedCPUFeatures) {
+        super(arch, isMP, stackAlignment, implicitNullCheckLimit, shouldInlineObjectsInImageCode());
+        this.runtimeCheckedCPUFeatures = runtimeCheckedCPUFeatures;
+    }
+
+    public EnumSet<?> getRuntimeCheckedCPUFeatures() {
+        return runtimeCheckedCPUFeatures;
     }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -65,13 +65,13 @@ import org.graalvm.nativeimage.impl.CEntryPointLiteralCodePointer;
  * }
  *
  * // Invocation interface (for calls from Java, otherwise CFunctionPointer suffices)
- * interface MyFunctionPointer extends FunctionPointer {
+ * interface MyFunctionPointer extends CFunctionPointer {
  *     &#064;InvokeCFunctionPointer
  *     int invoke(IsolateThread thread, int x, int y);
  * }
  *
  * // Function pointer literal
- * public static final CEntryPointLiteral&lt;MyFunctionPointer&gt; myFunctionLiteral = CEntryPointLiteral.create(MyClass.class, &quot;myFunction&quot;, new Class<?>[]{IsolateThread.class, int.class, int.class});
+ * public static final CEntryPointLiteral&lt;MyFunctionPointer&gt; myFunctionLiteral = CEntryPointLiteral.create(MyClass.class, &quot;myFunction&quot;, new Class&lt;?&gt;[]{IsolateThread.class, int.class, int.class});
  *
  * // Call from Java
  * void caller() {
@@ -80,7 +80,7 @@ import org.graalvm.nativeimage.impl.CEntryPointLiteralCodePointer;
  * }
  * </pre>
  *
- * @since 1.0
+ * @since 19.0
  */
 public final class CEntryPointLiteral<T extends CFunctionPointer> {
 
@@ -95,7 +95,7 @@ public final class CEntryPointLiteral<T extends CFunctionPointer> {
     /**
      * Creates a new function pointer to an entry point.
      *
-     * @since 1.0
+     * @since 19.0
      */
     @Platforms(Platform.HOSTED_ONLY.class)
     public static <T extends CFunctionPointer> CEntryPointLiteral<T> create(Class<?> definingClass, String methodName, Class<?>... parameterTypes) {
@@ -104,8 +104,8 @@ public final class CEntryPointLiteral<T extends CFunctionPointer> {
 
     /**
      * Returns the function pointer to the entry point.
-     * 
-     * @since 1.0
+     *
+     * @since 19.0
      */
     public T getFunctionPointer() {
         throw new IllegalStateException("Cannot invoke method during native image generation");

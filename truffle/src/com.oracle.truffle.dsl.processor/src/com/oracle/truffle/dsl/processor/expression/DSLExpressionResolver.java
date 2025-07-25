@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -42,29 +42,31 @@ package com.oracle.truffle.dsl.processor.expression;
 
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import javax.lang.model.element.Element;
 import javax.lang.model.element.ElementKind;
 import javax.lang.model.element.ExecutableElement;
-import javax.lang.model.element.Modifier;
 import javax.lang.model.element.TypeElement;
 import javax.lang.model.element.VariableElement;
 import javax.lang.model.type.DeclaredType;
 import javax.lang.model.type.TypeKind;
 import javax.lang.model.type.TypeMirror;
-import javax.lang.model.util.ElementFilter;
 
 import com.oracle.truffle.dsl.processor.ProcessorContext;
 import com.oracle.truffle.dsl.processor.expression.DSLExpression.Binary;
 import com.oracle.truffle.dsl.processor.expression.DSLExpression.BooleanLiteral;
 import com.oracle.truffle.dsl.processor.expression.DSLExpression.Call;
+import com.oracle.truffle.dsl.processor.expression.DSLExpression.Cast;
+import com.oracle.truffle.dsl.processor.expression.DSLExpression.ClassLiteral;
 import com.oracle.truffle.dsl.processor.expression.DSLExpression.DSLExpressionVisitor;
 import com.oracle.truffle.dsl.processor.expression.DSLExpression.IntLiteral;
 import com.oracle.truffle.dsl.processor.expression.DSLExpression.Negate;
 import com.oracle.truffle.dsl.processor.expression.DSLExpression.Variable;
 import com.oracle.truffle.dsl.processor.java.ElementUtils;
+import com.oracle.truffle.dsl.processor.java.compiler.CompilerFactory;
 import com.oracle.truffle.dsl.processor.java.model.CodeTypeMirror;
 import com.oracle.truffle.dsl.processor.java.model.CodeVariableElement;
 
@@ -75,51 +77,63 @@ public class DSLExpressionResolver implements DSLExpressionVisitor {
     public static final List<String> IDENTITY_OPERATORS = Arrays.asList("==", "!=");
     private static final String CONSTRUCTOR_KEYWORD = "new";
 
-    private final List<VariableElement> variables = new ArrayList<>();
-    private final List<ExecutableElement> methods = new ArrayList<>();
-    private final ProcessorContext context;
+    private final Map<String, List<ExecutableElement>> methods = new HashMap<>();
+    private final Map<String, List<VariableElement>> variables = new HashMap<>();
 
-    private DSLExpressionResolver(ProcessorContext context) {
+    private final ProcessorContext context;
+    private final DSLExpressionResolver parent;
+    private final TypeElement accessType;
+
+    private final List<? extends Element> unprocessedElements;
+    private boolean processed;
+
+    private DSLExpressionResolver(ProcessorContext context, TypeElement accessType, DSLExpressionResolver parent, List<? extends Element> lookupElements) {
         this.context = context;
+        this.parent = parent;
+        this.accessType = accessType;
+        this.unprocessedElements = new ArrayList<>(lookupElements);
     }
 
-    public DSLExpressionResolver(ProcessorContext context, List<? extends Element> lookupElements) {
-        this(context);
-        lookup(lookupElements);
+    public DSLExpressionResolver(ProcessorContext context, TypeElement accessType, List<? extends Element> lookupElements) {
+        this(context, accessType, null, lookupElements);
+    }
+
+    public TypeElement getAccessType() {
+        return accessType;
+    }
+
+    public void addVariable(String variableName, VariableElement element) {
+        lazyProcess();
+        variables.computeIfAbsent(variableName, (l) -> new ArrayList<>()).add(element);
+    }
+
+    private void lazyProcess() {
+        if (!processed) {
+            processElements(unprocessedElements);
+            processed = true;
+        }
+    }
+
+    private void processElements(List<? extends Element> lookupElements) {
+        for (Element element : lookupElements) {
+            ElementKind kind = element.getKind();
+            if (kind == ElementKind.METHOD || kind == ElementKind.CONSTRUCTOR) {
+                methods.computeIfAbsent(getMethodName((ExecutableElement) element), (l) -> new ArrayList<>()).add((ExecutableElement) element);
+            } else if (kind == ElementKind.LOCAL_VARIABLE || kind == ElementKind.PARAMETER || kind == ElementKind.FIELD || kind == ElementKind.ENUM_CONSTANT) {
+                String simpleName = element.getSimpleName().toString();
+                if (kind == ElementKind.PARAMETER && simpleName.equals("this")) {
+                    TypeMirror type = element.asType();
+                    if (type.getKind() == TypeKind.DECLARED) {
+                        processElements(getMembers((TypeElement) ((DeclaredType) type).asElement()));
+                    }
+                }
+                variables.computeIfAbsent(simpleName, (l) -> new ArrayList<>()).add((VariableElement) element);
+            }
+        }
     }
 
     public DSLExpressionResolver copy(List<? extends Element> prefixElements) {
-        DSLExpressionResolver resolver = new DSLExpressionResolver(context);
-        resolver.lookup(prefixElements);
-        resolver.variables.addAll(variables);
-        resolver.methods.addAll(methods);
-        return resolver;
-    }
-
-    private void lookup(List<? extends Element> lookupElements) {
-        variablesIn(variables, lookupElements, false);
-        methodsIn(lookupElements);
-    }
-
-    private void methodsIn(List<? extends Element> lookupElements) {
-        for (Element variable : lookupElements) {
-            ElementKind kind = variable.getKind();
-            if (kind == ElementKind.METHOD || kind == ElementKind.CONSTRUCTOR) {
-                methods.add((ExecutableElement) variable);
-            }
-        }
-    }
-
-    private static void variablesIn(List<VariableElement> variables, List<? extends Element> lookupElements, boolean publicOnly) {
-        for (Element variable : lookupElements) {
-            ElementKind kind = variable.getKind();
-            if (kind == ElementKind.LOCAL_VARIABLE || kind == ElementKind.PARAMETER || kind == ElementKind.FIELD || kind == ElementKind.ENUM_CONSTANT) {
-                VariableElement variableElement = (VariableElement) variable;
-                if (!publicOnly || variableElement.getModifiers().contains(Modifier.PUBLIC)) {
-                    variables.add(variableElement);
-                }
-            }
-        }
+        return new DSLExpressionResolver(context, accessType, this, prefixElements);
     }
 
     private static String getMethodName(ExecutableElement method) {
@@ -128,6 +142,12 @@ public class DSLExpressionResolver implements DSLExpressionVisitor {
         } else {
             return method.getSimpleName().toString();
         }
+    }
+
+    public void visitCast(Cast binary) {
+    }
+
+    public void visitClassLiteral(ClassLiteral classLiteral) {
     }
 
     public void visitBinary(Binary binary) {
@@ -165,97 +185,197 @@ public class DSLExpressionResolver implements DSLExpressionVisitor {
         }
     }
 
-    public void visitCall(Call call) {
-        List<ExecutableElement> lookupMethods;
-        DSLExpression receiver = call.getReceiver();
-        if (receiver == null) {
-            lookupMethods = this.methods;
-        } else {
-            TypeMirror type = receiver.getResolvedType();
-            if (type.getKind() == TypeKind.DECLARED) {
-                type = context.reloadType(type); // ensure ECJ has the type loaded
-                lookupMethods = ElementFilter.methodsIn(context.getEnvironment().getElementUtils().getAllMembers((TypeElement) ((DeclaredType) type).asElement()));
-            } else {
-                lookupMethods = Collections.emptyList();
-            }
-        }
-
+    public ExecutableElement lookupMethod(String searchName, List<TypeMirror> searchParameters) {
+        lazyProcess();
+        List<ExecutableElement> methodsWithName = this.methods.get(searchName);
         ExecutableElement foundWithName = null;
-        outer: for (ExecutableElement method : lookupMethods) {
-            if (getMethodName(method).equals(call.getName())) {
-                foundWithName = method;
-
-                List<? extends VariableElement> parameters = method.getParameters();
-                if (parameters.size() != call.getParameters().size()) {
-                    continue outer;
-                }
-
-                int parameterIndex = 0;
-                for (DSLExpression expression : call.getParameters()) {
-                    TypeMirror sourceType = expression.getResolvedType();
-                    TypeMirror targetType = parameters.get(parameterIndex).asType();
-                    if (!ElementUtils.isAssignable(sourceType, targetType)) {
-                        continue outer;
+        ExecutableElement found = null;
+        List<ExecutableElement> overloads = null;
+        if (methodsWithName != null) {
+            for (ExecutableElement method : methodsWithName) {
+                if (matchExecutable(searchName, searchParameters, method) && ElementUtils.isVisible(accessType, method)) {
+                    if (found == null) {
+                        found = method;
+                    } else {
+                        if (overloads == null) {
+                            overloads = new ArrayList<>();
+                            overloads.add(found);
+                        }
+                        overloads.add(method);
                     }
-                    expression.setResolvedTargetType(targetType);
-                    parameterIndex++;
                 }
-
-                call.setResolvedMethod(method);
-                break;
+                foundWithName = method;
+            }
+            if (overloads != null) {
+                return selectOverload(overloads, searchParameters);
+            } else if (found != null) {
+                return found;
             }
         }
-        if (call.getResolvedMethod() == null) {
-            if (foundWithName == null) {
-                // parameter mismatch
-                throw new InvalidExpressionException(String.format("The method %s is undefined for the enclosing scope.", call.getName()));
-            } else {
-                StringBuilder arguments = new StringBuilder();
-                String sep = "";
-                for (DSLExpression expression : call.getParameters()) {
-                    arguments.append(sep).append(ElementUtils.getSimpleName(expression.getResolvedType()));
-                    sep = ", ";
-                }
-                // name mismatch
-                throw new InvalidExpressionException(String.format("The method %s in the type %s is not applicable for the arguments %s.",   //
-                                ElementUtils.getReadableSignature(foundWithName),   //
-                                ElementUtils.getSimpleName((TypeElement) foundWithName.getEnclosingElement()), arguments.toString()));
+        if (parent != null) {
+            ExecutableElement parentResult = parent.lookupMethod(searchName, searchParameters);
+            if (parentResult != null) {
+                return parentResult;
             }
+        }
+        return foundWithName;
+    }
+
+    private ExecutableElement resolveCall(Call call) {
+        lazyProcess();
+
+        ExecutableElement foundMethod = lookupMethod(call.getName(), call.getResolvedParameterTypes());
+        if (foundMethod != null) {
+            List<DSLExpression> expressions = call.getParameters();
+            // refine resolved parameter types
+            for (int i = 0; i < expressions.size() && i < foundMethod.getParameters().size(); i++) {
+                expressions.get(i).setResolvedTargetType(foundMethod.getParameters().get(i).asType());
+            }
+        }
+        return foundMethod;
+    }
+
+    public static boolean matchExecutable(String name, List<TypeMirror> searchParameters, ExecutableElement method) {
+        if (!getMethodName(method).equals(name)) {
+            return false;
+        }
+        List<? extends VariableElement> parameters = method.getParameters();
+        if (parameters.size() != searchParameters.size()) {
+            return false;
+        }
+        int parameterIndex = 0;
+        for (TypeMirror sourceType : searchParameters) {
+            TypeMirror targetType = parameters.get(parameterIndex).asType();
+            if (!ElementUtils.isAssignable(sourceType, targetType)) {
+                return false;
+            }
+            parameterIndex++;
+        }
+        return true;
+    }
+
+    private static ExecutableElement selectOverload(List<ExecutableElement> overloads, List<TypeMirror> searchParameters) {
+        method: for (ExecutableElement method : overloads) {
+            for (int i = 0; i < searchParameters.size(); i++) {
+                TypeMirror searchParameter = searchParameters.get(i);
+                TypeMirror actualParameter = method.getParameters().get(i).asType();
+                if (!ElementUtils.typeEquals(searchParameter, actualParameter)) {
+                    continue method;
+                }
+            }
+            return method;
+        }
+        return overloads.get(0);
+    }
+
+    private VariableElement resolveVariable(Variable variable) {
+        final String name = variable.getName();
+
+        switch (name) {
+            case "null":
+                return new CodeVariableElement(new CodeTypeMirror(TypeKind.NULL), "null");
+            case "false":
+                return new CodeVariableElement(new CodeTypeMirror(TypeKind.BOOLEAN), "false");
+            case "true":
+                return new CodeVariableElement(new CodeTypeMirror(TypeKind.BOOLEAN), "true");
+            default:
+                lazyProcess();
+                List<VariableElement> vars = variables.get(name);
+                if (vars != null && vars.size() > 0) {
+                    for (VariableElement var : vars) {
+                        if (ElementUtils.isVisible(accessType, var)) {
+                            return var;
+                        }
+                    }
+                    // fail in visibility check later
+                    return vars.iterator().next();
+                }
+
+                if (parent != null) {
+                    return parent.resolveVariable(variable);
+                }
+
+                return null;
         }
     }
 
-    public void visitVariable(Variable variable) {
-        List<VariableElement> lookupVariables;
-        DSLExpression receiver = variable.getReceiver();
-        if (variable.getName().equals("null")) {
-            variable.setResolvedVariable(new CodeVariableElement(new CodeTypeMirror(TypeKind.NULL), "null"));
+    public void visitCall(Call call) {
+        DSLExpression receiver = call.getReceiver();
+        DSLExpressionResolver resolver;
+        if (receiver == null) {
+            resolver = this;
         } else {
-            if (receiver == null) {
-                lookupVariables = this.variables;
-            } else {
-                TypeMirror type = receiver.getResolvedType();
-                if (type.getKind() == TypeKind.DECLARED) {
-                    type = context.reloadType(type); // ensure ECJ has the type loaded
-                    lookupVariables = new ArrayList<>();
-                    variablesIn(lookupVariables, context.getEnvironment().getElementUtils().getAllMembers((TypeElement) ((DeclaredType) type).asElement()), true);
-                } else if (type.getKind() == TypeKind.ARRAY) {
-                    lookupVariables = Arrays.<VariableElement> asList(new CodeVariableElement(context.getType(int.class), "length"));
-                } else {
-                    lookupVariables = Collections.emptyList();
+            List<Element> elements = new ArrayList<>();
+            TypeMirror type = receiver.getResolvedType();
+            if (type.getKind() == TypeKind.DECLARED) {
+                type = context.reloadType(type); // ensure ECJ has the type loaded
+                TypeElement t = (TypeElement) ((DeclaredType) type).asElement();
+                for (Element element : getMembers(t)) {
+                    ElementKind kind = element.getKind();
+                    if (kind == ElementKind.METHOD || kind == ElementKind.CONSTRUCTOR) {
+                        elements.add(element);
+                    }
                 }
             }
-
-            for (VariableElement variableElement : lookupVariables) {
-                if (variableElement.getSimpleName().toString().equals(variable.getName())) {
-                    variable.setResolvedVariable(variableElement);
-                    break;
-                }
-            }
+            resolver = new DSLExpressionResolver(context, this.accessType, elements);
         }
 
-        if (variable.getResolvedVariable() == null) {
+        ExecutableElement resolvedMethod = resolver.resolveCall(call);
+        if (resolvedMethod == null) {
+            String message = String.format("The method %s is undefined for the enclosing scope.", call.getName());
+            throw new InvalidExpressionException(message);
+        } else if (!ElementUtils.isVisible(accessType, resolvedMethod)) {
+            throw new InvalidExpressionException(String.format("The method %s is not visible.", ElementUtils.getReadableSignature(resolvedMethod)));
+        } else if (!matchExecutable(call.getName(), call.getResolvedParameterTypes(), resolvedMethod)) {
+            StringBuilder arguments = new StringBuilder();
+            String sep = "";
+            for (DSLExpression expression : call.getParameters()) {
+                arguments.append(sep).append(ElementUtils.getSimpleName(expression.getResolvedType()));
+                sep = ", ";
+            }
+            // name mismatch
+            throw new InvalidExpressionException(String.format("The method %s in the type %s is not applicable for the arguments %s.",   //
+                            ElementUtils.getReadableSignature(resolvedMethod),   //
+                            ElementUtils.getSimpleName((TypeElement) resolvedMethod.getEnclosingElement()), arguments.toString()));
+        }
+        call.setResolvedMethod(resolvedMethod);
+    }
+
+    public void visitVariable(Variable variable) {
+        DSLExpression receiver = variable.getReceiver();
+        DSLExpressionResolver resolver;
+        if (receiver == null) {
+            resolver = this;
+        } else {
+            List<Element> elements = new ArrayList<>();
+            TypeMirror type = receiver.getResolvedType();
+            if (type.getKind() == TypeKind.DECLARED) {
+                type = context.reloadType(type); // ensure ECJ has the type loaded
+                TypeElement t = (TypeElement) ((DeclaredType) type).asElement();
+                for (Element element : getMembers(t)) {
+                    ElementKind kind = element.getKind();
+                    if (kind == ElementKind.LOCAL_VARIABLE || kind == ElementKind.PARAMETER || kind == ElementKind.FIELD || kind == ElementKind.ENUM_CONSTANT) {
+                        elements.add(element);
+                    }
+                }
+            } else if (type.getKind() == TypeKind.ARRAY) {
+                elements.add(new CodeVariableElement(context.getType(int.class), "length"));
+            }
+            resolver = new DSLExpressionResolver(context, this.accessType, elements);
+        }
+
+        VariableElement var = resolver.resolveVariable(variable);
+        if (var == null) {
             throw new InvalidExpressionException(String.format("%s cannot be resolved.", variable.getName()));
+        } else if (!ElementUtils.isVisible(accessType, var)) {
+            throw new InvalidExpressionException(String.format("%s is not visible from %s.", variable.getName(), accessType.getSimpleName()));
         }
+        variable.setResolvedVariable(var);
+
+    }
+
+    private List<? extends Element> getMembers(TypeElement t) {
+        return CompilerFactory.getCompiler(t).getAllMembersInDeclarationOrder(context.getEnvironment(), t);
     }
 
     public void visitBooleanLiteral(BooleanLiteral binary) {

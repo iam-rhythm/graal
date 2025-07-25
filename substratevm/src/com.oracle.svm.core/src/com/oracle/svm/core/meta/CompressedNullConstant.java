@@ -24,7 +24,7 @@
  */
 package com.oracle.svm.core.meta;
 
-import jdk.vm.ci.meta.Constant;
+import jdk.graal.compiler.core.common.type.CompressibleConstant;
 import jdk.vm.ci.meta.JavaConstant;
 import jdk.vm.ci.meta.JavaKind;
 
@@ -55,12 +55,12 @@ public final class CompressedNullConstant implements JavaConstant, CompressibleC
     }
 
     @Override
-    public Constant compress() {
+    public JavaConstant compress() {
         throw new IllegalArgumentException();
     }
 
     @Override
-    public Constant uncompress() {
+    public JavaConstant uncompress() {
         return NULL_POINTER;
     }
 

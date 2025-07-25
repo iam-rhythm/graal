@@ -1,39 +1,53 @@
 /*
- * Copyright (c) 2016, 2016, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
- * This code is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 only, as
- * published by the Free Software Foundation.  Oracle designates this
- * particular file as subject to the "Classpath" exception as provided
- * by Oracle in the LICENSE file that accompanied this code.
+ * The Universal Permissive License (UPL), Version 1.0
  *
- * This code is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
- * version 2 for more details (a copy is included in the LICENSE file that
- * accompanied this code).
+ * Subject to the condition set forth below, permission is hereby granted to any
+ * person obtaining a copy of this software, associated documentation and/or
+ * data (collectively the "Software"), free of charge and under any and all
+ * copyright rights in the Software, and any and all patent rights owned or
+ * freely licensable by each licensor hereunder covering either (i) the
+ * unmodified Software as contributed to or provided by such licensor, or (ii)
+ * the Larger Works (as defined below), to deal in both
  *
- * You should have received a copy of the GNU General Public License version
- * 2 along with this work; if not, write to the Free Software Foundation,
- * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+ * (a) the Software, and
  *
- * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
- * or visit www.oracle.com if you need additional information or have any
- * questions.
+ * (b) any piece of software and/or hardware listed in the lrgrwrks.txt file if
+ * one is included with the Software each a "Larger Work" to which the Software
+ * is contributed by such licensors),
+ *
+ * without restriction, including without limitation the rights to copy, create
+ * derivative works of, display, perform, and distribute the Software and make,
+ * use, sell, offer for sale, import, export, have made, and have sold the
+ * Software and the Larger Work(s), and to sublicense the foregoing rights on
+ * either these or other terms.
+ *
+ * This license is subject to the following condition:
+ *
+ * The above copyright notice and either this complete permission notice or at a
+ * minimum a reference to the UPL must be included in all copies or substantial
+ * portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 package com.oracle.truffle.regex.result;
 
+import java.util.Arrays;
+
+import com.oracle.truffle.api.CompilerDirectives.CompilationFinal;
 import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
-import com.oracle.truffle.regex.RegexObject;
 import com.oracle.truffle.regex.tregex.util.json.Json;
 import com.oracle.truffle.regex.tregex.util.json.JsonConvertible;
 import com.oracle.truffle.regex.tregex.util.json.JsonValue;
-import com.oracle.truffle.regex.util.CompilationFinalBitSet;
-
-import java.util.Arrays;
-
-import static com.oracle.truffle.api.CompilerDirectives.CompilationFinal;
+import com.oracle.truffle.regex.util.TBitSet;
 
 /**
  * Predefined lists of capture group start and end indices. Used for regular expressions like
@@ -41,37 +55,40 @@ import static com.oracle.truffle.api.CompilerDirectives.CompilationFinal;
  */
 public final class PreCalculatedResultFactory implements JsonConvertible {
 
-    @CompilationFinal(dimensions = 1) private final int[] indices;
+    private final int nGroups;
+    @CompilationFinal(dimensions = 1) private final int[] result;
     @CompilationFinal private int length;
 
-    public PreCalculatedResultFactory(int nGroups) {
-        this.indices = new int[nGroups * 2];
-        Arrays.fill(this.indices, -1);
+    public PreCalculatedResultFactory(int nGroups, boolean trackLastGroup) {
+        this.nGroups = nGroups;
+        this.result = new int[nGroups * 2 + (trackLastGroup ? 1 : 0)];
+        Arrays.fill(this.result, -1);
     }
 
-    private PreCalculatedResultFactory(int[] indices, int length) {
-        this.indices = indices;
+    private PreCalculatedResultFactory(int nGroups, int[] result, int length) {
+        this.nGroups = nGroups;
+        this.result = result;
         this.length = length;
     }
 
     public PreCalculatedResultFactory copy() {
-        return new PreCalculatedResultFactory(Arrays.copyOf(indices, indices.length), length);
+        return new PreCalculatedResultFactory(nGroups, Arrays.copyOf(result, result.length), length);
     }
 
     public int getStart(int groupNr) {
-        return indices[groupNr * 2];
+        return result[groupNr * 2];
     }
 
     public void setStart(int groupNr, int value) {
-        indices[groupNr * 2] = value;
+        result[groupNr * 2] = value;
     }
 
     public int getEnd(int groupNr) {
-        return indices[(groupNr * 2) + 1];
+        return result[(groupNr * 2) + 1];
     }
 
     public void setEnd(int groupNr, int value) {
-        indices[(groupNr * 2) + 1] = value;
+        result[(groupNr * 2) + 1] = value;
     }
 
     /**
@@ -86,50 +103,65 @@ public final class PreCalculatedResultFactory implements JsonConvertible {
         this.length = length;
     }
 
-    public void updateIndices(CompilationFinalBitSet updateIndices, int index) {
+    public void setLastGroup(int lastGroup) {
+        assert (result.length & 1) != 0;
+        result[result.length - 1] = lastGroup;
+    }
+
+    public void updateIndices(TBitSet updateIndices, int index) {
         for (int i : updateIndices) {
-            indices[i] = index;
+            result[i] = index;
         }
     }
 
-    public RegexResult createFromStart(RegexObject regex, Object input, int start) {
-        return createFromOffset(regex, input, start - indices[0]);
-    }
-
-    public RegexResult createFromEnd(RegexObject regex, Object input, int end) {
-        return createFromOffset(regex, input, end - length);
-    }
-
-    public int getNumberOfGroups() {
-        return indices.length / 2;
-    }
-
-    private RegexResult createFromOffset(RegexObject regex, Object input, int offset) {
-        if (indices.length == 2) {
-            return new SingleResult(regex, input, indices[0] + offset, indices[1] + offset);
+    public void clearIndices(TBitSet clearIndices) {
+        for (int i : clearIndices) {
+            result[i] = -1;
         }
-        final int[] realIndices = new int[indices.length];
-        applyOffset(realIndices, offset);
-        return new SingleIndexArrayResult(regex, input, realIndices);
     }
 
-    public void applyRelativeToEnd(int[] target, int end) {
-        applyOffset(target, end - length);
+    public RegexResult createFromStart(int start) {
+        return createFromOffset(start);
+    }
+
+    public RegexResult createFromEnd(int end) {
+        return createFromOffset(end - length);
+    }
+
+    public int[] createArrayFromEnd(int end) {
+        int offset = end - length;
+        final int[] realResult = new int[result.length];
+        applyOffset(realResult, offset);
+        return realResult;
+    }
+
+    private RegexResult createFromOffset(int offset) {
+        if (result.length >> 1 == 1) {
+            return RegexResult.create(result[0] + offset, result[1] + offset);
+        }
+        final int[] realResult = new int[result.length];
+        applyOffset(realResult, offset);
+        return RegexResult.create(realResult);
     }
 
     private void applyOffset(int[] target, int offset) {
-        for (int i = 0; i < indices.length; i++) {
-            if (indices[i] == -1) {
+        // Apply offset to capture group indices
+        for (int i = 0; i < 2 * nGroups; i++) {
+            if (result[i] == -1) {
                 target[i] = -1;
             } else {
-                target[i] = indices[i] + offset;
+                target[i] = result[i] + offset;
             }
+        }
+        // Copy over lastGroup
+        if ((result.length & 1) != 0) {
+            target[result.length - 1] = result[result.length - 1];
         }
     }
 
     @Override
     public int hashCode() {
-        return length * 31 + Arrays.hashCode(indices);
+        return length * 31 + Arrays.hashCode(result);
     }
 
     @Override
@@ -138,13 +170,13 @@ public final class PreCalculatedResultFactory implements JsonConvertible {
             return false;
         }
         PreCalculatedResultFactory o = (PreCalculatedResultFactory) obj;
-        return length == o.length && Arrays.equals(indices, o.indices);
+        return length == o.length && Arrays.equals(result, o.result);
     }
 
     @TruffleBoundary
     @Override
     public JsonValue toJson() {
-        return Json.obj(Json.prop("indices", Json.array(indices)),
+        return Json.obj(Json.prop("result", Json.array(result)),
                         Json.prop("length", length));
     }
 }

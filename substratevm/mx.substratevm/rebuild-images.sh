@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
 #
-# ----------------------------------------------------------------------------------------------------
-#
 # Copyright (c) 2018, 2018, Oracle and/or its affiliates. All rights reserved.
 # DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
 #
@@ -25,10 +23,9 @@
 # or visit www.oracle.com if you need additional information or have any
 # questions.
 #
-# ----------------------------------------------------------------------------------------------------
 
 source="${BASH_SOURCE[0]}"
-while [ -h "$source" ] ; do
+while [[ -h "$source" ]] ; do
     prev_source="$source"
     source="$(readlink "$source")";
     if [[ "$source" != /* ]]; then
@@ -39,24 +36,11 @@ while [ -h "$source" ] ; do
 done
 location="$( cd -P "$( dirname "$source" )" && pwd )"
 
-# we assume we are in `jre/lib/svm/bin`
-graalvm_home="${location}/../../../.."
-
-supported_tools=(
-    "agent"
-    "chromeinspector"
-    "profiler"
-)
-
-supported_languages=(
-    "js"
-    "llvm"
-    "python"
-    "ruby"
-)
+# we assume we are in `lib/svm/bin`
+graalvm_home="${location}/../../.."
 
 function usage_and_exit() {
-    echo "Usage: $0 [--verbose] polyglot|libpolyglot|js|llvm|python|ruby... [custom native-image args]..."
+    echo "Usage: $0 [--verbose] polyglot|libpolyglot|espresso|js|llvm|python|ruby|R|wasm... [custom native-image args]..."
     exit 1
 }
 
@@ -65,7 +49,7 @@ custom_args=()
 
 for opt in "${@:1}"; do
     case "$opt" in
-        polyglot|libpolyglot|js|llvm|python|ruby)
+        polyglot|libpolyglot|espresso|js|llvm|python|ruby|R|wasm)
            to_build+=("${opt}")
             ;;
         --help|-h)
@@ -87,132 +71,74 @@ if [[ "${#to_build[@]}" == "0" ]]; then
 fi
 
 function common() {
-    cmd_line+=(
-        "${graalvm_home}/bin/native-image"
-        ${custom_args[@]}
-    )
+    cmd_line+=("${graalvm_home}/bin/native-image")
 
-    if $(${graalvm_home}/bin/native-image --help-extra | grep -q "\-\-no\-server"); then
-        cmd_line+=("--no-server")
-    fi
-
-    if [[ -f "${graalvm_home}/jre/lib/svm/builder/svm-enterprise.jar" ]]; then
+    if [[ -f "${graalvm_home}/lib/svm/builder/svm-enterprise.jar" ]]; then
         cmd_line+=("-g")
     fi
-
-    for tool in "${supported_tools[@]}"; do
-        if [[ -d "${graalvm_home}/jre/tools/${tool}" ]]; then
-            cmd_line+=("--tool:${tool}")
-        fi
-    done
 }
 
 function polyglot_common() {
-    common
-
-    for language in "${supported_languages[@]}"; do
-        if [[ -d "${graalvm_home}/jre/languages/${language}" ]]; then
-            cmd_line+=("--language:${language}")
-        fi
-    done
-}
-
-function launcher_common() {
-    cmd_line+=("-H:-ParseRuntimeOptions")
-}
-
-function polyglot() {
-    polyglot_common
-    launcher_common
-    cmd_line+=(
-        "-H:Features=org.graalvm.launcher.PolyglotLauncherFeature"
-        "-Dorg.graalvm.launcher.relative.home=jre/bin/polyglot"
-        "-H:Name=polyglot"
-        "--tool:truffle"
-    )
-    set_path "${graalvm_home}/jre/bin"
-    cmd_line+=(
-        "org.graalvm.launcher.PolyglotLauncher"
-    )
+    cmd_line+=("--language:all")
 }
 
 function libpolyglot() {
-    polyglot_common
-    cp="${graalvm_home}/jre/lib/polyglot/polyglot-native-api.jar"
-    if [ -f "${graalvm_home}/jre/languages/js/trufflenode.jar" ]; then
-      cp="${cp}:${graalvm_home}/jre/languages/js/trufflenode.jar"
-      cmd_line+=(
-        "-H:JNIConfigurationResources=svmnodejs.jniconfig"
-      )
-    fi
-    cmd_line+=(
-        "-cp"
-        "${cp}"
-        "--tool:truffle"
-        "-Dgraalvm.libpolyglot=true"
-        "-H:Features=org.graalvm.polyglot.nativeapi.PolyglotNativeAPIFeature"
-        "-Dorg.graalvm.polyglot.nativeapi.libraryPath=${graalvm_home}/jre/lib/polyglot"
-        "-Dorg.graalvm.polyglot.nativeapi.nativeLibraryPath=${graalvm_home}/jre/lib/polyglot"
-        "-H:CStandard=C11"
-        "-H:+IncludeAllTimeZones"
-        "-H:+SpawnIsolates"
-        "-H:Name=libpolyglot"
-        "-H:Kind=SHARED_LIBRARY"
-    )
-    set_path "${graalvm_home}/jre/lib/polyglot"
-}
-
-function language() {
     common
-    launcher_common
-    local lang="$1"
-    local relative_path="$2"
-    local launcher_class="$3"
-    if [[ "${lang}" = "ruby" || "${lang}" = "python" ]]; then
-        cmd_line+=("--language:llvm")
-    fi
-    cmd_line+=(
-        "--language:${lang}"
-        "-Dorg.graalvm.launcher.relative.language.home=${relative_path}"
-        "-Dorg.graalvm.launcher.standalone=false"
-        "-H:Name=$(basename ${relative_path})"
-    )
-    set_path "${graalvm_home}/jre/languages/${lang}/$(dirname ${relative_path})"
-    cmd_line+=(
-        "${launcher_class}"
-    )
+    polyglot_common
+    cmd_line+=("--macro:polyglot-library")
 }
 
-function set_path() {
-    cmd_line+=("-H:Path=$1")
+function launcher() {
+    common
+    local launcher="$1"
+    cmd_line+=("--macro:${launcher}-launcher")
+    if [[ "$launcher" == "polyglot" ]]; then
+        polyglot_common
+    fi
+}
+
+function library() {
+    common
+    local launcher="$1"
+    cmd_line+=("--macro:${launcher}-library")
 }
 
 for binary in "${to_build[@]}"; do
     cmd_line=()
     case "${binary}" in
         polyglot)
-            polyglot
+            launcher polyglot
             ;;
         libpolyglot)
             libpolyglot
             ;;
         js)
-            language js "bin/js" "com.oracle.truffle.js.shell.JSLauncher"
+            library jsvm
             ;;
         llvm)
-            language llvm "bin/lli" "com.oracle.truffle.llvm.launcher.LLVMLauncher"
+            library llvmvm
             ;;
         python)
-            language python "bin/graalpython" "com.oracle.graal.python.shell.GraalPythonMain"
+            library pythonvm
             ;;
         ruby)
-            language ruby "bin/truffleruby" "org.truffleruby.launcher.RubyLauncher"
+            library rubyvm
+            ;;
+        R)
+            launcher RMain
+            ;;
+        wasm)
+            launcher wasm
+            ;;
+        espresso)
+            library javavm
             ;;
         *)
             echo "shouldNotReachHere()"
             exit 1
             ;;
     esac
+    cmd_line+=(${custom_args[@]})
     echo "Building ${binary}..."
     if [[ ! -z "${VERBOSE}" ]]; then
         echo "${cmd_line[@]}"

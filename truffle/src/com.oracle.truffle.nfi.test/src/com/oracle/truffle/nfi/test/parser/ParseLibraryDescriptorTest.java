@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,40 +40,59 @@
  */
 package com.oracle.truffle.nfi.test.parser;
 
-import com.oracle.truffle.nfi.types.NativeLibraryDescriptor;
-import com.oracle.truffle.nfi.types.Parser;
+import static org.junit.Assert.assertThrows;
+
+import org.hamcrest.MatcherAssert;
 import org.junit.Assert;
+import org.junit.ClassRule;
 import org.junit.Test;
+
+import com.oracle.truffle.api.CallTarget;
+import com.oracle.truffle.api.exception.AbstractTruffleException;
+import com.oracle.truffle.api.source.Source;
+import com.oracle.truffle.nfi.backend.spi.types.NativeLibraryDescriptor;
+import com.oracle.truffle.nfi.test.parser.ErrorParseSignatureTest.ParserExceptionMatcher;
+import com.oracle.truffle.nfi.test.parser.backend.TestLibrary;
+import com.oracle.truffle.tck.TruffleRunner.RunWithPolyglotRule;
 
 public class ParseLibraryDescriptorTest {
 
+    @ClassRule public static RunWithPolyglotRule runWithPolyglot = new RunWithPolyglotRule();
+
+    private static NativeLibraryDescriptor parseLibraryDescriptor(String descriptor) {
+        Source source = Source.newBuilder("nfi", String.format("with test %s", descriptor), "ParseLibraryDescriptorTest").internal(true).build();
+        CallTarget target = runWithPolyglot.getTruffleTestEnv().parseInternal(source);
+        TestLibrary library = (TestLibrary) target.call();
+        return library.descriptor;
+    }
+
     @Test
     public void parseDefault() {
-        NativeLibraryDescriptor def = Parser.parseLibraryDescriptor("default");
+        NativeLibraryDescriptor def = parseLibraryDescriptor("default");
         Assert.assertTrue("isDefaultLibrary", def.isDefaultLibrary());
     }
 
     @Test
     public void parseFileStringSingle() {
-        NativeLibraryDescriptor test = Parser.parseLibraryDescriptor("load 'test filename'");
+        NativeLibraryDescriptor test = parseLibraryDescriptor("load 'test filename'");
         Assert.assertEquals("file name", "test filename", test.getFilename());
     }
 
     @Test
     public void parseFileStringDouble() {
-        NativeLibraryDescriptor test = Parser.parseLibraryDescriptor("load \"test filename\"");
+        NativeLibraryDescriptor test = parseLibraryDescriptor("load \"test filename\"");
         Assert.assertEquals("file name", "test filename", test.getFilename());
     }
 
     @Test
     public void parseFileIdent() {
-        NativeLibraryDescriptor test = Parser.parseLibraryDescriptor("load /test/path/file.so");
+        NativeLibraryDescriptor test = parseLibraryDescriptor("load /test/path/file.so");
         Assert.assertEquals("file name", "/test/path/file.so", test.getFilename());
     }
 
     @Test
     public void parseWithOneFlag() {
-        NativeLibraryDescriptor test = Parser.parseLibraryDescriptor("load(RTLD_NOW) testfile");
+        NativeLibraryDescriptor test = parseLibraryDescriptor("load(RTLD_NOW) testfile");
         Assert.assertEquals("file name", "testfile", test.getFilename());
         Assert.assertEquals("flag count", 1, test.getFlags().size());
         Assert.assertEquals("RTLD_NOW", test.getFlags().get(0));
@@ -81,40 +100,46 @@ public class ParseLibraryDescriptorTest {
 
     @Test
     public void parseWithTwoFlags() {
-        NativeLibraryDescriptor test = Parser.parseLibraryDescriptor("load(RTLD_NOW | RTLD_GLOBAL) testfile");
+        NativeLibraryDescriptor test = parseLibraryDescriptor("load(RTLD_NOW | RTLD_GLOBAL) testfile");
         Assert.assertEquals("file name", "testfile", test.getFilename());
         Assert.assertEquals("flag count", 2, test.getFlags().size());
         Assert.assertEquals("RTLD_NOW", test.getFlags().get(0));
         Assert.assertEquals("RTLD_GLOBAL", test.getFlags().get(1));
     }
 
-    @Test(expected = IllegalArgumentException.class)
+    @Test
     public void parseUnknownCommand() {
-        Parser.parseLibraryDescriptor("_unknown_command");
+        AbstractTruffleException truffleException = assertThrows(AbstractTruffleException.class, () -> parseLibraryDescriptor("_unknown_command"));
+        MatcherAssert.assertThat(truffleException, ParserExceptionMatcher.PARSER);
     }
 
-    @Test(expected = IllegalArgumentException.class)
+    @Test
     public void parseUnknownToken() {
-        Parser.parseLibraryDescriptor("%");
+        AbstractTruffleException truffleException = assertThrows(AbstractTruffleException.class, () -> parseLibraryDescriptor("%"));
+        MatcherAssert.assertThat(truffleException, ParserExceptionMatcher.PARSER);
     }
 
-    @Test(expected = IllegalArgumentException.class)
+    @Test
     public void parseEmpty() {
-        Parser.parseLibraryDescriptor("");
+        AbstractTruffleException truffleException = assertThrows(AbstractTruffleException.class, () -> parseLibraryDescriptor(""));
+        MatcherAssert.assertThat(truffleException, ParserExceptionMatcher.INCOMPLETE);
     }
 
-    @Test(expected = IllegalArgumentException.class)
+    @Test
     public void parseEmptyFlags() {
-        Parser.parseLibraryDescriptor("load() testfile");
+        AbstractTruffleException truffleException = assertThrows(AbstractTruffleException.class, () -> parseLibraryDescriptor("load() testfile"));
+        MatcherAssert.assertThat(truffleException, ParserExceptionMatcher.PARSER);
     }
 
-    @Test(expected = IllegalArgumentException.class)
+    @Test
     public void parseFlagsError() {
-        Parser.parseLibraryDescriptor("load(RTLD_NOW .) testfile");
+        AbstractTruffleException truffleException = assertThrows(AbstractTruffleException.class, () -> parseLibraryDescriptor("load(RTLD_NOW .) testfile"));
+        MatcherAssert.assertThat(truffleException, ParserExceptionMatcher.PARSER);
     }
 
-    @Test(expected = IllegalArgumentException.class)
+    @Test
     public void parseStringError() {
-        Parser.parseLibraryDescriptor("load 'testfile");
+        AbstractTruffleException truffleException = assertThrows(AbstractTruffleException.class, () -> parseLibraryDescriptor("load 'testfile"));
+        MatcherAssert.assertThat(truffleException, ParserExceptionMatcher.PARSER);
     }
 }

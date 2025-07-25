@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -49,16 +49,21 @@ import javax.lang.model.element.ElementKind;
 import javax.lang.model.element.ExecutableElement;
 import javax.lang.model.element.Modifier;
 import javax.lang.model.element.VariableElement;
+import javax.lang.model.type.DeclaredType;
 import javax.lang.model.type.TypeKind;
+import javax.lang.model.type.TypeMirror;
 
 import com.oracle.truffle.dsl.processor.expression.DSLExpression;
 import com.oracle.truffle.dsl.processor.expression.DSLExpression.Binary;
 import com.oracle.truffle.dsl.processor.expression.DSLExpression.BooleanLiteral;
 import com.oracle.truffle.dsl.processor.expression.DSLExpression.Call;
+import com.oracle.truffle.dsl.processor.expression.DSLExpression.Cast;
+import com.oracle.truffle.dsl.processor.expression.DSLExpression.ClassLiteral;
 import com.oracle.truffle.dsl.processor.expression.DSLExpression.DSLExpressionVisitor;
 import com.oracle.truffle.dsl.processor.expression.DSLExpression.IntLiteral;
 import com.oracle.truffle.dsl.processor.expression.DSLExpression.Negate;
 import com.oracle.truffle.dsl.processor.expression.DSLExpression.Variable;
+import com.oracle.truffle.dsl.processor.java.ElementUtils;
 import com.oracle.truffle.dsl.processor.java.model.CodeTree;
 import com.oracle.truffle.dsl.processor.java.model.CodeTreeBuilder;
 
@@ -73,10 +78,23 @@ public class DSLExpressionGenerator implements DSLExpressionVisitor {
         this.root = root;
     }
 
+    public void visitClassLiteral(ClassLiteral classLiteral) {
+        push(CodeTreeBuilder.createBuilder().typeLiteral(classLiteral.getLiteral()).build());
+    }
+
     public void visitBinary(Binary binary) {
         CodeTree right = stack.pop();
         CodeTree left = stack.pop();
         stack.push(combine(left, string(" " + binary.getOperator() + " "), right));
+    }
+
+    public void visitCast(Cast cast) {
+        CodeTreeBuilder builder = CodeTreeBuilder.createBuilder();
+        builder.string("(");
+        builder.cast(cast.getCastType());
+        builder.tree(pop());
+        builder.string(")");
+        push(builder.build());
     }
 
     public void visitCall(Call call) {
@@ -89,7 +107,12 @@ public class DSLExpressionGenerator implements DSLExpressionVisitor {
         CodeTreeBuilder builder = CodeTreeBuilder.createBuilder();
 
         if (call.getResolvedMethod().getKind() == ElementKind.CONSTRUCTOR) {
-            builder.startNew(call.getResolvedType());
+            TypeMirror type = call.getResolvedType();
+            if (type.getKind() == TypeKind.DECLARED && !((DeclaredType) type).getTypeArguments().isEmpty()) {
+                builder.startNew(ElementUtils.getDeclaredName(((DeclaredType) type), false) + "<>");
+            } else {
+                builder.startNew(call.getResolvedType());
+            }
         } else if (call.getReceiver() == null) {
             if (isStatic(method)) {
                 builder.startStaticCall(method);
@@ -171,7 +194,12 @@ public class DSLExpressionGenerator implements DSLExpressionVisitor {
     }
 
     private static CodeTree staticReference(VariableElement var) {
-        return CodeTreeBuilder.createBuilder().staticReference(var.getEnclosingElement().asType(), var.getSimpleName().toString()).build();
+        Element enclosing = var.getEnclosingElement();
+        if (enclosing == null) {
+            return CodeTreeBuilder.singleString(var.getSimpleName().toString());
+        } else {
+            return CodeTreeBuilder.createBuilder().staticReference(enclosing.asType(), var.getSimpleName().toString()).build();
+        }
     }
 
     private void push(CodeTree tree) {

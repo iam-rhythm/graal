@@ -27,44 +27,87 @@ package com.oracle.svm.hosted.thread;
 import static com.oracle.svm.core.util.VMError.shouldNotReachHere;
 
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
 
-import org.graalvm.compiler.core.common.NumUtil;
-import org.graalvm.compiler.nodes.ValueNode;
-import org.graalvm.compiler.nodes.graphbuilderconf.GraphBuilderContext;
-import org.graalvm.nativeimage.Feature;
-
 import com.oracle.svm.core.config.ConfigurationValues;
-import com.oracle.svm.core.meta.ReadableJavaField;
-import com.oracle.svm.core.meta.SharedField;
-import com.oracle.svm.core.meta.SubstrateObjectConstant;
+import com.oracle.svm.core.heap.SubstrateReferenceMap;
+import com.oracle.svm.core.layeredimagesingleton.ImageSingletonWriter;
+import com.oracle.svm.core.layeredimagesingleton.LayeredImageSingleton;
+import com.oracle.svm.core.layeredimagesingleton.LayeredImageSingletonBuilderFlags;
+import com.oracle.svm.core.option.HostedOptionKey;
 import com.oracle.svm.core.threadlocal.FastThreadLocal;
 import com.oracle.svm.core.threadlocal.VMThreadLocalInfo;
-import com.oracle.svm.hosted.FeatureImpl.CompilationAccessImpl;
+import com.oracle.svm.core.util.ObservableImageHeapMapProvider;
+import com.oracle.svm.core.util.VMError;
 
-import jdk.vm.ci.meta.JavaKind;
-import jdk.vm.ci.meta.ResolvedJavaField;
+import jdk.graal.compiler.core.common.NumUtil;
+import jdk.graal.compiler.nodes.PiNode;
+import jdk.graal.compiler.nodes.ValueNode;
+import jdk.graal.compiler.nodes.graphbuilderconf.GraphBuilderContext;
+import jdk.graal.compiler.options.Option;
 
 /**
  * Collects all {@link FastThreadLocal} instances that are actually used by the application.
  */
-class VMThreadLocalCollector implements Function<Object, Object> {
+public class VMThreadLocalCollector implements Function<Object, Object>, LayeredImageSingleton {
 
-    final Map<FastThreadLocal, VMThreadLocalInfo> threadLocals = new ConcurrentHashMap<>();
+    public static class Options {
+        @Option(help = "Ensure all create ThreadLocals have unique names")//
+        public static final HostedOptionKey<Boolean> ValidateUniqueThreadLocalNames = new HostedOptionKey<>(false);
+    }
+
+    Map<FastThreadLocal, VMThreadLocalInfo> threadLocals;
+    Map<VMThreadLocalInfo, FastThreadLocal> infoToThreadLocals;
     private boolean sealed;
+    final boolean validateUniqueNames;
+    final Set<String> seenNames;
+
+    public VMThreadLocalCollector() {
+        this(false);
+    }
+
+    protected VMThreadLocalCollector(boolean validateUniqueNames) {
+        this.validateUniqueNames = validateUniqueNames || Options.ValidateUniqueThreadLocalNames.getValue();
+        seenNames = validateUniqueNames ? ConcurrentHashMap.newKeySet() : null;
+    }
+
+    public void installThreadLocalMap() {
+        assert threadLocals == null : threadLocals;
+        threadLocals = ObservableImageHeapMapProvider.create();
+        infoToThreadLocals = new ConcurrentHashMap<>();
+    }
+
+    public VMThreadLocalInfo forFastThreadLocal(FastThreadLocal threadLocal) {
+        VMThreadLocalInfo localInfo = threadLocals.get(threadLocal);
+        if (localInfo == null) {
+            if (sealed) {
+                throw VMError.shouldNotReachHere("VMThreadLocal must have been discovered during static analysis");
+            } else {
+                VMThreadLocalInfo newInfo = new VMThreadLocalInfo(threadLocal);
+                localInfo = threadLocals.computeIfAbsent(threadLocal, tl -> {
+                    infoToThreadLocals.putIfAbsent(newInfo, threadLocal);
+                    return newInfo;
+                });
+                if (localInfo == newInfo && validateUniqueNames) {
+                    /*
+                     * Ensure this name is unique.
+                     */
+                    VMError.guarantee(seenNames.add(threadLocal.getName()), "Two VMThreadLocals have the same name: %s", threadLocal.getName());
+                }
+            }
+        }
+        return localInfo;
+    }
 
     @Override
     public Object apply(Object source) {
-        if (source instanceof FastThreadLocal) {
-            FastThreadLocal threadLocal = (FastThreadLocal) source;
-            if (sealed) {
-                assert threadLocals.containsKey(threadLocal) : "VMThreadLocal must have been discovered during static analysis";
-            } else {
-                threadLocals.putIfAbsent(threadLocal, new VMThreadLocalInfo(threadLocal));
-            }
+        if (source instanceof FastThreadLocal fastThreadLocal) {
+            forFastThreadLocal(fastThreadLocal);
         }
         /*
          * We want to collect all instances without actually replacing them, so we always return the
@@ -73,75 +116,83 @@ class VMThreadLocalCollector implements Function<Object, Object> {
         return source;
     }
 
-    public VMThreadLocalInfo getInfo(FastThreadLocal threadLocal) {
+    public int getOffset(FastThreadLocal threadLocal) {
         VMThreadLocalInfo result = threadLocals.get(threadLocal);
-        assert result != null;
-        return result;
+        return result.offset;
     }
 
     public VMThreadLocalInfo findInfo(GraphBuilderContext b, ValueNode threadLocalNode) {
         if (!threadLocalNode.isConstant()) {
-            throw shouldNotReachHere("Accessed VMThreadLocal is not a compile time constant: " + b.getMethod().asStackTraceElement(b.bci()));
+            throw shouldNotReachHere("Accessed VMThreadLocal is not a compile time constant: " + b.getMethod().asStackTraceElement(b.bci()) + " - node " + unPi(threadLocalNode));
         }
 
-        FastThreadLocal threadLocal = (FastThreadLocal) SubstrateObjectConstant.asObject(threadLocalNode.asConstant());
+        FastThreadLocal threadLocal = b.getSnippetReflection().asObject(FastThreadLocal.class, threadLocalNode.asJavaConstant());
         VMThreadLocalInfo result = threadLocals.get(threadLocal);
         assert result != null;
         return result;
     }
 
-    public List<VMThreadLocalInfo> sortThreadLocals(Feature.CompilationAccess config) {
-        return sortThreadLocals(config, null);
+    public FastThreadLocal getThreadLocal(VMThreadLocalInfo vmThreadLocalInfo) {
+        return infoToThreadLocals.get(vmThreadLocalInfo);
     }
 
-    public List<VMThreadLocalInfo> sortThreadLocals(Feature.CompilationAccess a, FastThreadLocal first) {
-        CompilationAccessImpl config = (CompilationAccessImpl) a;
+    protected static int calculateSize(VMThreadLocalInfo info) {
+        if (info.sizeSupplier != null) {
+            int unalignedSize = info.sizeSupplier.getAsInt();
+            assert unalignedSize > 0;
+            return NumUtil.roundUp(unalignedSize, 8);
+        } else {
+            return ConfigurationValues.getObjectLayout().sizeInBytes(info.storageKind);
+        }
+    }
+
+    private List<VMThreadLocalInfo> sortedThreadLocalInfos;
+    private SubstrateReferenceMap referenceMap;
+
+    public void sortThreadLocals() {
+        assert sortedThreadLocalInfos == null && referenceMap == null;
 
         sealed = true;
-
-        /*
-         * Find a unique static field for every VM thread local object. The field name is used to
-         * make the layout of VMThread deterministic.
-         */
-        for (ResolvedJavaField f : config.getFields()) {
-            SharedField field = (SharedField) f;
-            if (field.isStatic() && field.getStorageKind() == JavaKind.Object) {
-                Object fieldValue = SubstrateObjectConstant.asObject(((ReadableJavaField) field).readValue(null));
-                if (fieldValue instanceof FastThreadLocal) {
-                    FastThreadLocal threadLocal = (FastThreadLocal) fieldValue;
-                    VMThreadLocalInfo info = threadLocals.get(threadLocal);
-                    String fieldName = field.format("%H.%n");
-                    if (!field.isFinal()) {
-                        throw shouldNotReachHere("VMThreadLocal referenced from non-final field: " + fieldName);
-                    } else if (info.name != null) {
-                        throw shouldNotReachHere("VMThreadLocal referenced from two static final fields: " + info.name + ", " + fieldName);
-                    }
-                    info.name = fieldName;
-                }
-            }
-        }
         for (VMThreadLocalInfo info : threadLocals.values()) {
-            if (info.name == null) {
-                shouldNotReachHere("VMThreadLocal found that is not referenced from a static final field");
-            }
-
             assert info.sizeInBytes == -1;
-            if (info.sizeSupplier != null) {
-                info.sizeInBytes = NumUtil.roundUp(info.sizeSupplier.getAsInt(), 8);
-            } else {
-                info.sizeInBytes = ConfigurationValues.getObjectLayout().sizeInBytes(info.storageKind);
+            info.sizeInBytes = calculateSize(info);
+        }
+
+        sortedThreadLocalInfos = new ArrayList<>(threadLocals.values());
+        sortedThreadLocalInfos.sort(VMThreadLocalCollector::compareThreadLocal);
+    }
+
+    public int sortAndAssignOffsets() {
+        sortThreadLocals();
+
+        referenceMap = new SubstrateReferenceMap();
+        int nextOffset = 0;
+        for (VMThreadLocalInfo info : sortedThreadLocalInfos) {
+            int alignment = Math.min(8, info.sizeInBytes);
+            nextOffset = NumUtil.roundUp(nextOffset, alignment);
+
+            if (info.isObject) {
+                referenceMap.markReferenceAtOffset(nextOffset, true);
+            }
+            info.offset = nextOffset;
+            nextOffset += info.sizeInBytes;
+
+            if (info.offset > info.maxOffset) {
+                VMError.shouldNotReachHere("Too many thread local variables with maximum offset " + info.maxOffset + " defined");
             }
         }
 
-        List<VMThreadLocalInfo> sortedThreadLocals = new ArrayList<>(threadLocals.values());
-        sortedThreadLocals.sort(VMThreadLocalCollector::compareThreadLocal);
-        if (first != null) {
-            VMThreadLocalInfo info = threadLocals.get(first);
-            assert info != null && sortedThreadLocals.contains(info);
-            sortedThreadLocals.remove(info);
-            sortedThreadLocals.add(0, info);
-        }
-        return sortedThreadLocals;
+        return nextOffset;
+    }
+
+    public SubstrateReferenceMap getReferenceMap() {
+        assert referenceMap != null;
+        return referenceMap;
+    }
+
+    public List<VMThreadLocalInfo> getSortedThreadLocalInfos() {
+        assert sortedThreadLocalInfos != null;
+        return sortedThreadLocalInfos;
     }
 
     private static int compareThreadLocal(VMThreadLocalInfo info1, VMThreadLocalInfo info2) {
@@ -149,20 +200,41 @@ class VMThreadLocalCollector implements Function<Object, Object> {
             return 0;
         }
 
-        /* Order by size to avoid padding. */
-        int result = -Integer.compare(info1.sizeInBytes, info2.sizeInBytes);
+        /* Order by priority: lower maximum offsets first. */
+        int result = Integer.compare(info1.maxOffset, info2.maxOffset);
         if (result == 0) {
-            /* Ensure that all objects are contiguous. */
-            result = -Boolean.compare(info1.isObject, info2.isObject);
+            /* Order by size to avoid padding. */
+            result = -Integer.compare(info1.sizeInBytes, info2.sizeInBytes);
             if (result == 0) {
-                /*
-                 * Make the order deterministic by sorting by name. This is arbitrary, we can come
-                 * up with any better ordering.
-                 */
-                result = info1.name.compareTo(info2.name);
+                /* Ensure that all objects are contiguous. */
+                result = -Boolean.compare(info1.isObject, info2.isObject);
+                if (result == 0) {
+                    /*
+                     * Make the order deterministic by sorting by name. This is arbitrary, we can
+                     * come up with any better ordering.
+                     */
+                    result = info1.name.compareTo(info2.name);
+                }
             }
         }
-        assert result != 0 : "not distinguishable: " + info1 + ", " + info2;
         return result;
+    }
+
+    private static ValueNode unPi(ValueNode n) {
+        ValueNode cur = n;
+        while (cur instanceof PiNode) {
+            cur = ((PiNode) cur).object();
+        }
+        return cur;
+    }
+
+    @Override
+    public final EnumSet<LayeredImageSingletonBuilderFlags> getImageBuilderFlags() {
+        return LayeredImageSingletonBuilderFlags.BUILDTIME_ACCESS_ONLY;
+    }
+
+    @Override
+    public PersistFlags preparePersist(ImageSingletonWriter writer) {
+        return PersistFlags.NOTHING;
     }
 }

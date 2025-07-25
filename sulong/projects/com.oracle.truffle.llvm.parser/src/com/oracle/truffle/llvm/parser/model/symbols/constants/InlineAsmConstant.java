@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2018, Oracle and/or its affiliates.
+ * Copyright (c) 2016, 2022, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -29,14 +29,22 @@
  */
 package com.oracle.truffle.llvm.parser.model.symbols.constants;
 
+import com.oracle.truffle.llvm.parser.LLVMParserRuntime;
 import com.oracle.truffle.llvm.parser.model.SymbolImpl;
 import com.oracle.truffle.llvm.parser.model.enums.AsmDialect;
 import com.oracle.truffle.llvm.parser.model.visitors.SymbolVisitor;
+import com.oracle.truffle.llvm.parser.scanner.RecordBuffer;
+import com.oracle.truffle.llvm.runtime.GetStackSpaceFactory;
+import com.oracle.truffle.llvm.runtime.datalayout.DataLayout;
+import com.oracle.truffle.llvm.runtime.except.LLVMParserException;
+import com.oracle.truffle.llvm.runtime.nodes.api.LLVMExpressionNode;
 import com.oracle.truffle.llvm.runtime.types.Type;
 
 public final class InlineAsmConstant extends AbstractConstant {
 
     private static final char DELIMITER = '\"';
+
+    private final Type fnType;
 
     private final String asmExpression;
 
@@ -48,8 +56,9 @@ public final class InlineAsmConstant extends AbstractConstant {
 
     private final boolean stackAlign;
 
-    private InlineAsmConstant(Type type, String asmExpression, String asmFlags, boolean hasSideEffects, boolean stackAlign, AsmDialect dialect) {
+    private InlineAsmConstant(Type type, Type fnType, String asmExpression, String asmFlags, boolean hasSideEffects, boolean stackAlign, AsmDialect dialect) {
         super(type);
+        this.fnType = fnType;
         this.asmExpression = asmExpression;
         this.asmFlags = asmFlags;
         this.hasSideEffects = hasSideEffects;
@@ -60,6 +69,10 @@ public final class InlineAsmConstant extends AbstractConstant {
     @Override
     public void accept(SymbolVisitor visitor) {
         visitor.visit(this);
+    }
+
+    public Type getFnType() {
+        return fnType;
     }
 
     public String getAsmExpression() {
@@ -91,33 +104,37 @@ public final class InlineAsmConstant extends AbstractConstant {
     public void replace(SymbolImpl oldValue, SymbolImpl newValue) {
     }
 
-    public static InlineAsmConstant generate(Type type, long[] args) {
-        int argIndex = 0;
+    public static InlineAsmConstant createFromData(Type type, Type fnType, RecordBuffer buffer) {
 
-        final int flags = (int) args[argIndex++];
+        final int flags = buffer.readInt();
         final boolean hasSideEffects = (flags & 0x1) == 0x1;
         final boolean stackAlign = (flags & 0x2) == 0x2;
         final long asmDialect = flags >> 2;
 
-        int expressionStringLength = (int) args[argIndex++];
+        int expressionStringLength = buffer.readInt();
         final StringBuilder asmExpressionBuilder = new StringBuilder(expressionStringLength + 2);
         asmExpressionBuilder.append(DELIMITER);
         while (expressionStringLength-- > 0) {
-            asmExpressionBuilder.append((char) args[argIndex++]);
+            asmExpressionBuilder.append((char) buffer.read());
         }
         asmExpressionBuilder.append(DELIMITER);
 
-        int flagsStringLength = (int) args[argIndex++];
+        int flagsStringLength = buffer.readInt();
         final StringBuilder asmFlagsBuilder = new StringBuilder(flagsStringLength + 2);
         asmFlagsBuilder.append(DELIMITER);
         while (flagsStringLength-- > 0) {
-            asmFlagsBuilder.append((char) args[argIndex++]);
+            asmFlagsBuilder.append((char) buffer.read());
         }
         asmFlagsBuilder.append(DELIMITER);
 
         final String asmExpression = asmExpressionBuilder.toString();
         final String asmFlags = asmFlagsBuilder.toString();
 
-        return new InlineAsmConstant(type, asmExpression, asmFlags, hasSideEffects, stackAlign, AsmDialect.decode(asmDialect));
+        return new InlineAsmConstant(type, fnType, asmExpression, asmFlags, hasSideEffects, stackAlign, AsmDialect.decode(asmDialect));
+    }
+
+    @Override
+    public LLVMExpressionNode createNode(LLVMParserRuntime runtime, DataLayout dataLayout, GetStackSpaceFactory stackFactory) {
+        throw new LLVMParserException("Cannot resolve Inline ASM");
     }
 }

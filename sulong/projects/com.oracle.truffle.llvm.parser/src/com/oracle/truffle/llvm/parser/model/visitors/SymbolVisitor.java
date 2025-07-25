@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2018, Oracle and/or its affiliates.
+ * Copyright (c) 2016, 2025, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -43,12 +43,15 @@ import com.oracle.truffle.llvm.parser.model.symbols.constants.CompareConstant;
 import com.oracle.truffle.llvm.parser.model.symbols.constants.GetElementPointerConstant;
 import com.oracle.truffle.llvm.parser.model.symbols.constants.InlineAsmConstant;
 import com.oracle.truffle.llvm.parser.model.symbols.constants.NullConstant;
+import com.oracle.truffle.llvm.parser.model.symbols.constants.SelectConstant;
 import com.oracle.truffle.llvm.parser.model.symbols.constants.StringConstant;
+import com.oracle.truffle.llvm.parser.model.symbols.constants.UnaryOperationConstant;
 import com.oracle.truffle.llvm.parser.model.symbols.constants.UndefinedConstant;
 import com.oracle.truffle.llvm.parser.model.symbols.constants.aggregate.ArrayConstant;
 import com.oracle.truffle.llvm.parser.model.symbols.constants.aggregate.StructureConstant;
 import com.oracle.truffle.llvm.parser.model.symbols.constants.aggregate.VectorConstant;
 import com.oracle.truffle.llvm.parser.model.symbols.constants.floatingpoint.DoubleConstant;
+import com.oracle.truffle.llvm.parser.model.symbols.constants.floatingpoint.FP128Constant;
 import com.oracle.truffle.llvm.parser.model.symbols.constants.floatingpoint.FloatConstant;
 import com.oracle.truffle.llvm.parser.model.symbols.constants.floatingpoint.X86FP80Constant;
 import com.oracle.truffle.llvm.parser.model.symbols.constants.integer.BigIntegerConstant;
@@ -60,15 +63,23 @@ import com.oracle.truffle.llvm.parser.model.symbols.instructions.BinaryOperation
 import com.oracle.truffle.llvm.parser.model.symbols.instructions.BranchInstruction;
 import com.oracle.truffle.llvm.parser.model.symbols.instructions.CallInstruction;
 import com.oracle.truffle.llvm.parser.model.symbols.instructions.CastInstruction;
+import com.oracle.truffle.llvm.parser.model.symbols.instructions.CatchPadInstruction;
+import com.oracle.truffle.llvm.parser.model.symbols.instructions.CatchRetInstruction;
+import com.oracle.truffle.llvm.parser.model.symbols.instructions.CatchSwitchInstruction;
+import com.oracle.truffle.llvm.parser.model.symbols.instructions.CleanupPadInstruction;
+import com.oracle.truffle.llvm.parser.model.symbols.instructions.CleanupRetInstruction;
 import com.oracle.truffle.llvm.parser.model.symbols.instructions.CompareExchangeInstruction;
 import com.oracle.truffle.llvm.parser.model.symbols.instructions.CompareInstruction;
 import com.oracle.truffle.llvm.parser.model.symbols.instructions.ConditionalBranchInstruction;
 import com.oracle.truffle.llvm.parser.model.symbols.instructions.DbgDeclareInstruction;
+import com.oracle.truffle.llvm.parser.model.symbols.instructions.DbgNoaliasScopeDeclInstruction;
 import com.oracle.truffle.llvm.parser.model.symbols.instructions.DbgValueInstruction;
+import com.oracle.truffle.llvm.parser.model.symbols.instructions.DebugInstruction;
 import com.oracle.truffle.llvm.parser.model.symbols.instructions.DebugTrapInstruction;
 import com.oracle.truffle.llvm.parser.model.symbols.instructions.ExtractElementInstruction;
 import com.oracle.truffle.llvm.parser.model.symbols.instructions.ExtractValueInstruction;
 import com.oracle.truffle.llvm.parser.model.symbols.instructions.FenceInstruction;
+import com.oracle.truffle.llvm.parser.model.symbols.instructions.FreezeInstruction;
 import com.oracle.truffle.llvm.parser.model.symbols.instructions.GetElementPointerInstruction;
 import com.oracle.truffle.llvm.parser.model.symbols.instructions.IndirectBranchInstruction;
 import com.oracle.truffle.llvm.parser.model.symbols.instructions.InsertElementInstruction;
@@ -85,7 +96,9 @@ import com.oracle.truffle.llvm.parser.model.symbols.instructions.ShuffleVectorIn
 import com.oracle.truffle.llvm.parser.model.symbols.instructions.StoreInstruction;
 import com.oracle.truffle.llvm.parser.model.symbols.instructions.SwitchInstruction;
 import com.oracle.truffle.llvm.parser.model.symbols.instructions.SwitchOldInstruction;
+import com.oracle.truffle.llvm.parser.model.symbols.instructions.UnaryOperationInstruction;
 import com.oracle.truffle.llvm.parser.model.symbols.instructions.UnreachableInstruction;
+import com.oracle.truffle.llvm.parser.model.symbols.instructions.VaArgInstruction;
 import com.oracle.truffle.llvm.parser.model.symbols.instructions.VoidCallInstruction;
 import com.oracle.truffle.llvm.parser.model.symbols.instructions.VoidInvokeInstruction;
 
@@ -104,6 +117,10 @@ public interface SymbolVisitor extends ValueList.ValueVisitor<SymbolImpl> {
     }
 
     default void visit(BigIntegerConstant constant) {
+        defaultAction(constant);
+    }
+
+    default void visit(UnaryOperationConstant constant) {
         defaultAction(constant);
     }
 
@@ -132,6 +149,10 @@ public interface SymbolVisitor extends ValueList.ValueVisitor<SymbolImpl> {
     }
 
     default void visit(X86FP80Constant constant) {
+        defaultAction(constant);
+    }
+
+    default void visit(FP128Constant constant) {
         defaultAction(constant);
     }
 
@@ -179,11 +200,35 @@ public interface SymbolVisitor extends ValueList.ValueVisitor<SymbolImpl> {
         defaultAction(inst);
     }
 
+    default void visit(UnaryOperationInstruction inst) {
+        defaultAction(inst);
+    }
+
     default void visit(BranchInstruction inst) {
         defaultAction(inst);
     }
 
     default void visit(CallInstruction inst) {
+        defaultAction(inst);
+    }
+
+    default void visit(CleanupPadInstruction inst) {
+        defaultAction(inst);
+    }
+
+    default void visit(CleanupRetInstruction inst) {
+        defaultAction(inst);
+    }
+
+    default void visit(CatchSwitchInstruction inst) {
+        defaultAction(inst);
+    }
+
+    default void visit(CatchPadInstruction inst) {
+        defaultAction(inst);
+    }
+
+    default void visit(CatchRetInstruction inst) {
         defaultAction(inst);
     }
 
@@ -291,11 +336,23 @@ public interface SymbolVisitor extends ValueList.ValueVisitor<SymbolImpl> {
         defaultAction(inst);
     }
 
+    default void visit(FreezeInstruction inst) {
+        defaultAction(inst);
+    }
+
+    default void visit(DbgNoaliasScopeDeclInstruction inst) {
+        defaultAction(inst);
+    }
+
     default void visit(DbgDeclareInstruction inst) {
         defaultAction(inst);
     }
 
     default void visit(DbgValueInstruction inst) {
+        defaultAction(inst);
+    }
+
+    default void visit(DebugInstruction inst) {
         defaultAction(inst);
     }
 
@@ -317,5 +374,13 @@ public interface SymbolVisitor extends ValueList.ValueVisitor<SymbolImpl> {
 
     default void visit(SourceVariable variable) {
         defaultAction(variable);
+    }
+
+    default void visit(SelectConstant constant) {
+        defaultAction(constant);
+    }
+
+    default void visit(VaArgInstruction inst) {
+        defaultAction(inst);
     }
 }

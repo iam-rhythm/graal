@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -48,6 +48,7 @@ import static org.junit.Assert.assertTrue;
 import java.util.List;
 
 import org.graalvm.polyglot.Context;
+import org.graalvm.polyglot.HostAccess;
 import org.graalvm.polyglot.Source;
 import org.graalvm.polyglot.Value;
 import org.junit.After;
@@ -68,7 +69,7 @@ public class PolyglotEngineWithJavaScript {
 
     @Before
     public void initEngine() {
-        context = Context.newBuilder().build();
+        context = Context.newBuilder().allowHostAccess(HostAccess.ALL).build();
     }
 
     @After
@@ -83,7 +84,6 @@ public class PolyglotEngineWithJavaScript {
         callJavaScriptFunctionFromJava();
     }
 
-    // BEGIN: com.oracle.truffle.tck.impl.PolyglotEngineWithJavaScript#callJavaScriptFunctionFromJava
     @FunctionalInterface
     interface Multiplier {
         int multiply(int a, int b);
@@ -106,14 +106,12 @@ public class PolyglotEngineWithJavaScript {
         assertEquals(144, mul.multiply(12, 12));
         assertEquals(256, mul.multiply(32, 8));
     }
-    // END: com.oracle.truffle.tck.impl.PolyglotEngineWithJavaScript#callJavaScriptFunctionFromJava
 
     @Test
     public void testCallJavaScriptFunctionsWithSharedStateFromJava() {
         callJavaScriptFunctionsWithSharedStateFromJava();
     }
 
-    // BEGIN: com.oracle.truffle.tck.impl.PolyglotEngineWithJavaScript#callJavaScriptFunctionsWithSharedStateFromJava
     interface Counter {
         void addTime(int hours, int minutes, int seconds);
         int timeInSeconds();
@@ -153,7 +151,6 @@ public class PolyglotEngineWithJavaScript {
 
         assertEquals(99330, counter.timeInSeconds());
     }
-    // END: com.oracle.truffle.tck.impl.PolyglotEngineWithJavaScript#callJavaScriptFunctionsWithSharedStateFromJava
 
     @Test
     public void testAccessFieldsOfJavaObject() {
@@ -164,8 +161,6 @@ public class PolyglotEngineWithJavaScript {
     public void testAccessFieldsOfJavaObjectWithConverter() {
         accessFieldsOfJavaObjectWithConverter();
     }
-
-    // BEGIN: com.oracle.truffle.tck.impl.PolyglotEngineWithJavaScript#accessFieldsOfJavaObject
 
     public static final class Moment {
         public final int hours;
@@ -199,9 +194,6 @@ public class PolyglotEngineWithJavaScript {
 
         assertEquals(3600 * 6 + 30 * 60 + 10, seconds);
     }
-    // END: com.oracle.truffle.tck.impl.PolyglotEngineWithJavaScript#accessFieldsOfJavaObject
-
-    // BEGIN: com.oracle.truffle.tck.impl.PolyglotEngineWithJavaScript#accessFieldsOfJavaObjectWithConverter
 
     @FunctionalInterface
     interface MomentConverter {
@@ -228,14 +220,11 @@ public class PolyglotEngineWithJavaScript {
 
         assertEquals(3600 * 6 + 30 * 60 + 10, seconds);
     }
-    // END: com.oracle.truffle.tck.impl.PolyglotEngineWithJavaScript#accessFieldsOfJavaObjectWithConverter
 
     @Test
     public void testCreateJavaScriptFactoryForJavaClass() {
         createJavaScriptFactoryForJavaClass();
     }
-
-    // BEGIN: com.oracle.truffle.tck.impl.PolyglotEngineWithJavaScript#createJavaScriptFactoryForJavaClass
 
     @FunctionalInterface
     interface MomentFactory {
@@ -265,14 +254,11 @@ public class PolyglotEngineWithJavaScript {
         assertEquals("Minutes", 30, javaMoment.minutes);
         assertEquals("Seconds", 10, javaMoment.seconds);
     }
-    // END: com.oracle.truffle.tck.impl.PolyglotEngineWithJavaScript#createJavaScriptFactoryForJavaClass
 
     @Test
     public void testCallJavaScriptClassFactoryFromJava() {
         callJavaScriptClassFactoryFromJava();
     }
-
-    // BEGIN: com.oracle.truffle.tck.impl.PolyglotEngineWithJavaScript#callJavaScriptClassFactoryFromJava
 
     interface Incrementor {
         int inc();
@@ -319,15 +305,11 @@ public class PolyglotEngineWithJavaScript {
 
         assertEquals("Values are the same", initFive.value(), initTen.value());
     }
-    // END: com.oracle.truffle.tck.impl.PolyglotEngineWithJavaScript#callJavaScriptClassFactoryFromJava
-
 
     @Test
     public void testAccessJavaScriptArrayWithTypedElementsFromJava() {
         accessJavaScriptArrayWithTypedElementsFromJava();
     }
-
-    // BEGIN: com.oracle.truffle.tck.impl.PolyglotEngineWithJavaScript#accessJavaScriptArrayWithTypedElementsFromJava
 
     interface Point {
         int x();
@@ -371,7 +353,6 @@ public class PolyglotEngineWithJavaScript {
         assertEquals(5, second.x());
         assertEquals(7, second.y());
     }
-    // END: com.oracle.truffle.tck.impl.PolyglotEngineWithJavaScript#accessJavaScriptArrayWithTypedElementsFromJava
 
     @Test
     public void tetsAccessJSONObjectProperties() {
@@ -380,8 +361,6 @@ public class PolyglotEngineWithJavaScript {
 
 
     // Checkstyle: stop
-    // BEGIN: com.oracle.truffle.tck.impl.PolyglotEngineWithJavaScript#accessJavaScriptJSONObjectFromJava
-
     interface Repository {
         int id();
         String name();
@@ -450,8 +429,5 @@ public class PolyglotEngineWithJavaScript {
         assertEquals("id", 399710, owner.id());
         assertFalse(owner.site_admin());
     }
-
-    // END: com.oracle.truffle.tck.impl.PolyglotEngineWithJavaScript#accessJavaScriptJSONObjectFromJava
-
     // Checkstyle: resume
 }

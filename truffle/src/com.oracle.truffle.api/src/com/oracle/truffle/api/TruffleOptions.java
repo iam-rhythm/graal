@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -43,9 +43,6 @@ package com.oracle.truffle.api;
 import java.security.AccessController;
 import java.security.PrivilegedAction;
 
-import com.oracle.truffle.api.nodes.NodeCost;
-import com.oracle.truffle.api.nodes.NodeInfo;
-
 /**
  * Class containing general Truffle options.
  *
@@ -85,36 +82,16 @@ public final class TruffleOptions {
     public static final String TraceRewritesFilterClass;
 
     /**
-     * Filters rewrites which does not contain the {@link NodeCost} in its source {@link NodeInfo}.
-     * If no {@link NodeInfo} is defined the element is filtered if the filter value is set.
-     * <p>
-     * Can be set with
-     * {@code -Dtruffle.TraceRewritesFilterFromCost=NONE|MONOMORPHIC|POLYMORPHIC|MEGAMORPHIC}.
-     *
      * @since 0.8 or earlier
+     * @deprecated in 24.1 without replacement
      */
-    public static final NodeCost TraceRewritesFilterFromCost;
+    @SuppressWarnings("deprecation") @Deprecated public static final com.oracle.truffle.api.nodes.NodeCost TraceRewritesFilterFromCost;
 
     /**
-     * Filters rewrites which does not contain the {@link NodeCost} in its target {@link NodeInfo}.
-     * If no {@link NodeInfo} is defined the element is filtered if the filter value is set.
-     * <p>
-     * Can be set with
-     * {@code -Dtruffle.TraceRewritesFilterToKind=UNINITIALIZED|SPECIALIZED|POLYMORPHIC|GENERIC}.
-     *
      * @since 0.8 or earlier
+     * @deprecated in 24.1 without replacement
      */
-    public static final NodeCost TraceRewritesFilterToCost;
-
-    /**
-     * Enables the dumping of Node creations and AST rewrites in JSON format.
-     * <p>
-     * Can be set with {@code -Dtruffle.TraceASTJSON=true}.
-     *
-     * @since 0.8 or earlier
-     * @deprecated to be removed without replacement
-     */
-    @Deprecated public static final boolean TraceASTJSON;
+    @SuppressWarnings("deprecation") @Deprecated public static final com.oracle.truffle.api.nodes.NodeCost TraceRewritesFilterToCost;
 
     /**
      * Forces ahead-of-time initialization.
@@ -123,43 +100,43 @@ public final class TruffleOptions {
      */
     public static final boolean AOT;
 
-    private static NodeCost parseNodeInfoKind(String kind) {
+    @SuppressWarnings("deprecation")
+    private static com.oracle.truffle.api.nodes.NodeCost parseNodeInfoKind(String kind) {
         if (kind == null) {
             return null;
         }
 
-        return NodeCost.valueOf(kind);
+        return com.oracle.truffle.api.nodes.NodeCost.valueOf(kind);
     }
 
     static {
-        final boolean[] values = new boolean[4];
-        final Object[] objs = new Object[3];
+        class GetOptions implements PrivilegedAction<Void> {
+            boolean aot;
+            boolean traceRewrites;
+            boolean detailedRewriteReasons;
+            String traceRewritesFilterClass;
+            @SuppressWarnings("deprecation") com.oracle.truffle.api.nodes.NodeCost traceRewritesFilterFromCost;
+            @SuppressWarnings("deprecation") com.oracle.truffle.api.nodes.NodeCost traceRewritesFilterToCost;
 
-        /*
-         * Ensure TruffleRuntime gets initialized before TruffleOptions are set. This allows a
-         * specific TruffleRuntime to effect the system properties that are used to determine the
-         * values for the TruffleOptions below.
-         */
-        Truffle.getRuntime();
-
-        AccessController.doPrivileged(new PrivilegedAction<Void>() {
+            @Override
             public Void run() {
-                values[0] = Boolean.getBoolean("truffle.TraceRewrites");
-                objs[0] = System.getProperty("truffle.TraceRewritesFilterClass");
-                objs[1] = parseNodeInfoKind(System.getProperty("truffle.TraceRewritesFilterFromCost"));
-                objs[2] = parseNodeInfoKind(System.getProperty("truffle.TraceRewritesFilterToCost"));
-                values[1] = Boolean.getBoolean("truffle.DetailedRewriteReasons");
-                values[2] = Boolean.getBoolean("truffle.TraceASTJSON");
-                values[3] = Boolean.getBoolean("com.oracle.graalvm.isaot");
+                aot = Boolean.getBoolean("com.oracle.graalvm.isaot");
+                traceRewrites = Boolean.getBoolean("truffle.TraceRewrites");
+                detailedRewriteReasons = Boolean.getBoolean("truffle.DetailedRewriteReasons");
+                traceRewritesFilterClass = System.getProperty("truffle.TraceRewritesFilterClass");
+                traceRewritesFilterFromCost = parseNodeInfoKind(System.getProperty("truffle.TraceRewritesFilterFromCost"));
+                traceRewritesFilterToCost = parseNodeInfoKind(System.getProperty("truffle.TraceRewritesFilterToCost"));
                 return null;
             }
-        });
-        TraceRewrites = values[0];
-        DetailedRewriteReasons = values[1];
-        TraceASTJSON = values[2];
-        AOT = values[3];
-        TraceRewritesFilterClass = (String) objs[0];
-        TraceRewritesFilterFromCost = (NodeCost) objs[1];
-        TraceRewritesFilterToCost = (NodeCost) objs[2];
+        }
+
+        GetOptions options = new GetOptions();
+        AccessController.doPrivileged(options);
+        TraceRewrites = options.traceRewrites;
+        DetailedRewriteReasons = options.detailedRewriteReasons;
+        AOT = options.aot;
+        TraceRewritesFilterClass = options.traceRewritesFilterClass;
+        TraceRewritesFilterFromCost = options.traceRewritesFilterFromCost;
+        TraceRewritesFilterToCost = options.traceRewritesFilterToCost;
     }
 }

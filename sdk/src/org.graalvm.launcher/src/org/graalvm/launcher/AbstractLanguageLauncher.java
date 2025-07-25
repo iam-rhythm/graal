@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2025, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,10 +40,10 @@
  */
 package org.graalvm.launcher;
 
-import java.io.IOException;
-import java.nio.file.Path;
+import java.lang.reflect.Constructor;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -53,7 +53,60 @@ import org.graalvm.polyglot.Engine;
 import org.graalvm.polyglot.Language;
 import org.graalvm.polyglot.PolyglotException;
 
-public abstract class AbstractLanguageLauncher extends Launcher {
+public abstract class AbstractLanguageLauncher extends LanguageLauncherBase {
+
+    private static final Constructor<AbstractLanguageLauncher> LAUNCHER_CTOR;
+    /**
+     * Set to true if the launcher has been started via the {@code runLauncher} JNI entry point.
+     */
+    private boolean jniLaunch;
+    /**
+     * The arguments from the option_vars environment variables, only set if the launcher has been
+     * started via {@code runLauncher}.
+     */
+    private String[] optionVarsArguments;
+    /**
+     * Native argument count, set if the launcher has been started via {@code runLauncher}.
+     */
+    private int nativeArgc;
+    /**
+     * Pointer to the native argument value array, set if the launcher has been started via
+     * {@code runLauncher}.
+     */
+    private long nativeArgv;
+    /**
+     * Indicates if this launcher instance is the result of a relaunch, where actual VM arguments
+     * have been identified and set previously.
+     */
+    private boolean relaunch;
+
+    static {
+        LAUNCHER_CTOR = getLauncherCtor();
+    }
+
+    /**
+     * Looks up the launcher constructor based on the launcher class passed in via the
+     * org.graalvm.launcher.class system property.
+     *
+     * @return launcher constructor, if found.
+     */
+    @SuppressWarnings("unchecked")
+    private static Constructor<AbstractLanguageLauncher> getLauncherCtor() {
+        String launcherClassName = System.getProperty("org.graalvm.launcher.class");
+        Constructor<AbstractLanguageLauncher> launcherCtor = null;
+        if (launcherClassName != null) {
+            try {
+                Class<AbstractLanguageLauncher> launcherClass = (Class<AbstractLanguageLauncher>) Class.forName(launcherClassName);
+                if (!AbstractLanguageLauncher.class.isAssignableFrom(launcherClass)) {
+                    throw new Exception("Launcher does not implement " + AbstractLanguageLauncher.class.getName());
+                }
+                launcherCtor = launcherClass.getConstructor();
+            } catch (Exception ex) {
+                throw new RuntimeException(ex);
+            }
+        }
+        return launcherCtor;
+    }
 
     /**
      * This starts the launcher. it should be called from the main method:
@@ -74,6 +127,8 @@ public abstract class AbstractLanguageLauncher extends Launcher {
                 throw e;
             } catch (PolyglotException e) {
                 handlePolyglotException(e);
+            } catch (RelaunchException e) {
+                throw e;
             } catch (Throwable t) {
                 throw abort(t);
             }
@@ -82,9 +137,132 @@ public abstract class AbstractLanguageLauncher extends Launcher {
         }
     }
 
+    /**
+     * Entry point for invoking the launcher via JNI. Relies on a launcher constructor to be set via
+     * the org.graalvm.launcher.class system property.
+     *
+     * @param optionVarsArgs the arguments from the option_vars environment variables
+     * @param args the command line arguments as an encoding-agnostic byte array
+     * @param argc the number of native command line arguments
+     * @param argv pointer to argv
+     * @param relaunch indicates if this is a relaunch with previously identified --vm.* arguments
+     * @throws Exception if no launcher constructor has been set.
+     */
+    public static void runLauncher(byte[][] optionVarsArgs, byte[][] args, int argc, long argv, boolean relaunch) throws Exception {
+        if (LAUNCHER_CTOR == null) {
+            throw new Exception("Launcher constructor has not been set.");
+        }
+
+        AbstractLanguageLauncher launcher = LAUNCHER_CTOR.newInstance();
+        launcher.jniLaunch = true;
+        launcher.nativeArgc = argc;
+        launcher.nativeArgv = argv;
+        launcher.relaunch = relaunch;
+
+        String[] optionVarsArguments = new String[optionVarsArgs.length];
+        for (int i = 0; i < optionVarsArgs.length; i++) {
+            optionVarsArguments[i] = new String(optionVarsArgs[i]);
+        }
+        launcher.optionVarsArguments = optionVarsArguments;
+
+        String[] arguments = new String[args.length];
+        for (int i = 0; i < args.length; i++) {
+            arguments[i] = new String(args[i]);
+        }
+
+        launcher.launch(arguments);
+
+        // shut down the launcher - do this in favor of calling the JNI DestroyJavaVM API, which
+        // might hang waiting for daemon threads on SVM (GR-35345)
+        System.exit(0);
+    }
+
+    /**
+     * Check if the arguments parsing heuristic of the native launcher correctly identified the set
+     * of VM arguments. Throw a {@code RelaunchException} if it hasn't. The exception will be picked
+     * up by the native launcher, which will read the {@code vmArgs}, put them in environment
+     * variables and restart the VM with the correct set of VM arguments.
+     *
+     * @param originalArgs original set of arguments (except for argv[0], the program name)
+     * @param unrecognizedArgs set of arguments returned by {@code preprocessArguments()}
+     */
+    protected final void validateVmArguments(List<String> originalArgs, List<String> unrecognizedArgs) {
+        if (relaunch) {
+            // --vm.* arguments have been explicitly set, bypassing the heuristic
+            return;
+        }
+
+        List<String> heuristicVmArgs = new ArrayList<>();
+        for (String arg : originalArgs) {
+            if (arg.startsWith("--vm.")) {
+                heuristicVmArgs.add(arg);
+            }
+        }
+        for (String arg : optionVarsArguments) {
+            if (arg.startsWith("--vm.")) {
+                heuristicVmArgs.add(arg);
+            }
+        }
+
+        List<String> actualVmArgs = new ArrayList<>();
+        for (String arg : unrecognizedArgs) {
+            if (arg.startsWith("--vm.")) {
+                actualVmArgs.add(arg);
+            }
+        }
+
+        if (!heuristicVmArgs.equals(actualVmArgs)) {
+            throw new RelaunchException(actualVmArgs);
+        }
+
+        // all --vm.* arguments match, we're good
+    }
+
+    /**
+     * Used by the native launcher to detect that a relaunch of the VM is needed.
+     */
+    protected static final class RelaunchException extends RuntimeException {
+        private static final long serialVersionUID = -4014071914987464223L;
+
+        /**
+         * Actual VM arguments, set if validateVmArguments fails s.t. the native launcher can obtain
+         * the actual VM arguments for a relaunch.
+         */
+        @SuppressWarnings("unused") private String[] vmArgs;
+
+        RelaunchException(List<String> actualVmArgs) {
+            vmArgs = actualVmArgs.toArray(new String[actualVmArgs.size()]);
+        }
+
+        @Override
+        public String getMessage() {
+            return "Misidentified VM arguments, relaunch required";
+        }
+    }
+
+    /**
+     * The native argument count as passed to the main method of the native launcher.
+     *
+     * @return native argument count, including the program name
+     */
+    protected int getNativeArgc() {
+        return nativeArgc;
+    }
+
+    /**
+     * The native argument values as passed to the main method of the native launcher.
+     *
+     * @return pointer to the native argument values, including the program name
+     */
+    protected long getNativeArgv() {
+        return nativeArgv;
+    }
+
     protected static final boolean IS_LIBPOLYGLOT = Boolean.getBoolean("graalvm.libpolyglot");
 
     final void launch(List<String> args, Map<String, String> defaultOptions, boolean doNativeSetup) {
+        List<String> originalArgs = Collections.unmodifiableList(new ArrayList<>(args));
+
         Map<String, String> polyglotOptions = defaultOptions;
         if (polyglotOptions == null) {
             polyglotOptions = new HashMap<>();
@@ -96,22 +274,23 @@ public abstract class AbstractLanguageLauncher extends Launcher {
 
         List<String> unrecognizedArgs = preprocessArguments(args, polyglotOptions);
 
+        if (jniLaunch) {
+            validateVmArguments(originalArgs, unrecognizedArgs);
+        }
+
         if (isAOT() && doNativeSetup && !IS_LIBPOLYGLOT) {
             assert nativeAccess != null;
-            nativeAccess.maybeExec(args, false, polyglotOptions, getDefaultVMType());
+            maybeExec(originalArgs, unrecognizedArgs, false, getDefaultVMType(), jniLaunch);
         }
 
-        for (String arg : unrecognizedArgs) {
-            if (!parsePolyglotOption(getLanguageId(), polyglotOptions, arg)) {
-                throw abortUnrecognizedArgument(arg);
-            }
-        }
+        parseUnrecognizedOptions(getLanguageId(), polyglotOptions, unrecognizedArgs);
 
-        if (runPolyglotAction()) {
+        if (runLauncherAction()) {
             return;
         }
 
         validateArguments(polyglotOptions);
+        argumentsProcessingDone();
 
         Context.Builder builder;
         if (isPolyglot()) {
@@ -119,37 +298,24 @@ public abstract class AbstractLanguageLauncher extends Launcher {
         } else {
             builder = Context.newBuilder(getDefaultLanguages()).options(polyglotOptions);
         }
-        builder.allowAllAccess(true);
 
-        final Path logFile = getLogFile();
-        if (logFile != null) {
-            try {
-                builder.logHandler(newLogStream(logFile));
-            } catch (IOException ioe) {
-                throw abort(ioe);
-            }
-        }
+        builder.allowAllAccess(true);
+        setupContextBuilder(builder);
 
         launch(builder);
     }
 
     /**
-     * This is called to abort execution when an argument can neither be recognized by the launcher
-     * or as an option for the polyglot engine.
-     *
-     * @param argument the argument that was not recognized.
-     */
-    protected AbortException abortUnrecognizedArgument(String argument) {
-        throw abortInvalidArgument(argument, "Unrecognized argument: '" + argument + "'. Use --help for usage instructions.");
-    }
-
-    /**
      * Process command line arguments by either saving the necessary state or adding it to the
      * {@code polyglotOptions}. Any unrecognized arguments should be accumulated and returned as a
-     * list.
+     * list. VM (--jvm/--native/--polyglot/--vm.*) and polyglot options (--language.option or
+     * --option) should be returned as unrecognized arguments to be automatically parsed and
+     * validated by {@link Launcher#parsePolyglotOption(String, Map, boolean, String)}.
      *
-     * Arguments that are translated to polyglot options should be removed from the list. Other
-     * arguments should not be removed.
+     * The {@code arguments} should not be modified, but doing so also has no effect.
+     *
+     * {@code polyglotOptions.put()} can be used to set launcher-specific default values when they
+     * do not match the OptionKey's default.
      *
      * The {@code preprocessArguments} implementations can use {@link Engine} to inspect the the
      * installed {@link Engine#getLanguages() guest languages} and {@link Engine#getInstruments()
@@ -157,7 +323,7 @@ public abstract class AbstractLanguageLauncher extends Launcher {
      * options} is forbidden.
      *
      * @param arguments the command line arguments that were passed to the launcher.
-     * @param polyglotOptions a map where polyglot options can be set. These will be uses when
+     * @param polyglotOptions a map where polyglot options can be set. These will be used when
      *            creating the {@link org.graalvm.polyglot.Engine Engine}.
      * @return the list of arguments that were not recognized.
      */
@@ -189,7 +355,7 @@ public abstract class AbstractLanguageLauncher extends Launcher {
 
     @Override
     protected void printVersion() {
-        printVersion(Engine.create());
+        printVersion(getTempEngine());
     }
 
     protected void printVersion(Engine engine) {
@@ -204,13 +370,21 @@ public abstract class AbstractLanguageLauncher extends Launcher {
             if (languageName == null || languageName.length() == 0) {
                 languageName = languageId;
             }
-            languageImplementationName = "Graal " + languageName;
+            languageImplementationName = languageName;
         }
         String engineImplementationName = engine.getImplementationName();
         if (isAOT()) {
             engineImplementationName += " Native";
+        } else {
+            engineImplementationName += " JVM";
         }
-        System.out.println(String.format("%s %s (%s %s)", languageImplementationName, language.getVersion(), engineImplementationName, engine.getVersion()));
+        String languageVersion = language.getVersion();
+        if (languageVersion.equals(engine.getVersion())) {
+            languageVersion = "";
+        } else {
+            languageVersion += " ";
+        }
+        System.out.println(String.format("%s %s(%s %s)", languageImplementationName, languageVersion, engineImplementationName, engine.getVersion()));
     }
 
     protected void runVersionAction(VersionAction action, Engine engine) {
@@ -226,7 +400,8 @@ public abstract class AbstractLanguageLauncher extends Launcher {
 
     /**
      * The return value specifies what languages should be available by default when not using
-     * polyglot. E.g. Ruby needs llvm as well.
+     * --polyglot. Note that TruffleLanguage.Registration#dependentLanguages() should be preferred
+     * in most cases.
      *
      * @return an array of required language ids
      */

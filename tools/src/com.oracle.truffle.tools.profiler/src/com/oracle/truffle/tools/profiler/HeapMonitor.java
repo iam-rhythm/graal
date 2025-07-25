@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2023, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -25,8 +25,8 @@
 package com.oracle.truffle.tools.profiler;
 
 import java.io.Closeable;
-import java.lang.ref.PhantomReference;
 import java.lang.ref.ReferenceQueue;
+import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -38,21 +38,28 @@ import java.util.Map.Entry;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
-import com.oracle.truffle.api.TruffleContext;
-import com.oracle.truffle.api.instrumentation.ContextsListener;
 import org.graalvm.polyglot.Context;
 import org.graalvm.polyglot.Engine;
 
+import com.oracle.truffle.api.CompilerDirectives;
 import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
+import com.oracle.truffle.api.TruffleContext;
 import com.oracle.truffle.api.instrumentation.AllocationEvent;
 import com.oracle.truffle.api.instrumentation.AllocationEventFilter;
 import com.oracle.truffle.api.instrumentation.AllocationListener;
 import com.oracle.truffle.api.instrumentation.AllocationReporter;
+import com.oracle.truffle.api.instrumentation.ContextsListener;
 import com.oracle.truffle.api.instrumentation.EventBinding;
 import com.oracle.truffle.api.instrumentation.TruffleInstrument;
+import com.oracle.truffle.api.interop.InteropLibrary;
+import com.oracle.truffle.api.interop.UnsupportedMessageException;
 import com.oracle.truffle.api.nodes.LanguageInfo;
 import com.oracle.truffle.tools.profiler.impl.HeapMonitorInstrument;
+import com.oracle.truffle.tools.profiler.impl.ProfilerToolFactory;
 
 /**
  * Implementation of a heap allocation monitor for
@@ -64,24 +71,27 @@ import com.oracle.truffle.tools.profiler.impl.HeapMonitorInstrument;
  * while the heap monitor was not collecting data are not tracked.
  *
  * <p>
- * Usage example: {@link HeapMonitorSnippets#example}
+ * Usage example: {@snippet file = "com/oracle/truffle/tools/profiler/HeapMonitor.java" region =
+ * "HeapMonitorSnippets#example"}
  *
  * @see #takeSummary()
  * @see #takeMetaObjectSummary()
- * @since 1.0
+ * @since 19.0
  */
 public final class HeapMonitor implements Closeable {
 
     private static final long CLEAN_INTERVAL = 200;
     private static final ThreadLocal<Boolean> RECURSIVE = ThreadLocal.withInitial(() -> Boolean.FALSE);
+    private static final InteropLibrary INTEROP = InteropLibrary.getFactory().getUncached();
 
     private final TruffleInstrument.Env env;
 
     private final ReferenceQueue<Object> referenceQueue = new ReferenceQueue<>();
-    private final ConcurrentLinkedQueue<ObjectPhantomReference> newReferences = new ConcurrentLinkedQueue<>();
-    private final ConcurrentLinkedQueue<ObjectPhantomReference> processedReferences = new ConcurrentLinkedQueue<>();
+    private final ConcurrentLinkedQueue<ObjectWeakReference> newReferences = new ConcurrentLinkedQueue<>();
+    private final ConcurrentLinkedQueue<ObjectWeakReference> processedReferences = new ConcurrentLinkedQueue<>();
     private final Map<LanguageInfo, Map<String, HeapSummary>> summaryData = new LinkedHashMap<>();
-    private Thread referenceThread;
+    private ExecutorService referenceExecutorService;
+    private Future<?> referenceFuture;
 
     private volatile boolean closed;
     private boolean collecting;
@@ -129,16 +139,24 @@ public final class HeapMonitor implements Closeable {
             activeBinding.dispose();
             activeBinding = null;
         }
-        if (closed && referenceThread != null && referenceThread.isAlive()) {
-            referenceThread.interrupt();
-            referenceThread = null;
+        if (closed && referenceFuture != null) {
+            referenceFuture.cancel(true);
+            referenceFuture = null;
         }
         if (!collecting || closed) {
             return;
         }
         clearData();
-        if (referenceThread == null) {
-            this.referenceThread = new Thread(() -> {
+        if (referenceExecutorService == null) {
+            referenceExecutorService = JoinableExecutors.newSingleThreadExecutor((r) -> {
+                Thread t = env.createSystemThread(r);
+                t.setName("HeapMonitor Cleanup");
+                t.setDaemon(true);
+                return t;
+            });
+        }
+        if (referenceFuture == null) {
+            referenceFuture = referenceExecutorService.submit(() -> {
                 while (!closed) {
                     cleanReferenceQueue();
                     try {
@@ -148,10 +166,7 @@ public final class HeapMonitor implements Closeable {
                     }
                 }
             });
-            this.referenceThread.setName("HeapMonitor Cleanup");
-            this.referenceThread.setDaemon(true);
         }
-        referenceThread.start();
         this.activeBinding = env.getInstrumenter().attachAllocationListener(AllocationEventFilter.ANY, new Listener());
     }
 
@@ -160,7 +175,7 @@ public final class HeapMonitor implements Closeable {
      *
      * @param engine the engine to find debugger for
      * @return an instance of associated {@link HeapMonitor}
-     * @since 1.0
+     * @since 19.0
      */
     public static HeapMonitor find(Engine engine) {
         return HeapMonitorInstrument.getMonitor(engine);
@@ -171,8 +186,9 @@ public final class HeapMonitor implements Closeable {
      *
      * @param collecting the new state of the monitor.
      * @throws IllegalStateException if the heap monitor was already closed
-     * @since 1.0
+     * @since 19.0
      */
+    @SuppressWarnings("javadoc")
     public synchronized void setCollecting(boolean collecting) {
         if (closed) {
             throw new IllegalStateException("Heap Allocation Monitor is already closed.");
@@ -186,7 +202,7 @@ public final class HeapMonitor implements Closeable {
     /**
      * Returns <code>true</code> if the heap monitor is collecting data, else <code>false</code>.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public synchronized boolean isCollecting() {
         return collecting;
@@ -200,8 +216,9 @@ public final class HeapMonitor implements Closeable {
      * performed while the heap monitor was not collecting data are not tracked.
      *
      * @throws IllegalStateException if the heap monitor was already closed
-     * @since 1.0
+     * @since 19.0
      */
+    @SuppressWarnings("javadoc")
     public HeapSummary takeSummary() {
         if (closed) {
             throw new IllegalStateException("Heap Allocation Monitor is already closed.");
@@ -229,8 +246,9 @@ public final class HeapMonitor implements Closeable {
      * "enabled".
      *
      * @throws IllegalStateException if the heap monitor was already closed
-     * @since 1.0
+     * @since 19.0
      */
+    @SuppressWarnings("javadoc")
     public Map<LanguageInfo, Map<String, HeapSummary>> takeMetaObjectSummary() {
         cleanReferenceQueue();
         processNewReferences();
@@ -249,7 +267,7 @@ public final class HeapMonitor implements Closeable {
 
     private void processNewReferences() {
         synchronized (summaryData) {
-            ObjectPhantomReference reference;
+            ObjectWeakReference reference;
             while ((reference = newReferences.poll()) != null) {
                 HeapSummary summary = getSummary(summaryData, reference.language, reference.metaObject);
                 summary.totalInstances++;
@@ -294,7 +312,7 @@ public final class HeapMonitor implements Closeable {
     /**
      * Erases all the data gathered by the {@link HeapMonitor}.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public void clearData() {
         synchronized (summaryData) {
@@ -307,7 +325,7 @@ public final class HeapMonitor implements Closeable {
      * Returns <code>true</code> if the {@link HeapMonitor} has collected any data, else
      * <code>false</code>.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public boolean hasData() {
         if (!newReferences.isEmpty()) {
@@ -324,23 +342,41 @@ public final class HeapMonitor implements Closeable {
     /**
      * Closes the {@link HeapMonitor} for further use, deleting all the gathered data.
      *
-     * @since 1.0
+     * @since 19.0
      */
     @Override
-    public synchronized void close() {
-        closed = true;
-        resetMonitor();
-        clearData();
+    public void close() {
+        ExecutorService toShutDown;
+        synchronized (this) {
+            closed = true;
+            resetMonitor();
+            clearData();
+            toShutDown = referenceExecutorService;
+        }
+        if (toShutDown != null) {
+            toShutDown.shutdownNow();
+            while (true) {
+                try {
+                    if (toShutDown.awaitTermination(Long.MAX_VALUE, TimeUnit.SECONDS)) {
+                        break;
+                    } else {
+                        throw new RuntimeException("Failed to shutdown background thread.");
+                    }
+                } catch (InterruptedException ie) {
+                    // continue to awaitTermination
+                }
+            }
+        }
     }
 
     private void cleanReferenceQueue() {
-        ObjectPhantomReference reference = (ObjectPhantomReference) referenceQueue.poll();
+        ObjectWeakReference reference = (ObjectWeakReference) referenceQueue.poll();
         if (reference == null) {
             // nothing to do avoid locking
             return;
         }
-        Set<ObjectPhantomReference> collectedNewReferences = new HashSet<>();
-        Set<ObjectPhantomReference> collectedProcessedReferences = new HashSet<>();
+        Set<ObjectWeakReference> collectedNewReferences = new HashSet<>();
+        Set<ObjectWeakReference> collectedProcessedReferences = new HashSet<>();
         synchronized (summaryData) {
             do {
                 HeapSummary counter = getSummary(summaryData, reference.language, reference.metaObject);
@@ -355,7 +391,7 @@ public final class HeapMonitor implements Closeable {
                     counter.totalBytes += bytesDiff;
                     collectedNewReferences.add(reference);
                 }
-            } while ((reference = (ObjectPhantomReference) referenceQueue.poll()) != null);
+            } while ((reference = (ObjectWeakReference) referenceQueue.poll()) != null);
             // note that ConcurrentLinkedQueue actually supports doing this
             // the iterator does not throw a ConcurrentModificationException
             newReferences.removeAll(collectedNewReferences);
@@ -363,7 +399,7 @@ public final class HeapMonitor implements Closeable {
         }
     }
 
-    private class Listener implements AllocationListener {
+    private final class Listener implements AllocationListener {
 
         public void onEnter(AllocationEvent event) {
             // nothing to do
@@ -377,7 +413,10 @@ public final class HeapMonitor implements Closeable {
             }
             LanguageInfo language = event.getLanguage();
             if (initializedLanguages.containsKey(language)) {
-                newReferences.add(new ObjectPhantomReference(object, referenceQueue, language, getMetaObjectString(language, object), event.getOldSize(), event.getNewSize()));
+                String metaInfo = getMetaObjectString(language, object);
+                if (metaInfo != null) {
+                    newReferences.add(new ObjectWeakReference(object, referenceQueue, language, metaInfo.intern(), event.getOldSize(), event.getNewSize()));
+                }
             }
         }
 
@@ -386,22 +425,27 @@ public final class HeapMonitor implements Closeable {
             if (!recursive) { // recursive objects should still be registered
                 RECURSIVE.set(Boolean.TRUE);
                 try {
-                    Object metaObject = env.findMetaObject(language, value);
-                    if (metaObject != null) {
-                        String toString = env.toString(language, metaObject);
-                        if (toString != null) {
-                            return toString;
+                    Object view = env.getLanguageView(language, value);
+                    InteropLibrary viewLib = InteropLibrary.getFactory().getUncached(view);
+                    String metaObjectString = "Unknown";
+                    if (viewLib.hasMetaObject(view)) {
+                        try {
+                            metaObjectString = INTEROP.asString(INTEROP.getMetaQualifiedName(viewLib.getMetaObject(view)));
+                        } catch (UnsupportedMessageException e) {
+                            CompilerDirectives.transferToInterpreter();
+                            throw new AssertionError(e);
                         }
                     }
+                    return metaObjectString;
                 } finally {
                     RECURSIVE.set(Boolean.FALSE);
                 }
             }
-            return "Unknown";
+            return null;
         }
     }
 
-    private static final class ObjectPhantomReference extends PhantomReference<Object> {
+    private static final class ObjectWeakReference extends WeakReference<Object> {
         final String metaObject; // is NULL_NAME for null
         final LanguageInfo language;
         final long oldSize;
@@ -409,7 +453,7 @@ public final class HeapMonitor implements Closeable {
 
         boolean processed;
 
-        ObjectPhantomReference(Object obj, ReferenceQueue<Object> rq, LanguageInfo language, String metaObject, long oldSize, long newSize) {
+        ObjectWeakReference(Object obj, ReferenceQueue<Object> rq, LanguageInfo language, String metaObject, long oldSize, long newSize) {
             super(obj, rq);
             this.language = language;
             this.metaObject = metaObject;
@@ -426,8 +470,13 @@ public final class HeapMonitor implements Closeable {
 
     }
 
-    static {
-        HeapMonitorInstrument.setFactory(HeapMonitor::new);
+    static ProfilerToolFactory<HeapMonitor> createFactory() {
+        return new ProfilerToolFactory<>() {
+            @Override
+            public HeapMonitor create(TruffleInstrument.Env env) {
+                return new HeapMonitor(env);
+            }
+        };
     }
 
 }
@@ -436,8 +485,8 @@ class HeapMonitorSnippets {
 
     @SuppressWarnings("unused")
     public void example() throws InterruptedException {
-        // @formatter:off
-        // BEGIN: HeapMonitorSnippets#example
+        // @formatter:off // @replace regex='.*' replacement=''
+        // @start region="HeapMonitorSnippets#example"
         try (Context context = Context.create()) {
             HeapMonitor monitor = HeapMonitor.find(context.getEngine());
             monitor.setCollecting(true);
@@ -455,7 +504,7 @@ class HeapMonitorSnippets {
             monitor.setCollecting(false);
         }
         // Print the number of live instances per meta object every 100ms.
-        // END: HeapMonitorSnippets#example
-        // @formatter:on
+        // @end region="HeapMonitorSnippets#example"
+        // @formatter:on // @replace regex='.*' replacement=''
     }
 }

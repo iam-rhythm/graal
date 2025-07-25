@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -51,6 +51,8 @@ import java.util.Map;
 import java.util.function.Function;
 
 import org.graalvm.polyglot.Context;
+import org.graalvm.polyglot.PolyglotAccess;
+import org.graalvm.polyglot.PolyglotException;
 import org.junit.Test;
 import org.junit.runners.model.FrameworkField;
 import org.junit.runners.model.FrameworkMethod;
@@ -60,11 +62,13 @@ import org.junit.runners.model.TestClass;
 import com.oracle.truffle.api.CallTarget;
 import com.oracle.truffle.api.Truffle;
 import com.oracle.truffle.api.TruffleLanguage;
+import com.oracle.truffle.api.TruffleLanguage.ContextPolicy;
 import com.oracle.truffle.api.TruffleLanguage.Env;
 import com.oracle.truffle.api.impl.TVMCI;
 import com.oracle.truffle.api.nodes.RootNode;
 import com.oracle.truffle.tck.TruffleRunner.Inject;
 import com.oracle.truffle.tck.TruffleRunner.RunWithPolyglotRule;
+import org.junit.AssumptionViolatedException;
 
 final class TruffleTestInvoker<C extends Closeable, T extends CallTarget> extends TVMCI.TestAccessor<C, T> {
 
@@ -73,7 +77,7 @@ final class TruffleTestInvoker<C extends Closeable, T extends CallTarget> extend
         return new TruffleTestInvoker<>(testTvmci);
     }
 
-    @TruffleLanguage.Registration(id = "truffletestinvoker", name = "truffletestinvoker", version = "")
+    @TruffleLanguage.Registration(id = "truffletestinvoker", name = "truffletestinvoker", version = "", contextPolicy = ContextPolicy.SHARED)
     public static class TruffleTestInvokerLanguage extends TruffleLanguage<Env> {
 
         @Override
@@ -82,15 +86,15 @@ final class TruffleTestInvoker<C extends Closeable, T extends CallTarget> extend
         }
 
         @Override
-        protected boolean isObjectOfLanguage(Object object) {
-            return object instanceof TestStatement;
-        }
-
-        @Override
         protected void initializeContext(Env context) throws Exception {
+            context.exportSymbol("language", context.asGuestValue(this));
             context.exportSymbol("env", context.asGuestValue(context));
         }
 
+        @Override
+        protected boolean isThreadAccessAllowed(Thread thread, boolean singleThreaded) {
+            return true;
+        }
     }
 
     private static class TestStatement extends Statement {
@@ -106,20 +110,27 @@ final class TruffleTestInvoker<C extends Closeable, T extends CallTarget> extend
         @Override
         public void evaluate() throws Throwable {
             Context prevContext = rule.context;
-            try (Context context = rule.contextBuilder.build()) {
+            try (Context context = rule.contextBuilder.allowPolyglotAccess(PolyglotAccess.ALL).build()) {
                 rule.context = context;
 
                 context.initialize("truffletestinvoker");
                 context.enter();
+                TruffleLanguage<?> prevLang = rule.testLanguage;
                 Env prevEnv = rule.testEnv;
                 try {
+                    rule.testLanguage = context.getPolyglotBindings().getMember("language").asHostObject();
                     rule.testEnv = context.getPolyglotBindings().getMember("env").asHostObject();
                     stmt.evaluate();
                 } catch (Throwable t) {
                     throw t;
                 } finally {
+                    rule.testLanguage = prevLang;
                     rule.testEnv = prevEnv;
                     context.leave();
+                }
+            } catch (PolyglotException pe) {
+                if (!pe.isCancelled() && !pe.isExit()) {
+                    throw pe;
                 }
             } finally {
                 rule.context = prevContext;
@@ -183,12 +194,11 @@ final class TruffleTestInvoker<C extends Closeable, T extends CallTarget> extend
             }
         }
 
-        RootNode[] createTestRootNodes(Object test) {
-            if (nodeConstructors == null) {
-                // non-truffle test
-                return null;
-            }
+        boolean hasNodeConstructors() {
+            return nodeConstructors != null;
+        }
 
+        RootNode[] createTestRootNodes(Object test) {
             RootNode[] ret = new RootNode[nodeConstructors.length];
             for (int i = 0; i < ret.length; i++) {
                 if (nodeConstructors[i] != null) {
@@ -201,8 +211,8 @@ final class TruffleTestInvoker<C extends Closeable, T extends CallTarget> extend
 
     Statement createStatement(String testName, FrameworkMethod method, Object test) {
         final TruffleFrameworkMethod truffleMethod = (TruffleFrameworkMethod) method;
-        final RootNode[] testNodes = truffleMethod.createTestRootNodes(test);
-        if (testNodes == null) {
+        if (!truffleMethod.hasNodeConstructors()) {
+            // non-truffle test
             return null;
         }
 
@@ -211,6 +221,7 @@ final class TruffleTestInvoker<C extends Closeable, T extends CallTarget> extend
             @Override
             public void evaluate() throws Throwable {
                 try (C testContext = createTestContext(testName)) {
+                    final RootNode[] testNodes = truffleMethod.createTestRootNodes(test);
                     ArrayList<T> callTargets = new ArrayList<>(testNodes.length);
                     for (RootNode testNode : testNodes) {
                         if (testNode != null) {
@@ -247,6 +258,17 @@ final class TruffleTestInvoker<C extends Closeable, T extends CallTarget> extend
         return null;
     }
 
+    private static RuntimeException forwardException(InvocationTargetException ex) {
+        Throwable cause = ex.getCause();
+        if (cause instanceof AssumptionViolatedException) {
+            throw (AssumptionViolatedException) cause;
+        } else if (cause instanceof AssertionError) {
+            throw (AssertionError) cause;
+        } else {
+            throw new AssertionError(cause);
+        }
+    }
+
     private static NodeConstructor getNodeConstructor(Inject annotation, TestClass testClass) {
         Class<? extends RootNode> nodeClass = annotation.value();
         try {
@@ -254,8 +276,10 @@ final class TruffleTestInvoker<C extends Closeable, T extends CallTarget> extend
             return (obj) -> {
                 try {
                     return cons.newInstance(obj);
-                } catch (IllegalAccessException | IllegalArgumentException | InstantiationException | InvocationTargetException ex) {
+                } catch (IllegalAccessException | IllegalArgumentException | InstantiationException ex) {
                     throw new AssertionError(ex);
+                } catch (InvocationTargetException ex) {
+                    throw forwardException(ex);
                 }
             };
         } catch (NoSuchMethodException e) {
@@ -264,8 +288,10 @@ final class TruffleTestInvoker<C extends Closeable, T extends CallTarget> extend
                 return (obj) -> {
                     try {
                         return cons.newInstance();
-                    } catch (IllegalAccessException | IllegalArgumentException | InstantiationException | InvocationTargetException ex) {
+                    } catch (IllegalAccessException | IllegalArgumentException | InstantiationException ex) {
                         throw new AssertionError(ex);
+                    } catch (InvocationTargetException ex) {
+                        throw forwardException(ex);
                     }
                 };
             } catch (NoSuchMethodException ex) {

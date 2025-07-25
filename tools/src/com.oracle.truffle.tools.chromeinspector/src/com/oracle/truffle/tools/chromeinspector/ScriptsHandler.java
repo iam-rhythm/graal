@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,35 +24,62 @@
  */
 package com.oracle.truffle.tools.chromeinspector;
 
-import java.net.URI;
-import java.net.URISyntaxException;
+import java.io.File;
+import java.net.URL;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import com.oracle.truffle.api.TruffleContext;
 import com.oracle.truffle.api.debug.DebuggerSession;
+import com.oracle.truffle.api.instrumentation.ContextsListener;
+import com.oracle.truffle.api.instrumentation.EventBinding;
 import com.oracle.truffle.api.instrumentation.LoadSourceEvent;
 import com.oracle.truffle.api.instrumentation.LoadSourceListener;
+import com.oracle.truffle.api.instrumentation.TruffleInstrument;
+import com.oracle.truffle.api.nodes.LanguageInfo;
 import com.oracle.truffle.api.source.Source;
 
 import com.oracle.truffle.tools.chromeinspector.types.Script;
+import org.graalvm.collections.EconomicSet;
 
 public final class ScriptsHandler implements LoadSourceListener {
 
     private final Map<Source, Integer> sourceIDs = new HashMap<>(100);
     private final List<Script> scripts = new ArrayList<>(100);
+    private volatile List<Source> sourcesBacklog = null;
+    private final Map<String, Integer> uniqueSourceNames = new HashMap<>();
     private final List<LoadScriptListener> listeners = new ArrayList<>();
     private final boolean reportInternal;
+    private final TruffleInstrument.Env env;
     private volatile DebuggerSession debuggerSession;
+    private final EventBinding<ContextsListener> contextsBinding;
+    private final EconomicSet<TruffleContext> contexts = EconomicSet.create();
 
-    public ScriptsHandler(boolean reportInternal) {
+    ScriptsHandler(TruffleInstrument.Env env, boolean reportInternal) {
+        this.env = env;
         this.reportInternal = reportInternal;
+        this.contextsBinding = env.getInstrumenter().attachContextsListener(new ContextTracker(), true);
     }
 
     void setDebuggerSession(DebuggerSession debuggerSession) {
         this.debuggerSession = debuggerSession;
+    }
+
+    private TruffleContext getATruffleContext() {
+        synchronized (contexts) {
+            if (contexts.isEmpty()) {
+                return null;
+            } else {
+                return contexts.iterator().next();
+            }
+        }
+    }
+
+    DebuggerSession getDebuggerSession() {
+        return this.debuggerSession;
     }
 
     public int getScriptId(Source source) {
@@ -94,7 +121,25 @@ public final class ScriptsHandler implements LoadSourceListener {
         }
     }
 
-    public int assureLoaded(Source sourceLoaded) {
+    public Script assureLoaded(Source sourceLoaded) {
+        TruffleContext truffleContext = env.getEnteredContext();
+        if (truffleContext == null) {
+            truffleContext = getATruffleContext();
+        }
+        if (truffleContext == null) {
+            synchronized (sourceIDs) {
+                if (sourcesBacklog == null) {
+                    sourcesBacklog = new ArrayList<>();
+                }
+                sourcesBacklog.add(sourceLoaded);
+            }
+            return null;
+        } else {
+            return assureLoaded(sourceLoaded, truffleContext);
+        }
+    }
+
+    private Script assureLoaded(Source sourceLoaded, TruffleContext truffleContext) {
         DebuggerSession ds = debuggerSession;
         Source sourceResolved = sourceLoaded;
         if (ds != null) {
@@ -102,205 +147,71 @@ public final class ScriptsHandler implements LoadSourceListener {
         }
         Source source = (sourceResolved != null) ? sourceResolved : sourceLoaded;
         Script scr;
-        URI uri = source.getURI();
-        int id;
         LoadScriptListener[] listenersToNotify;
         synchronized (sourceIDs) {
             Integer eid = sourceIDs.get(source);
             if (eid != null) {
-                return eid;
+                scr = scripts.get(eid);
+                assert scr != null : sourceLoaded;
+                return scr;
             }
-            id = scripts.size();
-            String sourceUrl = getNiceStringFromURI(uri);
-            scr = new Script(id, sourceUrl, source);
+            int id = scripts.size();
+            String sourceUrl = getSourceURL(source, truffleContext);
+            scr = new Script(id, sourceUrl, source, sourceLoaded);
             sourceIDs.put(source, id);
+            sourceIDs.put(sourceLoaded, id);
             scripts.add(scr);
             listenersToNotify = listeners.toArray(new LoadScriptListener[listeners.size()]);
         }
         for (LoadScriptListener l : listenersToNotify) {
             l.loadedScript(scr);
         }
-        return id;
+        return scr;
     }
 
-    /**
-     * Create a "nice" String representing the URI. It decodes special characters so that the name
-     * looks better in the Chrome Inspector UI. In order to know where query or fragment starts, it
-     * stores their indexes in the scheme in the form of &lt;scheme&gt;?&lt;query
-     * index&gt;#&lt;fragment index&gt;`.
-     */
-    public static String getNiceStringFromURI(URI uri) {
-        StringBuilder sb = new StringBuilder();
-        String scheme = uri.getScheme();
-        String query = uri.getQuery();
-        String fragment = uri.getFragment();
-        int queryIndex = -1;
-        int fragmentIndex = -1;
+    public String getSourceURL(Source source) {
+        return getSourceURL(source, null);
+    }
 
-        if (uri.isOpaque()) {
-            String ssp = uri.getSchemeSpecificPart();
-            if (ssp.startsWith("/") || ssp.startsWith("_")) {
-                sb.append('_'); // Assure that the scheme specific part does not start with '/'
-            }
-            sb.append(ssp);
-        } else {
-            String host = uri.getHost();
-            if (host != null) {
-                sb.append("//");
-                if (uri.getRawUserInfo() != null) {
-                    sb.append(uri.getRawUserInfo());
-                    sb.append('@');
-                }
-                boolean needBrackets = ((host.indexOf(':') >= 0) && !host.startsWith("[") && !host.endsWith("]"));
-                if (needBrackets) {
-                    sb.append('[');
-                }
-                sb.append(host);
-                if (needBrackets) {
-                    sb.append(']');
-                }
-                if (uri.getPort() != -1) {
-                    sb.append(':');
-                    sb.append(uri.getPort());
-                }
-            } else if (uri.getRawAuthority() != null) {
-                sb.append("//");
-                sb.append(uri.getRawAuthority());
-            } else if ("file".equals(scheme)) {
-                sb.append("//");
-            }
-            if (uri.getPath() != null) {
-                sb.append(uri.getPath());
-            }
-            if (query != null) {
-                queryIndex = sb.length();
-                sb.append('?');
-                sb.append(query);
-            }
+    private String getSourceURL(Source source, TruffleContext truffleContext) {
+        URL url = source.getURL();
+        if (url != null) {
+            return url.toExternalForm();
         }
-        if (fragment != null) {
-            fragmentIndex = sb.length();
-            sb.append('#');
-            sb.append(fragment);
-        }
-        String schemeAppend = "";
-        if (queryIndex >= 0) {
-            schemeAppend += "?" + queryIndex;
-        }
-        if (fragmentIndex >= 0) {
-            schemeAppend += "#" + fragmentIndex;
-        }
-        if (schemeAppend.isEmpty()) {
-            if (scheme != null && scheme.endsWith("`")) {
-                scheme += "`";
-            }
-        } else {
-            if (scheme == null) {
-                scheme = schemeAppend + "`";
+        String path = source.getPath();
+        if (path != null) {
+            if (source.getURI().isAbsolute()) {
+                return source.getURI().toString();
             } else {
-                scheme += schemeAppend + "`";
-            }
-        }
-        if (scheme != null) {
-            sb.insert(0, scheme);
-            sb.insert(scheme.length(), ':');
-        } else {
-            sb.insert(0, ':');  // empty scheme
-        }
-        return sb.toString();
-    }
-
-    /**
-     * Parse the "nice" String created by {@link #getNiceStringFromURI(java.net.URI)} and convert it
-     * into the original URI.
-     */
-    public static URI getURIFromNiceString(String str) throws URISyntaxException {
-        String scheme;
-        int queryIndex = -1;
-        int fragmentIndex = -1;
-        int i = str.indexOf(':');
-        if (i <= 0) {
-            scheme = null;
-        } else {
-            scheme = str.substring(0, i);
-            if (scheme.endsWith("``")) {
-                scheme = scheme.substring(0, scheme.length() - 1);
-            } else if (scheme.endsWith("`")) {
-                int end = scheme.length() - 1;
-                int qi = scheme.lastIndexOf('?');
-                int fi = scheme.lastIndexOf('#');
-                if (fi >= 0) {
-                    fragmentIndex = Integer.parseUnsignedInt(scheme.substring(fi + 1, end));
-                    end = fi;
-                }
-                if (qi >= 0) {
-                    queryIndex = Integer.parseUnsignedInt(scheme.substring(qi + 1, end));
-                    end = qi;
-                }
-                scheme = scheme.substring(0, end);
-            }
-            if (scheme.isEmpty()) {
-                scheme = null;
-            }
-        }
-        i++; // skip the colon
-        int end = str.length();
-        String query = null;
-        String fragment = null;
-        if (fragmentIndex >= 0) {
-            fragment = str.substring(i + fragmentIndex + 1);
-            end = i + fragmentIndex;
-        }
-        if (queryIndex >= 0) {
-            query = str.substring(i + queryIndex + 1, end);
-            end = i + queryIndex;
-        }
-        String ssp = null;
-        if (scheme != null && i < end) {
-            char c = str.charAt(i);
-            if (c == '_') { // Scheme Specific Part
-                ssp = str.substring(i + 1, end);
-            } else if (c != '/') { // Scheme Specific Part
-                ssp = str.substring(i, end);
-            }
-        }
-        if (ssp != null) {
-            return new URI(scheme, ssp, fragment);
-        } else {
-            String authority = null;
-            URI authorityDecoder = null;
-            String path = null;
-            if (i < end) { // Hierarchical
-                int p1 = i;
-                char c1 = str.charAt(i);
-                if ((i + 1) < end) {
-                    char c2 = str.charAt(i + 1);
-
-                    if (c1 == '/' && c2 == '/') { // Authority
-                        p1 = str.indexOf('/', i + 2);
-                        if (p1 > end || p1 < 0) {
-                            p1 = end;
-                        }
-                        authority = str.substring(i + 2, p1);
-                        if (authority.isEmpty()) {
-                            authority = null;
-                        } else {
-                            // Need to decode the encoded authority:
-                            authorityDecoder = new URI("a://" + authority);
-                        }
+                try {
+                    return env.getTruffleFile(truffleContext, path).getAbsoluteFile().toUri().toString();
+                } catch (UnsupportedOperationException | IllegalArgumentException | SecurityException ex) {
+                    if (File.separatorChar == '/') {
+                        return path;
+                    } else {
+                        return path.replace(File.separatorChar, '/');
                     }
                 }
-                path = str.substring(p1, end);
-                if (path.isEmpty()) {
-                    path = null;
-                }
-            }
-            if (authorityDecoder == null) {
-                return new URI(scheme, null, path, query, fragment);
-            } else {
-                return new URI(scheme, authorityDecoder.getUserInfo(), authorityDecoder.getHost(), authorityDecoder.getPort(), path, query, fragment);
             }
         }
+        String name = source.getName();
+        if (name != null) {
+            String uniqueName;
+            synchronized (uniqueSourceNames) {
+                int count = uniqueSourceNames.getOrDefault(name, 0);
+                count++;
+                if (count == 1) {
+                    uniqueName = name;
+                } else {
+                    do {
+                        uniqueName = count + "/" + name;
+                    } while (uniqueSourceNames.containsKey(uniqueName) && (count++) > 0);
+                }
+                uniqueSourceNames.put(name, count);
+            }
+            return uniqueName;
+        }
+        return source.getURI().toString();
     }
 
     @Override
@@ -309,6 +220,10 @@ public final class ScriptsHandler implements LoadSourceListener {
         if (reportInternal || !source.isInternal()) {
             assureLoaded(source);
         }
+    }
+
+    void dispose() {
+        contextsBinding.dispose();
     }
 
     static boolean compareURLs(String url1, String url2) {
@@ -332,4 +247,50 @@ public final class ScriptsHandler implements LoadSourceListener {
         void loadedScript(Script script);
     }
 
+    private final class ContextTracker implements ContextsListener {
+
+        @Override
+        public void onContextCreated(TruffleContext context) {
+            synchronized (contexts) {
+                contexts.add(context);
+            }
+            if (sourcesBacklog != null) {
+                List<Source> oldSources = null;
+                synchronized (sourceIDs) {
+                    if (sourcesBacklog != null) {
+                        oldSources = sourcesBacklog;
+                        sourcesBacklog = null;
+                    }
+                }
+                if (oldSources != null) {
+                    for (Source source : oldSources) {
+                        assureLoaded(source, context);
+                    }
+                }
+            }
+        }
+
+        @Override
+        public void onContextClosed(TruffleContext context) {
+            synchronized (contexts) {
+                contexts.remove(context);
+            }
+        }
+
+        @Override
+        public void onLanguageContextCreated(TruffleContext context, LanguageInfo language) {
+        }
+
+        @Override
+        public void onLanguageContextInitialized(TruffleContext context, LanguageInfo language) {
+        }
+
+        @Override
+        public void onLanguageContextFinalized(TruffleContext context, LanguageInfo language) {
+        }
+
+        @Override
+        public void onLanguageContextDisposed(TruffleContext context, LanguageInfo language) {
+        }
+    }
 }

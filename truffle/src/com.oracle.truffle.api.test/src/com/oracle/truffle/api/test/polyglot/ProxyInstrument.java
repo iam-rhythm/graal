@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -42,6 +42,10 @@ package com.oracle.truffle.api.test.polyglot;
 
 import java.util.function.Consumer;
 
+import org.graalvm.options.OptionDescriptors;
+import org.graalvm.polyglot.Context;
+import org.graalvm.polyglot.Engine;
+
 import com.oracle.truffle.api.instrumentation.TruffleInstrument;
 import com.oracle.truffle.api.test.polyglot.ProxyInstrument.Initialize;
 
@@ -54,6 +58,8 @@ public class ProxyInstrument extends TruffleInstrument {
     public static final String ID = "proxyInstrument";
 
     public interface Initialize {
+
+        Env getEnv();
     }
 
     private static volatile ProxyInstrument delegate = new ProxyInstrument();
@@ -61,12 +67,14 @@ public class ProxyInstrument extends TruffleInstrument {
         delegate.wrapper = false;
     }
     private boolean wrapper = true;
-    protected ProxyInstrument languageInstance;
+    protected ProxyInstrument instrument;
     private Consumer<Env> onCreate;
 
     public static <T extends ProxyInstrument> T setDelegate(T delegate) {
+        ProxyInstrument prevInstrument = ProxyInstrument.delegate != null ? ProxyInstrument.delegate.instrument : null;
         ((ProxyInstrument) delegate).wrapper = false;
         ProxyInstrument.delegate = delegate;
+        delegate.instrument = prevInstrument;
         return delegate;
     }
 
@@ -75,11 +83,32 @@ public class ProxyInstrument extends TruffleInstrument {
     }
 
     @Override
+    protected OptionDescriptors getOptionDescriptors() {
+        if (wrapper) {
+            delegate.instrument = this;
+            return delegate.getOptionDescriptors();
+        }
+        return super.getOptionDescriptors();
+    }
+
+    @Override
+    protected OptionDescriptors getContextOptionDescriptors() {
+        if (wrapper) {
+            delegate.instrument = this;
+            return delegate.getContextOptionDescriptors();
+        }
+        return super.getContextOptionDescriptors();
+    }
+
+    @Override
     protected void onCreate(Env env) {
         env.registerService(new Initialize() {
+            public Env getEnv() {
+                return env;
+            }
         });
         if (wrapper) {
-            delegate.languageInstance = this;
+            delegate.instrument = this;
             delegate.onCreate(env);
         }
         if (onCreate != null) {
@@ -90,7 +119,7 @@ public class ProxyInstrument extends TruffleInstrument {
     @Override
     protected void onDispose(Env env) {
         if (wrapper) {
-            delegate.languageInstance = this;
+            delegate.instrument = this;
             delegate.onDispose(env);
         }
     }
@@ -98,9 +127,21 @@ public class ProxyInstrument extends TruffleInstrument {
     @Override
     protected void onFinalize(Env env) {
         if (wrapper) {
-            delegate.languageInstance = this;
+            delegate.instrument = this;
             delegate.onFinalize(env);
         }
+    }
+
+    public static ProxyInstrument getCurrent() {
+        return delegate;
+    }
+
+    public static TruffleInstrument.Env findEnv(Context c) {
+        return findEnv(c.getEngine());
+    }
+
+    public static TruffleInstrument.Env findEnv(Engine e) {
+        return e.getInstruments().get(ProxyInstrument.ID).lookup(ProxyInstrument.Initialize.class).getEnv();
     }
 
 }

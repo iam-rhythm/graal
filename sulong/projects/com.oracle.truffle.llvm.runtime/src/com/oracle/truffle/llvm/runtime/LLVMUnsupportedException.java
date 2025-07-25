@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2018, Oracle and/or its affiliates.
+ * Copyright (c) 2016, 2021, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -29,7 +29,11 @@
  */
 package com.oracle.truffle.llvm.runtime;
 
-public final class LLVMUnsupportedException extends RuntimeException {
+import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
+import com.oracle.truffle.api.nodes.Node;
+import com.oracle.truffle.llvm.runtime.except.LLVMException;
+
+public final class LLVMUnsupportedException extends LLVMException {
 
     private static final long serialVersionUID = 1L;
 
@@ -42,7 +46,17 @@ public final class LLVMUnsupportedException extends RuntimeException {
          * setjmp and longjmp intrinsic.
          */
         SET_JMP_LONG_JMP("setjmp/longjmp"),
-        PARSER_ERROR_VOID_SLOT("parser error void slot");
+        PARSER_ERROR_VOID_SLOT("parser error void slot"),
+        UNSUPPORTED_SYSCALL("unsupported syscall"),
+        /**
+         * Indicates that a value is valid in terms of LLVM language spec, but it is unsupported by
+         * this implementation.
+         */
+        UNSUPPORTED_VALUE_RANGE("unsupported value range"),
+        /**
+         * Missing LLVM builtin.
+         */
+        MISSING_BUILTIN("missing LLVM builtin");
 
         private final String description;
 
@@ -55,26 +69,23 @@ public final class LLVMUnsupportedException extends RuntimeException {
         }
     }
 
-    private final UnsupportedReason reason;
-    private final String details;
-
-    public LLVMUnsupportedException(UnsupportedReason reason) {
-        super(reason.getDescription());
-        this.details = null;
-        this.reason = reason;
+    public LLVMUnsupportedException(Node location, UnsupportedReason reason) {
+        super(location, reason.getDescription());
     }
 
-    public LLVMUnsupportedException(UnsupportedReason reason, String details) {
-        super(reason.getDescription() + ": " + details);
-        this.details = details;
-        this.reason = reason;
+    @TruffleBoundary
+    public LLVMUnsupportedException(Node location, UnsupportedReason reason, String details) {
+        super(location, reason.getDescription() + ": " + details);
     }
 
-    public UnsupportedReason getReason() {
-        return reason;
+    @TruffleBoundary
+    public LLVMUnsupportedException(Node location, UnsupportedReason reason, String format, Object... args) {
+        this(location, reason, String.format(format, args));
     }
 
-    public String getDetails() {
-        return details;
+    @TruffleBoundary
+    public LLVMUnsupportedException(Node location, UnsupportedReason reason, Throwable cause) {
+        super(location, reason.getDescription() + ": " + cause.getMessage(), cause);
     }
+
 }

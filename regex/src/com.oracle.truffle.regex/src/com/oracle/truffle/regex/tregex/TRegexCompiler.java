@@ -1,83 +1,127 @@
 /*
- * Copyright (c) 2012, 2016, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2025, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
- * This code is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 only, as
- * published by the Free Software Foundation.  Oracle designates this
- * particular file as subject to the "Classpath" exception as provided
- * by Oracle in the LICENSE file that accompanied this code.
+ * The Universal Permissive License (UPL), Version 1.0
  *
- * This code is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
- * version 2 for more details (a copy is included in the LICENSE file that
- * accompanied this code).
+ * Subject to the condition set forth below, permission is hereby granted to any
+ * person obtaining a copy of this software, associated documentation and/or
+ * data (collectively the "Software"), free of charge and under any and all
+ * copyright rights in the Software, and any and all patent rights owned or
+ * freely licensable by each licensor hereunder covering either (i) the
+ * unmodified Software as contributed to or provided by such licensor, or (ii)
+ * the Larger Works (as defined below), to deal in both
  *
- * You should have received a copy of the GNU General Public License version
- * 2 along with this work; if not, write to the Free Software Foundation,
- * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+ * (a) the Software, and
  *
- * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
- * or visit www.oracle.com if you need additional information or have any
- * questions.
+ * (b) any piece of software and/or hardware listed in the lrgrwrks.txt file if
+ * one is included with the Software each a "Larger Work" to which the Software
+ * is contributed by such licensors),
+ *
+ * without restriction, including without limitation the rights to copy, create
+ * derivative works of, display, perform, and distribute the Software and make,
+ * use, sell, offer for sale, import, export, have made, and have sold the
+ * Software and the Larger Work(s), and to sublicense the foregoing rights on
+ * either these or other terms.
+ *
+ * This license is subject to the following condition:
+ *
+ * The above copyright notice and either this complete permission notice or at a
+ * minimum a reference to the UPL must be included in all copies or substantial
+ * portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 package com.oracle.truffle.regex.tregex;
 
-/*
- * current status:
- *
- * truffle.regex.tregex can handle quantifiers, character classes, alternations,
- * positive look-aheads, and positive look-behinds of fixed length.
- * Counted repetitions are implemented by transforming them to alternations
- * (e.g. a{2,4} => aa|aaa|aaaa).
- *
- * basic structure of truffle.regex.tregex:
- *
- * tregex parses a regular expression using the custom RegexParser and transforms it to a non-deterministic finite
- * automaton (NFA) using the data structures found in tregex.nfa.
- *
- * The NFA is compiled to a DFA (deterministic finite automaton) during pattern matching. Each DFA stateSet is a
- * set of NFA states, which is stored as a BitSet where each bit corresponds to a slot in the NFA array.
- *
- */
+import java.util.logging.Level;
 
-import com.oracle.truffle.api.interop.TruffleObject;
-import com.oracle.truffle.regex.RegexCompiler;
+import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
+import com.oracle.truffle.regex.RegexExecNode;
 import com.oracle.truffle.regex.RegexLanguage;
-import com.oracle.truffle.regex.RegexOptions;
+import com.oracle.truffle.regex.RegexObject;
+import com.oracle.truffle.regex.RegexProfile;
 import com.oracle.truffle.regex.RegexSource;
 import com.oracle.truffle.regex.RegexSyntaxException;
-import com.oracle.truffle.regex.tregex.nodes.TRegexDFAExecutorNode;
+import com.oracle.truffle.regex.UnsupportedRegexException;
+import com.oracle.truffle.regex.tregex.nfa.NFA;
+import com.oracle.truffle.regex.tregex.nodes.TRegexExecNode.LazyCaptureGroupRegexSearchNode;
+import com.oracle.truffle.regex.tregex.nodes.dfa.TRegexDFAExecutorNode;
+import com.oracle.truffle.regex.tregex.nodes.nfa.TRegexBacktrackingNFAExecutorNode;
+import com.oracle.truffle.regex.tregex.util.DebugUtil;
+import com.oracle.truffle.regex.tregex.util.Loggers;
 
-import static com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
+public final class TRegexCompiler {
 
-public final class TRegexCompiler extends RegexCompiler {
-
-    private final RegexLanguage language;
-    private final RegexOptions options;
-
-    public TRegexCompiler(RegexLanguage language, RegexOptions options) {
-        this.language = language;
-        this.options = options;
-    }
-
-    public RegexLanguage getLanguage() {
-        return language;
-    }
-
-    public RegexOptions getOptions() {
-        return options;
+    /**
+     * Try and compile the regular expression described in {@code source}.
+     *
+     * @throws RegexSyntaxException if the engine discovers a syntax error in the regular expression
+     * @throws UnsupportedRegexException if the regular expression is not supported by the engine
+     */
+    @TruffleBoundary
+    public static RegexObject compile(RegexLanguage language, RegexSource source) throws RegexSyntaxException {
+        DebugUtil.Timer timer = shouldLogCompilationTime() ? new DebugUtil.Timer() : null;
+        if (timer != null) {
+            timer.start();
+        }
+        try {
+            RegexObject regex = doCompile(language, source);
+            logCompilationTime(source, timer, regex);
+            Loggers.LOG_COMPILER_FALLBACK.finer(() -> "TRegex compiled: " + source);
+            return regex;
+        } catch (UnsupportedRegexException bailout) {
+            logCompilationTime(source, timer, null);
+            Loggers.LOG_BAILOUT_MESSAGES.fine(() -> bailout.getReason() + ": " + source);
+            throw bailout;
+        }
     }
 
     @TruffleBoundary
-    @Override
-    public TruffleObject compile(RegexSource source) throws RegexSyntaxException {
-        return new TRegexCompilationRequest(this, source).compile();
+    private static RegexObject doCompile(RegexLanguage language, RegexSource source) throws RegexSyntaxException {
+        TRegexCompilationRequest compReq = new TRegexCompilationRequest(language, source);
+        RegexExecNode execNode = compReq.compile();
+        return new RegexObject(execNode, source, compReq.getAst().getFlavorSpecificFlags(), compReq.getAst().getNumberOfCaptureGroups(), compReq.getNamedCaptureGroups());
     }
 
     @TruffleBoundary
-    public TRegexDFAExecutorNode compileEagerDFAExecutor(RegexSource source) {
-        return new TRegexCompilationRequest(this, source).compileEagerDFAExecutor();
+    public static TRegexDFAExecutorNode compileEagerDFAExecutor(RegexLanguage language, RegexSource source) {
+        TRegexDFAExecutorNode executor = new TRegexCompilationRequest(language, source).compileEagerDFAExecutor();
+        if (executor.getCGTrackingCost() > TRegexOptions.TRegexMaxEagerCGDFACost) {
+            throw new UnsupportedRegexException("Too much additional capture group tracking overhead");
+        }
+        return executor;
+    }
+
+    @TruffleBoundary
+    public static LazyCaptureGroupRegexSearchNode compileLazyDFAExecutor(RegexLanguage language, NFA nfa, RegexProfile rootNodeProfile, boolean allowSimpleCG) {
+        return new TRegexCompilationRequest(language, nfa).compileLazyDFAExecutor(rootNodeProfile, allowSimpleCG);
+    }
+
+    @TruffleBoundary
+    public static TRegexBacktrackingNFAExecutorNode compileBacktrackingExecutor(RegexLanguage language, NFA nfa) {
+        return new TRegexCompilationRequest(language, nfa).compileBacktrackingExecutor();
+    }
+
+    @TruffleBoundary
+    private static boolean shouldLogCompilationTime() {
+        return Loggers.LOG_TOTAL_COMPILATION_TIME.isLoggable(Level.FINE);
+    }
+
+    @TruffleBoundary
+    private static void logCompilationTime(RegexSource regexSource, DebugUtil.Timer timer, RegexObject regex) {
+        if (timer != null) {
+            Loggers.LOG_TOTAL_COMPILATION_TIME.log(Level.FINE, "Total compilation time: {0}, matcher: {1}, regex: {2}", new Object[]{
+                            timer.elapsedToString(),
+                            regex == null ? "bailout" : regex.getLabel(),
+                            DebugUtil.jsStringEscape(regexSource.toString())
+            });
+        }
     }
 }

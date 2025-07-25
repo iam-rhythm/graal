@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -27,21 +27,29 @@ package com.oracle.svm.core.posix;
 import static com.oracle.svm.core.posix.headers.Signal.SignalEnum.SIGKILL;
 import static com.oracle.svm.core.posix.headers.Signal.SignalEnum.SIGTERM;
 
-import org.graalvm.nativeimage.StackValue;
-import org.graalvm.nativeimage.c.function.CEntryPointLiteral;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Map;
+import java.util.Map.Entry;
+import java.util.stream.Collectors;
+
 import org.graalvm.nativeimage.c.type.CCharPointer;
 import org.graalvm.nativeimage.c.type.CTypeConversion;
 import org.graalvm.nativeimage.c.type.CTypeConversion.CCharPointerHolder;
-import org.graalvm.nativeimage.impl.ProcessPropertiesSupport;
 import org.graalvm.word.PointerBase;
-import org.graalvm.word.WordFactory;
 
+import com.oracle.svm.core.BaseProcessPropertiesSupport;
+import com.oracle.svm.core.c.locale.LocaleSupport;
+import com.oracle.svm.core.graal.stackvalue.UnsafeStackValue;
+import com.oracle.svm.core.memory.UntrackedNullableNativeMemory;
 import com.oracle.svm.core.posix.headers.Dlfcn;
-import com.oracle.svm.core.posix.headers.LibC;
 import com.oracle.svm.core.posix.headers.Signal;
 import com.oracle.svm.core.posix.headers.Stdlib;
+import com.oracle.svm.core.posix.headers.Unistd;
 
-public abstract class PosixProcessPropertiesSupport implements ProcessPropertiesSupport {
+import jdk.graal.compiler.word.Word;
+
+public abstract class PosixProcessPropertiesSupport extends BaseProcessPropertiesSupport {
 
     @Override
     public long getProcessID() {
@@ -75,42 +83,74 @@ public abstract class PosixProcessPropertiesSupport implements ProcessProperties
 
     @Override
     public String getObjectFile(String symbol) {
-        return getObjectPathDefiningSymbol(symbol);
-    }
-
-    @Override
-    public String getObjectFile(CEntryPointLiteral<?> symbol) {
-        return getObjectPathDefiningAddress(symbol.getFunctionPointer());
-    }
-
-    @Override
-    public String setLocale(String category, String locale) {
-        return PosixUtils.setLocale(category, locale);
-    }
-
-    static String getObjectPathDefiningSymbol(String symbol) {
         try (CTypeConversion.CCharPointerHolder symbolHolder = CTypeConversion.toCString(symbol)) {
             PointerBase symbolAddress = Dlfcn.dlsym(Dlfcn.RTLD_DEFAULT(), symbolHolder.get());
             if (symbolAddress.isNull()) {
                 return null;
             }
-            return getObjectPathDefiningAddress(symbolAddress);
+            return getObjectFile(symbolAddress);
         }
     }
 
-    static String getObjectPathDefiningAddress(PointerBase symbolAddress) {
-        Dlfcn.Dl_info info = StackValue.get(Dlfcn.Dl_info.class);
+    @Override
+    public String getObjectFile(PointerBase symbolAddress) {
+        Dlfcn.Dl_info info = UnsafeStackValue.get(Dlfcn.Dl_info.class);
         if (Dlfcn.dladdr(symbolAddress, info) == 0) {
             return null;
         }
-        CCharPointer realpath = Stdlib.realpath(info.dli_fname(), WordFactory.nullPointer());
+        CCharPointer realpath = Stdlib.realpath(info.dli_fname(), Word.nullPointer());
         if (realpath.isNull()) {
             return null;
         }
         try {
             return CTypeConversion.toJavaString(realpath);
         } finally {
-            LibC.free(realpath);
+            UntrackedNullableNativeMemory.free(realpath);
+        }
+    }
+
+    /** This method is unsafe and should not be used, see {@link LocaleSupport}. */
+    @Override
+    @SuppressWarnings("deprecation")
+    public String setLocale(String category, String locale) {
+        return PosixUtils.setLocale(category, locale);
+    }
+
+    @Override
+    public void exec(Path executable, String[] args) {
+        if (!Files.isExecutable(executable)) {
+            throw new RuntimeException("Path " + executable + " does not point to executable file");
+        }
+
+        try (CTypeConversion.CCharPointerHolder pathHolder = CTypeConversion.toCString(executable.toString());
+                        CTypeConversion.CCharPointerPointerHolder argvHolder = CTypeConversion.toCStrings(args)) {
+            if (Unistd.execv(pathHolder.get(), argvHolder.get()) != 0) {
+                String msg = PosixUtils.lastErrorString("Executing " + executable + " with arguments " + String.join(" ", args) + " failed");
+                throw new RuntimeException(msg);
+            }
+        }
+    }
+
+    @Override
+    public void exec(Path executable, String[] args, Map<String, String> env) {
+        if (!Files.isExecutable(executable)) {
+            throw new RuntimeException("Path " + executable + " does not point to executable file");
+        }
+
+        String[] envArray = new String[env.size()];
+        int i = 0;
+        for (Entry<String, String> e : env.entrySet()) {
+            envArray[i++] = e.getKey() + "=" + e.getValue();
+        }
+
+        try (CTypeConversion.CCharPointerHolder pathHolder = CTypeConversion.toCString(executable.toString());
+                        CTypeConversion.CCharPointerPointerHolder argvHolder = CTypeConversion.toCStrings(args);
+                        CTypeConversion.CCharPointerPointerHolder envpHolder = CTypeConversion.toCStrings(envArray)) {
+            if (Unistd.execve(pathHolder.get(), argvHolder.get(), envpHolder.get()) != 0) {
+                String envString = env.entrySet().stream().map(e -> e.getKey() + "=" + e.getValue()).collect(Collectors.joining(" "));
+                String msg = PosixUtils.lastErrorString("Executing " + executable + " with arguments " + String.join(" ", args) + " and environment " + envString + " failed");
+                throw new RuntimeException(msg);
+            }
         }
     }
 
@@ -121,14 +161,14 @@ public abstract class PosixProcessPropertiesSupport implements ProcessProperties
          * pointer to it, so I have to free it.
          */
         try (CCharPointerHolder pathHolder = CTypeConversion.toCString(path)) {
-            final CCharPointer realpathPointer = Stdlib.realpath(pathHolder.get(), WordFactory.nullPointer());
-            if (realpathPointer.isNull()) {
+            CCharPointer realpath = Stdlib.realpath(pathHolder.get(), Word.nullPointer());
+            if (realpath.isNull()) {
                 /* Failure to find a real path. */
                 return null;
             } else {
                 /* Success */
-                final String result = CTypeConversion.toJavaString(realpathPointer);
-                LibC.free(realpathPointer);
+                String result = CTypeConversion.toJavaString(realpath);
+                UntrackedNullableNativeMemory.free(realpath);
                 return result;
             }
         }

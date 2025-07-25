@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2019, Oracle and/or its affiliates.
+ * Copyright (c) 2016, 2020, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -29,24 +29,22 @@
  */
 package com.oracle.truffle.llvm.parser;
 
-import com.oracle.truffle.llvm.parser.model.SymbolImpl;
-import com.oracle.truffle.llvm.parser.model.ValueSymbol;
-import com.oracle.truffle.llvm.parser.model.blocks.InstructionBlock;
-import com.oracle.truffle.llvm.parser.model.functions.FunctionDefinition;
-import com.oracle.truffle.llvm.parser.model.symbols.instructions.PhiInstruction;
-import com.oracle.truffle.llvm.parser.model.symbols.instructions.TerminatingInstruction;
-import com.oracle.truffle.llvm.parser.model.visitors.FunctionVisitor;
-import com.oracle.truffle.llvm.parser.model.visitors.InstructionVisitorAdapter;
-import com.oracle.truffle.llvm.parser.model.visitors.ModelVisitor;
-import com.oracle.truffle.llvm.runtime.except.LLVMParserException;
-
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
 
-public final class LLVMPhiManager implements ModelVisitor {
+import com.oracle.truffle.llvm.parser.model.SymbolImpl;
+import com.oracle.truffle.llvm.parser.model.blocks.InstructionBlock;
+import com.oracle.truffle.llvm.parser.model.functions.FunctionDefinition;
+import com.oracle.truffle.llvm.parser.model.symbols.instructions.PhiInstruction;
+import com.oracle.truffle.llvm.parser.model.symbols.instructions.TerminatingInstruction;
+import com.oracle.truffle.llvm.parser.model.visitors.FunctionVisitor;
+import com.oracle.truffle.llvm.parser.model.visitors.InstructionVisitorAdapter;
+import com.oracle.truffle.llvm.runtime.except.LLVMParserException;
+
+public final class LLVMPhiManager {
 
     private LLVMPhiManager() {
     }
@@ -85,15 +83,15 @@ public final class LLVMPhiManager implements ModelVisitor {
         }
     }
 
-    static final class Phi {
+    public static final class Phi {
 
         private final InstructionBlock block;
 
-        private final ValueSymbol phi;
+        private final PhiInstruction phi;
 
         private final SymbolImpl value;
 
-        private Phi(InstructionBlock block, ValueSymbol phi, SymbolImpl value) {
+        private Phi(InstructionBlock block, PhiInstruction phi, SymbolImpl value) {
             this.block = block;
             this.phi = phi;
             this.value = value;
@@ -103,7 +101,7 @@ public final class LLVMPhiManager implements ModelVisitor {
             return block;
         }
 
-        public ValueSymbol getPhiValue() {
+        public PhiInstruction getPhiValue() {
             return phi;
         }
 
@@ -112,10 +110,10 @@ public final class LLVMPhiManager implements ModelVisitor {
         }
     }
 
+    @SuppressWarnings({"unchecked", "rawtypes"})
     public static ArrayList<Phi>[] getPhisForSuccessors(TerminatingInstruction terminatingInstruction, List<Phi> phis) {
         assert phis != null;
 
-        @SuppressWarnings("unchecked")
         ArrayList<Phi>[] phisPerSuccessor = new ArrayList[terminatingInstruction.getSuccessorCount()];
         for (int i = 0; i < phisPerSuccessor.length; i++) {
             phisPerSuccessor[i] = new ArrayList<>();

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2018, Oracle and/or its affiliates.
+ * Copyright (c) 2016, 2019, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -31,9 +31,8 @@ package com.oracle.truffle.llvm.parser.metadata;
 
 import com.oracle.truffle.llvm.parser.listeners.Metadata;
 
-public final class MDSubprogram extends MDName implements MDBaseNode {
+public final class MDSubprogram extends MDNamedLocation implements MDBaseNode {
 
-    private final long line;
     private final boolean isLocalToUnit;
     private final boolean isDefinedInCompileUnit;
     private final long scopeLine;
@@ -42,20 +41,18 @@ public final class MDSubprogram extends MDName implements MDBaseNode {
     private final long flags;
     private final boolean isOptimized;
 
-    private MDBaseNode scope;
     private MDBaseNode displayName;
     private MDBaseNode linkageName;
-    private MDBaseNode file;
     private MDBaseNode type;
     private MDBaseNode containingType;
     private MDBaseNode templateParams;
     private MDBaseNode declaration;
-    private MDBaseNode variables;
     private MDBaseNode function;
     private MDBaseNode compileUnit;
 
     private MDSubprogram(long line, boolean isLocalToUnit, boolean isDefinedInCompileUnit, long scopeLine, long virtuality, long virtualIndex, long flags, boolean isOptimized) {
-        this.line = line;
+        super(line);
+
         this.isLocalToUnit = isLocalToUnit;
         this.isDefinedInCompileUnit = isDefinedInCompileUnit;
         this.scopeLine = scopeLine;
@@ -64,15 +61,12 @@ public final class MDSubprogram extends MDName implements MDBaseNode {
         this.flags = flags;
         this.isOptimized = isOptimized;
 
-        this.scope = MDVoidNode.INSTANCE;
         this.displayName = MDVoidNode.INSTANCE;
         this.linkageName = MDVoidNode.INSTANCE;
-        this.file = MDVoidNode.INSTANCE;
         this.type = MDVoidNode.INSTANCE;
         this.containingType = MDVoidNode.INSTANCE;
         this.templateParams = MDVoidNode.INSTANCE;
         this.declaration = MDVoidNode.INSTANCE;
-        this.variables = MDVoidNode.INSTANCE;
         this.function = MDVoidNode.INSTANCE;
         this.compileUnit = MDVoidNode.INSTANCE;
     }
@@ -88,14 +82,6 @@ public final class MDSubprogram extends MDName implements MDBaseNode {
 
     public MDBaseNode getLinkageName() {
         return linkageName;
-    }
-
-    public MDBaseNode getFile() {
-        return file;
-    }
-
-    public long getLine() {
-        return line;
     }
 
     public MDBaseNode getType() {
@@ -142,14 +128,6 @@ public final class MDSubprogram extends MDName implements MDBaseNode {
         return declaration;
     }
 
-    public MDBaseNode getVariables() {
-        return variables;
-    }
-
-    public MDBaseNode getScope() {
-        return scope;
-    }
-
     public void setFunction(MDBaseNode function) {
         this.function = function;
     }
@@ -169,17 +147,11 @@ public final class MDSubprogram extends MDName implements MDBaseNode {
     @Override
     public void replace(MDBaseNode oldValue, MDBaseNode newValue) {
         super.replace(oldValue, newValue);
-        if (scope == oldValue) {
-            scope = newValue;
-        }
         if (displayName == oldValue) {
             displayName = newValue;
         }
         if (linkageName == oldValue) {
             linkageName = newValue;
-        }
-        if (file == oldValue) {
-            file = newValue;
         }
         if (type == oldValue) {
             type = newValue;
@@ -193,9 +165,6 @@ public final class MDSubprogram extends MDName implements MDBaseNode {
         if (declaration == oldValue) {
             declaration = newValue;
         }
-        if (variables == oldValue) {
-            variables = newValue;
-        }
         if (function == oldValue) {
             function = newValue;
         }
@@ -204,57 +173,64 @@ public final class MDSubprogram extends MDName implements MDBaseNode {
         }
     }
 
-    private static final int ARGINDEX_38_SCOPE = 1;
-    private static final int ARGINDEX_38_NAME = 2;
-    private static final int ARGINDEX_38_LINKAGENAME = 3;
-    private static final int ARGINDEX_38_FILE = 4;
-    private static final int ARGINDEX_38_LINE = 5;
-    private static final int ARGINDEX_38_TYPE = 6;
-    private static final int ARGINDEX_38_LOCALTOUNIT = 7;
-    private static final int ARGINDEX_38_DEFINEDINCOMPILEUNIT = 8;
-    private static final int ARGINDEX_38_SCOPELINE = 9;
-    private static final int ARGINDEX_38_CONTAININGTYPE = 10;
-    private static final int ARGINDEX_38_VIRTUALITY = 11;
-    private static final int ARGINDEX_38_VIRTUALINDEX = 12;
-    private static final int ARGINDEX_38_FLAGS = 13;
-    private static final int ARGINDEX_38_OPTIMIZED = 14;
-    private static final int ARGINDEX_38_FUNCTION = 15;
-    private static final int ARGINDEX_38_COMPILEUNIT = 15;
-    private static final int ARGINDEX_38_TEMPLATEPARAMS = 15;
-    private static final int ARGINDEX_38_DECLARATION = 16;
-    private static final int ARGINDEX_38_VARIABLES = 17;
-    private static final int OFFSET_INDICATOR = 19;
-    private static final int UNIT_INDICATOR = 0;
+    public static MDSubprogram createNewFormat(long[] args, MetadataValueList md) {
+        final boolean localToCompileUnit;
+        final boolean definedInCompileUnit;
+        final boolean optimized;
+        final long virtuality;
 
-    public static MDSubprogram create38(long[] args, MetadataValueList md) {
-        final int fnOffset = args.length == OFFSET_INDICATOR ? 1 : 0;
-        final long line = args[ARGINDEX_38_LINE];
-        final boolean localToCompileUnit = args[ARGINDEX_38_LOCALTOUNIT] == 1;
-        final boolean definedInCompileUnit = args[ARGINDEX_38_DEFINEDINCOMPILEUNIT] == 1;
-        final long scopeLine = args[ARGINDEX_38_SCOPELINE];
-        final long virtuality = args[ARGINDEX_38_VIRTUALITY];
-        final long virtualIndex = args[ARGINDEX_38_VIRTUALINDEX];
-        final long flags = args[ARGINDEX_38_FLAGS];
-        final boolean optimized = args[ARGINDEX_38_OPTIMIZED] == 1;
+        final boolean hasDistinctFlags = (args[0] & 4) != 0;
+        if (hasDistinctFlags) {
+            // llvm introduces a new format to store these
+            final long newFormatFlags = args[9];
+            localToCompileUnit = (newFormatFlags & (1 << 2)) != 0;
+            definedInCompileUnit = (newFormatFlags & (1 << 3)) != 0;
+            optimized = (newFormatFlags & (1 << 4)) != 0;
+            virtuality = newFormatFlags & 0b11;
+        } else {
+            localToCompileUnit = args[7] == 1;
+            definedInCompileUnit = args[8] == 1;
+            optimized = args[14] == 1;
+            virtuality = args[11];
+        }
+
+        final boolean hasUnit = (args[0] & 2) != 0;
+        boolean hasFunction = false;
+
+        // these are literally the same names as in llvm
+        int offsetA = 0;
+        int offsetB = 0;
+        if (!hasDistinctFlags) {
+            offsetA = 2;
+            offsetB = 2;
+            if (args.length != 19) {
+                hasFunction = !hasUnit;
+                offsetB++;
+            }
+        }
+
+        final long line = args[5];
+        final long scopeLine = args[7 + offsetA];
+        final long virtualIndex = args[10 + offsetA];
+        final long flags = args[11 + offsetA];
 
         final MDSubprogram subprogram = new MDSubprogram(line, localToCompileUnit, definedInCompileUnit, scopeLine, virtuality, virtualIndex, flags, optimized);
 
-        subprogram.scope = md.getNullable(args[ARGINDEX_38_SCOPE], subprogram);
-        subprogram.setName(md.getNullable(args[ARGINDEX_38_NAME], subprogram));
-        subprogram.linkageName = md.getNullable(args[ARGINDEX_38_LINKAGENAME], subprogram);
-        subprogram.file = md.getNullable(args[ARGINDEX_38_FILE], subprogram);
-        subprogram.type = md.getNullable(args[ARGINDEX_38_TYPE], subprogram);
-        subprogram.containingType = md.getNullable(args[ARGINDEX_38_CONTAININGTYPE], subprogram);
-        subprogram.templateParams = md.getNullable(args[ARGINDEX_38_TEMPLATEPARAMS + fnOffset], subprogram);
-        subprogram.declaration = md.getNullable(args[ARGINDEX_38_DECLARATION + fnOffset], subprogram);
-        subprogram.variables = md.getNullable(args[ARGINDEX_38_VARIABLES + fnOffset], subprogram);
+        subprogram.setScope(md.getNullable(args[1], subprogram));
+        subprogram.setName(md.getNullable(args[2], subprogram));
+        subprogram.linkageName = md.getNullable(args[3], subprogram);
+        subprogram.setFile(md.getNullable(args[4], subprogram));
+        subprogram.type = md.getNullable(args[6], subprogram);
+        subprogram.containingType = md.getNullable(args[8 + offsetA], subprogram);
+        subprogram.templateParams = md.getNullable(args[13 + offsetB], subprogram);
+        subprogram.declaration = md.getNullable(args[14 + offsetB], subprogram);
 
-        if (fnOffset != 0 && args[ARGINDEX_38_FUNCTION] != 0) {
-            subprogram.function = md.getNullable(args[ARGINDEX_38_FUNCTION], subprogram);
+        if (hasUnit) {
+            subprogram.compileUnit = md.getNullable(args[12 + offsetB], subprogram);
         }
 
-        if (args[UNIT_INDICATOR] >= 2) {
-            subprogram.compileUnit = md.getNullable(args[ARGINDEX_38_COMPILEUNIT], subprogram);
+        if (hasFunction) {
+            subprogram.function = md.getNullable(args[12 + offsetB], subprogram);
         }
 
         return subprogram;
@@ -277,7 +253,6 @@ public final class MDSubprogram extends MDName implements MDBaseNode {
     private static final int ARGINDEX_32_FN = 16;
     private static final int ARGINDEX_32_TEMPLATEPARAMS = 17;
     private static final int ARGINDEX_32_DECLARATION = 18;
-    private static final int ARGINDEX_32_VARIABLES = 19;
     private static final int ARGINDEX_32_SCOPELINE = 20;
 
     public static MDSubprogram create32(long[] args, Metadata md) {
@@ -292,16 +267,15 @@ public final class MDSubprogram extends MDName implements MDBaseNode {
 
         final MDSubprogram subprogram = new MDSubprogram(line, localToCompileUnit, definedInCompileUnit, scopeLine, virtuality, virtualIndex, flags, optimized);
 
-        subprogram.scope = ParseUtil.resolveReference(args, ARGINDEX_32_SCOPE, subprogram, md);
+        subprogram.setScope(ParseUtil.resolveReference(args, ARGINDEX_32_SCOPE, subprogram, md));
         subprogram.setName(ParseUtil.resolveReference(args, ARGINDEX_32_NAME, subprogram, md));
         subprogram.displayName = ParseUtil.resolveReference(args, ARGINDEX_32_DISPLAYNAME, subprogram, md);
         subprogram.linkageName = ParseUtil.resolveReference(args, ARGINDEX_32_LINKAGENAME, subprogram, md);
-        subprogram.file = ParseUtil.resolveReference(args, ARGINDEX_32_FILE, subprogram, md);
+        subprogram.setFile(ParseUtil.resolveReference(args, ARGINDEX_32_FILE, subprogram, md));
         subprogram.type = ParseUtil.resolveReference(args, ARGINDEX_32_TYPE, subprogram, md);
         subprogram.containingType = ParseUtil.resolveReference(args, ARGINDEX_32_CONTAININGTYPE, subprogram, md);
         subprogram.templateParams = ParseUtil.resolveReference(args, ARGINDEX_32_TEMPLATEPARAMS, subprogram, md);
         subprogram.declaration = ParseUtil.resolveReference(args, ARGINDEX_32_DECLARATION, subprogram, md);
-        subprogram.variables = ParseUtil.resolveReference(args, ARGINDEX_32_VARIABLES, subprogram, md);
 
         subprogram.function = ParseUtil.resolveSymbol(args, ARGINDEX_32_FN, md);
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -51,6 +51,7 @@ import org.graalvm.options.OptionDescriptor;
 import org.graalvm.options.OptionDescriptors;
 import org.graalvm.options.OptionKey;
 import org.graalvm.options.OptionStability;
+import org.graalvm.polyglot.SandboxPolicy;
 
 /**
  * Describes the attributes of an option whose {@link OptionKey value} is in a static field
@@ -74,7 +75,7 @@ import org.graalvm.options.OptionStability;
  * <p>
  * <b>Example usage:</b>
  *
- * {@link OptionSnippets.MyLanguage}.
+ * {@snippet file="com/oracle/truffle/api/Option.java" region="OptionSnippets.MyLanguage"}.
  *
  * @see OptionDescriptor
  * @see Option.Group
@@ -105,6 +106,12 @@ public @interface Option {
      * {@code "%n"}. The generated an option descriptor returns this value as result of
      * {@link OptionDescriptor#getHelp()}.
      *
+     * Recommendation:
+     * <ul>
+     * <li>Include the default value for the option and the end of the text, e.g.
+     * <code>"Enable or disable the option (default: true)."</code></li>
+     * </ul>
+     *
      * @since 0.27
      */
     String help();
@@ -118,6 +125,14 @@ public @interface Option {
     boolean deprecated() default false;
 
     /**
+     * Returns the deprecation reason and the recommended fix. The generated option descriptor
+     * returns this value as result of {@link OptionDescriptor#getDeprecationMessage()}.
+     *
+     * @since 20.1.0
+     */
+    String deprecationMessage() default "";
+
+    /**
      * Specifies the category of the option. The generated option descriptor returns this value as
      * result of {@link OptionDescriptor#getCategory()}.
      *
@@ -129,9 +144,55 @@ public @interface Option {
      * Defines the stability of this option. The default value is
      * {@link OptionStability#EXPERIMENTAL}.
      *
-     * @since 1.0
+     * @since 19.0
      */
     OptionStability stability() default OptionStability.EXPERIMENTAL;
+
+    /**
+     * Describes in short the syntax of accepted values for this option. This value is used when
+     * generating help messages to better explain how to use the option. Combine with the help
+     * message to illustrate to users how to correctly use the option. For example:
+     *
+     * <pre>
+     * &#64;Option(name = "Enabled", help = "Enable/Disable the option.", usageSyntax = "true|false")
+     * </pre>
+     *
+     * Recommendations:
+     * <ul>
+     * <li>if the option accepts a discrete number of values (e.g. boolean, enum) list the values
+     * separated by a '|' character. The default value for enums should be placed as the first in
+     * the list. e.g. <code>"true|false"</code>, <code>"none|red|green|blue|white"</code></li>
+     * <li>if the options accepts a value representing a well-known concept or a number representing
+     * particular units, place that concept/unit between &lt; and &gt; e.g.
+     * <code>"&lt;ms&gt;"</code>, <code>"&lt;path&gt;"</code>, <code>"&lt;country&gt;"</code>,
+     * <code>"&lt;&gt;"</code></li>
+     * <li>if the options accepts a range of numbers use the range syntax: [a,b] for inclusive range
+     * from a to b, (a, b) for exclusive range from a to b, [a, b) for range from a to b including a
+     * and (a, b] for range from a to b including b. If the range is infinite use inf and -inf. For
+     * example: <code>"[0, 100]"</code>, <code>"(0.0, 1.0)"</code>, <code>"[0, inf)</code>.
+     * <li>if the options accepts a comma-separated list, use two comma-separated values and a
+     * <code>...</code>. Apply these same recommendations to individual values, e.g.
+     * <code>"&lt;targetName&gt;,&lt;targetName&gt;,..."</code>.
+     * <li>if the options accepts a custom format, describe the format in a generic manner e.g. ip
+     * address - <code>"*.*.*.*"</code>, CSV Person -
+     * <code>"&lt;firstName&gt;,&lt;lastName&gt;,&lt;age&gt;"</code>.
+     * </ul>
+     *
+     * @since 22.1
+     */
+    String usageSyntax() default "";
+
+    /**
+     * Specifies the most strict sandbox policy in which the option can be used. The option can be
+     * used for an engine/context with the specified sandbox policy or a weaker one. For example, if
+     * an option specifies {@code ISOLATED} policy, it can be used for an engine/context configured
+     * with sandbox policy {@code TRUSTED}, {@code CONSTRAINED} or {@code ISOLATED}. But it cannot
+     * be used for an engine/context configured with the {@code UNTRUSTED} sandbox policy.
+     *
+     * @see SandboxPolicy
+     * @since 23.0
+     */
+    SandboxPolicy sandbox() default SandboxPolicy.TRUSTED;
 
     /**
      * Must be applied on classes containing {@link Option option} fields to specify a name prefix
@@ -146,7 +207,7 @@ public @interface Option {
      */
     @Retention(RetentionPolicy.CLASS)
     @Target(ElementType.TYPE)
-    public @interface Group {
+    @interface Group {
 
         /**
          * A set of group names that are used as prefix for all options of the annotated class. If
@@ -171,9 +232,9 @@ public @interface Option {
 
 class OptionSnippets {
 
-    // @formatter:off
+    // @formatter:off // @replace regex='.*' replacement=''
 
-    // BEGIN: OptionSnippets.MyLanguage
+    // @start region="OptionSnippets.MyLanguage"
     @TruffleLanguage.Registration(id = "mylang", name = "My Language",
                                   version = "1.0")
     abstract static class MyLanguage extends TruffleLanguage<Context> {
@@ -203,7 +264,7 @@ class OptionSnippets {
             return new MyLanguageOptionDescriptors();
         }
     }
-    // END: OptionSnippets.MyLanguage
+    // @end region="OptionSnippets.MyLanguage"
 
     static class MyLanguageOptionDescriptors implements OptionDescriptors {
 

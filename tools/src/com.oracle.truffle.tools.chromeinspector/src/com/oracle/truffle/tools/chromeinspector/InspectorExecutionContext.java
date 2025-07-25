@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -30,14 +30,16 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Level;
 
 import com.oracle.truffle.api.TruffleLogger;
 import com.oracle.truffle.api.debug.DebugException;
 import com.oracle.truffle.api.debug.DebugValue;
+import com.oracle.truffle.api.debug.DebuggerSession;
 import com.oracle.truffle.api.instrumentation.EventBinding;
 import com.oracle.truffle.api.instrumentation.SourceFilter;
 import com.oracle.truffle.api.instrumentation.TruffleInstrument;
@@ -51,38 +53,46 @@ import com.oracle.truffle.tools.chromeinspector.types.RemoteObject;
  */
 public final class InspectorExecutionContext {
 
+    public static final String VALUE_NOT_READABLE = "<not readable>";
     private static final AtomicLong LAST_ID = new AtomicLong(0);
 
     private final String name;
     private final TruffleInstrument.Env env;
+    private final PrintWriter infoOut;
     private final PrintWriter err;
     private final List<Listener> listeners = Collections.synchronizedList(new ArrayList<>(3));
     private final long id = LAST_ID.incrementAndGet();
-    private final boolean[] runPermission = new boolean[]{false};
+    private final CountDownLatch runPermission = new CountDownLatch(1);
     private final boolean inspectInternal;
     private final boolean inspectInitialization;
     private final List<URI> sourceRoots;
     private final TruffleLogger log;
-    private final ThreadLocal<Boolean> logging = new ThreadLocal<>();
+    // Till the legacy TruffleLanguage.toString() is around, we must keep this as true
+    private final boolean allowToStringSideEffects = true;
+    private final Long suspensionTimeout;
 
     private volatile DebuggerSuspendedInfo suspendedInfo;
     private volatile SuspendedThreadExecutor suspendThreadExecutor;
     private RemoteObjectsHandler roh;
-    private ScriptsHandler sch;
-    private EventBinding<ScriptsHandler> schBinding;
-    private AtomicInteger schCounter;
+    private volatile ScriptsHandler scriptsHandler;
+    private volatile EventBinding<ScriptsHandler> schBinding;
+    private int schCounter;
     private volatile String lastMimeType = "text/javascript";   // Default JS
     private volatile String lastLanguage = "js";
     private boolean synchronous = false;
+    private boolean customObjectFormatterEnabled = false;
 
-    public InspectorExecutionContext(String name, boolean inspectInternal, boolean inspectInitialization, TruffleInstrument.Env env, List<URI> sourceRoots, PrintWriter err) {
+    public InspectorExecutionContext(String name, boolean inspectInternal, boolean inspectInitialization, TruffleInstrument.Env env, List<URI> sourceRoots, PrintWriter infoOut, PrintWriter err,
+                    Long suspensionTimeout) {
         this.name = name;
         this.inspectInternal = inspectInternal;
         this.inspectInitialization = inspectInitialization;
         this.env = env;
         this.sourceRoots = sourceRoots;
+        this.infoOut = infoOut;
         this.err = err;
         this.log = env.getLogger("");
+        this.suspensionTimeout = suspensionTimeout;
     }
 
     public boolean isInspectInternal() {
@@ -93,6 +103,10 @@ public final class InspectorExecutionContext {
         return inspectInitialization;
     }
 
+    public boolean areToStringSideEffectsAllowed() {
+        return allowToStringSideEffects;
+    }
+
     public TruffleInstrument.Env getEnv() {
         return env;
     }
@@ -101,49 +115,30 @@ public final class InspectorExecutionContext {
         return id;
     }
 
+    public PrintWriter getInfoOutput() {
+        return infoOut;
+    }
+
     public PrintWriter getErr() {
         return err;
     }
 
     public void logMessage(String prefix, Object message) {
         if (log.isLoggable(Level.FINE)) {
-            setLogging(true);
-            try {
-                log.fine("CONTEXT " + id + " " + prefix + message);
-            } finally {
-                setLogging(false);
-            }
+            log.fine("CONTEXT " + id + " " + prefix + message);
         }
     }
 
     public void logException(Throwable ex) {
         if (log.isLoggable(Level.FINE)) {
-            doLogException("CONTEXT " + id, ex);
+            log.log(Level.FINE, "CONTEXT " + id, ex);
         }
     }
 
     public void logException(String prefix, Throwable ex) {
         if (log.isLoggable(Level.FINE)) {
-            doLogException("CONTEXT " + id + " " + prefix, ex);
+            log.log(Level.FINE, "CONTEXT " + id + " " + prefix, ex);
         }
-    }
-
-    private void doLogException(String message, Throwable ex) {
-        setLogging(true);
-        try {
-            log.log(Level.FINE, message, ex);
-        } finally {
-            setLogging(false);
-        }
-    }
-
-    boolean isLogging() {
-        Boolean is = logging.get();
-        return is != null && is;
-    }
-
-    private void setLogging(boolean is) {
-        logging.set(is);
     }
 
     Iterable<URI> getSourcePath() {
@@ -152,34 +147,49 @@ public final class InspectorExecutionContext {
 
     public void doRunIfWaitingForDebugger() {
         fireContextCreated();
-        synchronized (runPermission) {
-            runPermission[0] = true;
-            runPermission.notifyAll();
-        }
+        runPermission.countDown();
     }
 
     public boolean canRun() {
-        synchronized (runPermission) {
-            return runPermission[0];
-        }
+        return runPermission.getCount() == 0;
+    }
+
+    Long getSuspensionTimeout() {
+        return suspensionTimeout;
     }
 
     public ScriptsHandler acquireScriptsHandler() {
-        if (sch == null) {
-            sch = new ScriptsHandler(inspectInternal);
-            schBinding = env.getInstrumenter().attachLoadSourceListener(SourceFilter.ANY, sch, true);
-            schCounter = new AtomicInteger(0);
-        }
-        schCounter.incrementAndGet();
-        return sch;
+        return acquireScriptsHandler(null);
     }
 
-    public void releaseScriptsHandler() {
-        if (schCounter.decrementAndGet() == 0) {
+    // Acquire and associate with the debugger session.
+    ScriptsHandler acquireScriptsHandler(DebuggerSession debuggerSession) {
+        ScriptsHandler sh;
+        boolean attachListener = false;
+        synchronized (this) {
+            sh = scriptsHandler;
+            if (sh == null) {
+                scriptsHandler = sh = new ScriptsHandler(env, inspectInternal);
+                attachListener = true;
+                schCounter = 0;
+            }
+            schCounter++;
+        }
+        if (debuggerSession != null) {
+            sh.setDebuggerSession(debuggerSession);
+        }
+        if (attachListener) {
+            schBinding = env.getInstrumenter().attachLoadSourceListener(SourceFilter.ANY, sh, true);
+        }
+        return sh;
+    }
+
+    public synchronized void releaseScriptsHandler() {
+        if (--schCounter == 0) {
             schBinding.dispose();
             schBinding = null;
-            sch = null;
-            schCounter = null;
+            scriptsHandler.dispose();
+            scriptsHandler = null;
         }
     }
 
@@ -197,26 +207,31 @@ public final class InspectorExecutionContext {
         }
     }
 
-    public void waitForRunPermission() throws InterruptedException {
+    public boolean waitForRunPermission() throws InterruptedException {
+        return waitForRunPermission(null);
+    }
+
+    public boolean waitForRunPermission(Long timeoutMillis) throws InterruptedException {
         if (synchronous) {
-            return;
+            return true;
         }
-        synchronized (runPermission) {
-            while (!runPermission[0]) {
-                runPermission.wait();
-            }
+        if (timeoutMillis == null) {
+            runPermission.await();
+            return true;
+        } else {
+            return runPermission.await(timeoutMillis, TimeUnit.MILLISECONDS);
         }
     }
 
-    synchronized RemoteObjectsHandler getRemoteObjectsHandler() {
+    public synchronized RemoteObjectsHandler getRemoteObjectsHandler() {
         if (roh == null) {
-            roh = new RemoteObjectsHandler(err);
+            roh = new RemoteObjectsHandler(this);
         }
         return roh;
     }
 
-    public RemoteObject createAndRegister(DebugValue value) {
-        RemoteObject ro = new RemoteObject(value, getErr());
+    public RemoteObject createAndRegister(DebugValue value, boolean generatePreview) {
+        RemoteObject ro = new RemoteObject(value, generatePreview, this);
         if (ro.getId() != null) {
             getRemoteObjectsHandler().register(ro);
         }
@@ -224,12 +239,16 @@ public final class InspectorExecutionContext {
     }
 
     void setValue(DebugValue debugValue, CallArgument newValue) {
+        debugValue.set(getDebugValue(newValue, debugValue.getSession()));
+    }
+
+    DebugValue getDebugValue(CallArgument newValue, DebuggerSession session) {
         String objectId = newValue.getObjectId();
         if (objectId != null) {
             RemoteObject obj = getRemoteObjectsHandler().getRemote(objectId);
-            debugValue.set(obj.getDebugValue());
+            return obj.getDebugValue();
         } else {
-            debugValue.set(newValue.getPrimitiveValue());
+            return session.createPrimitiveValue(newValue.getPrimitiveValue(), null);
         }
     }
 
@@ -306,6 +325,14 @@ public final class InspectorExecutionContext {
 
     void setSuspendedInfo(DebuggerSuspendedInfo suspendedInfo) {
         this.suspendedInfo = suspendedInfo;
+        if (suspendedInfo == null) {
+            // not suspended, clear variables
+            synchronized (this) {
+                if (roh != null) {
+                    roh.reset();
+                }
+            }
+        }
     }
 
     DebuggerSuspendedInfo getSuspendedInfo() {
@@ -323,10 +350,8 @@ public final class InspectorExecutionContext {
         this.suspendedInfo = null;
         this.suspendThreadExecutor = null;
         this.roh = null;
-        assert sch == null;
-        synchronized (runPermission) {
-            runPermission[0] = false;
-        }
+        assert scriptsHandler == null;
+        runPermission.countDown();
     }
 
     public void setSynchronous(boolean synchronousExecution) {
@@ -335,6 +360,14 @@ public final class InspectorExecutionContext {
 
     public boolean isSynchronous() {
         return synchronous;
+    }
+
+    void setCustomObjectFormatterEnabled(boolean enabled) {
+        this.customObjectFormatterEnabled = enabled;
+    }
+
+    public boolean isCustomObjectFormatterEnabled() {
+        return this.customObjectFormatterEnabled;
     }
 
     public interface Listener {

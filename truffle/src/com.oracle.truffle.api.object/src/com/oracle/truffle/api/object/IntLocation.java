@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,38 +40,35 @@
  */
 package com.oracle.truffle.api.object;
 
-/** @since 0.8 or earlier */
-public interface IntLocation extends TypedLocation {
+/**
+ * Int-typed storage location.
+ *
+ * @since 0.8 or earlier
+ * @see Location
+ * @see DynamicObjectLibrary#getIntOrDefault
+ * @see DynamicObjectLibrary#putInt
+ */
+@Deprecated(since = "22.2")
+public interface IntLocation {
     /**
-     * @see #get(DynamicObject, Shape)
+     * @see Location#get(DynamicObject, Shape)
      * @since 0.8 or earlier
      */
+    @Deprecated(since = "22.2")
     int getInt(DynamicObject store, Shape shape);
 
     /**
-     * @see #get(DynamicObject, boolean)
+     * @see Location#get(DynamicObject, boolean)
      * @since 0.8 or earlier
      */
+    @Deprecated(since = "22.2")
     int getInt(DynamicObject store, boolean condition);
 
     /**
-     * @see #set(DynamicObject, Object)
+     * @see Location#set(DynamicObject, Object, Shape)
      * @since 0.8 or earlier
      */
-    void setInt(DynamicObject store, int value) throws FinalLocationException;
-
-    /**
-     * @see #set(DynamicObject, Object, Shape)
-     * @since 0.8 or earlier
-     */
+    @SuppressWarnings("deprecation")
+    @Deprecated(since = "22.2")
     void setInt(DynamicObject store, int value, Shape shape) throws FinalLocationException;
-
-    /**
-     * @see #set(DynamicObject, Object, Shape, Shape)
-     * @since 0.8 or earlier
-     */
-    void setInt(DynamicObject store, int value, Shape oldShape, Shape newShape);
-
-    /** @since 0.8 or earlier */
-    Class<Integer> getType();
 }

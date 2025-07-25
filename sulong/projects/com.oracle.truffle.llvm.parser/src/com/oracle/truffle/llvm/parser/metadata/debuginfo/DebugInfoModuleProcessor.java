@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates.
+ * Copyright (c) 2017, 2020, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -29,13 +29,17 @@
  */
 package com.oracle.truffle.llvm.parser.metadata.debuginfo;
 
+import static com.oracle.truffle.llvm.parser.metadata.debuginfo.DebugInfoCache.getDebugInfo;
+
 import java.math.BigInteger;
+import java.util.List;
 import java.util.Map;
 
 import com.oracle.truffle.llvm.parser.metadata.DwarfOpcode;
 import com.oracle.truffle.llvm.parser.metadata.MDBaseNode;
 import com.oracle.truffle.llvm.parser.metadata.MDCompileUnit;
 import com.oracle.truffle.llvm.parser.metadata.MDExpression;
+import com.oracle.truffle.llvm.parser.metadata.MDFile;
 import com.oracle.truffle.llvm.parser.metadata.MDGlobalVariable;
 import com.oracle.truffle.llvm.parser.metadata.MDGlobalVariableExpression;
 import com.oracle.truffle.llvm.parser.metadata.MDLocalVariable;
@@ -46,76 +50,52 @@ import com.oracle.truffle.llvm.parser.metadata.MetadataValueList;
 import com.oracle.truffle.llvm.parser.metadata.MetadataVisitor;
 import com.oracle.truffle.llvm.parser.model.ModelModule;
 import com.oracle.truffle.llvm.parser.model.SymbolImpl;
-import com.oracle.truffle.llvm.parser.model.functions.FunctionDeclaration;
-import com.oracle.truffle.llvm.parser.model.functions.FunctionDefinition;
 import com.oracle.truffle.llvm.parser.model.symbols.constants.integer.BigIntegerConstant;
-import com.oracle.truffle.llvm.parser.model.symbols.globals.GlobalAlias;
 import com.oracle.truffle.llvm.parser.model.symbols.globals.GlobalValueSymbol;
-import com.oracle.truffle.llvm.parser.model.symbols.globals.GlobalVariable;
-import com.oracle.truffle.llvm.parser.model.visitors.ModelVisitor;
-import com.oracle.truffle.llvm.runtime.LLVMContext;
-import com.oracle.truffle.llvm.runtime.debug.type.LLVMSourceStaticMemberType;
+import com.oracle.truffle.llvm.runtime.debug.scope.LLVMSourceFileReference;
 import com.oracle.truffle.llvm.runtime.debug.scope.LLVMSourceSymbol;
+import com.oracle.truffle.llvm.runtime.debug.type.LLVMSourceStaticMemberType;
 import com.oracle.truffle.llvm.runtime.debug.type.LLVMSourceType;
 import com.oracle.truffle.llvm.runtime.types.VariableBitWidthType;
-import static com.oracle.truffle.llvm.parser.metadata.debuginfo.DebugInfoCache.getDebugInfo;
 
 public final class DebugInfoModuleProcessor {
 
     private DebugInfoModuleProcessor() {
     }
 
-    public static void processModule(ModelModule irModel, MetadataValueList metadata, LLVMContext context) {
+    public static void processModule(ModelModule irModel, MetadataValueList metadata) {
         MDUpgrade.perform(metadata);
 
-        final DebugInfoCache cache = new DebugInfoCache(metadata, irModel.getSourceStaticMembers(), context);
+        final DebugInfoCache cache = new DebugInfoCache(metadata, irModel.getSourceStaticMembers());
 
-        ImportsProcessor.process(metadata, context, cache);
+        ImportsProcessor.process(metadata, cache);
 
-        final Map<LLVMSourceSymbol, SymbolImpl> globals = irModel.getSourceGlobals();
-        final Map<LLVMSourceStaticMemberType, SymbolImpl> staticMembers = irModel.getSourceStaticMembers();
+        // in LLVM 3.9+ function debug information is available only in the corresponding
+        // function block in the *.bc file, we process the function metadata only after it is
+        // actually available
+        processSymbols(irModel.getGlobalVariables(), cache, irModel);
+        processSymbols(irModel.getAliases(), cache, irModel);
 
-        irModel.accept(new SymbolProcessor(cache, globals, staticMembers));
-
-        final MetadataProcessor mdParser = new MetadataProcessor(cache, globals, staticMembers);
+        final MetadataProcessor mdParser = new MetadataProcessor(cache, irModel.getSourceGlobals(), irModel.getSourceStaticMembers());
         final MDBaseNode cuNode = metadata.getNamedNode(MDNamedNode.COMPILEUNIT_NAME);
         if (cuNode != null) {
             cuNode.accept(mdParser);
         }
 
         irModel.setFunctionProcessor(new DebugInfoFunctionProcessor(cache));
+
+        FileProcessor fileProcessor = new FileProcessor(irModel);
+        metadata.accept(fileProcessor);
     }
 
-    private static final class SymbolProcessor implements ModelVisitor {
-
-        private final DebugInfoCache cache;
-        private final Map<LLVMSourceSymbol, SymbolImpl> sourceGlobals;
-        private final Map<LLVMSourceStaticMemberType, SymbolImpl> sourceStaticMembers;
-
-        SymbolProcessor(DebugInfoCache cache, Map<LLVMSourceSymbol, SymbolImpl> sourceGlobals, Map<LLVMSourceStaticMemberType, SymbolImpl> sourceStaticMembers) {
-            this.cache = cache;
-            this.sourceGlobals = sourceGlobals;
-            this.sourceStaticMembers = sourceStaticMembers;
-        }
-
-        @Override
-        public void visit(FunctionDeclaration function) {
-        }
-
-        @Override
-        public void visit(FunctionDefinition function) {
-            // in LLVM 3.9+ function debug information is available only in the corresponding
-            // function block in the *.bc file, we process the function metadata only after it is
-            // actually available
-        }
-
-        private void visitGlobal(GlobalValueSymbol global) {
+    private static void processSymbols(List<? extends GlobalValueSymbol> list, DebugInfoCache cache, ModelModule irModel) {
+        for (GlobalValueSymbol global : list) {
             MDBaseNode mdGlobal = getDebugInfo(global);
             if (mdGlobal != null) {
                 final boolean isGlobal = !(mdGlobal instanceof MDLocalVariable);
                 final LLVMSourceSymbol symbol = cache.getSourceSymbol(mdGlobal, isGlobal);
                 if (symbol != null) {
-                    sourceGlobals.put(symbol, global);
+                    irModel.getSourceGlobals().put(symbol, global);
                     global.setSourceSymbol(symbol);
                 }
 
@@ -128,21 +108,11 @@ public final class DebugInfoModuleProcessor {
                     if (declaration != MDVoidNode.INSTANCE) {
                         final LLVMSourceType sourceType = cache.parseType(declaration);
                         if (sourceType instanceof LLVMSourceStaticMemberType) {
-                            sourceStaticMembers.put((LLVMSourceStaticMemberType) sourceType, global);
+                            irModel.getSourceStaticMembers().put((LLVMSourceStaticMemberType) sourceType, global);
                         }
                     }
                 }
             }
-        }
-
-        @Override
-        public void visit(GlobalAlias alias) {
-            visitGlobal(alias);
-        }
-
-        @Override
-        public void visit(GlobalVariable variable) {
-            visitGlobal(variable);
         }
     }
 
@@ -226,6 +196,25 @@ public final class DebugInfoModuleProcessor {
             }
             return null;
         }
+
     }
 
+    /**
+     * Extracts all {@link MDFile} from the metadata and stores it as
+     * {@link LLVMSourceFileReference} in the {@link ModelModule}.
+     */
+    private static final class FileProcessor implements MetadataVisitor {
+
+        private final ModelModule module;
+
+        FileProcessor(ModelModule module) {
+            this.module = module;
+        }
+
+        @Override
+        public void visit(MDFile md) {
+            module.addSourceFileReference(md.toSourceFileReference());
+        }
+
+    }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2016, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -50,19 +50,16 @@ import org.graalvm.polyglot.Value;
 import org.junit.Assert;
 import org.junit.Test;
 
-import com.oracle.truffle.api.CompilerDirectives;
 import com.oracle.truffle.api.InstrumentInfo;
-import com.oracle.truffle.api.Scope;
 import com.oracle.truffle.api.TruffleLanguage;
 import com.oracle.truffle.api.debug.Debugger;
 import com.oracle.truffle.api.instrumentation.TruffleInstrument;
-import com.oracle.truffle.api.interop.ForeignAccess;
-import com.oracle.truffle.api.interop.KeyInfo;
-import com.oracle.truffle.api.interop.MessageResolution;
-import com.oracle.truffle.api.interop.Resolve;
+import com.oracle.truffle.api.interop.InteropLibrary;
 import com.oracle.truffle.api.interop.TruffleObject;
 import com.oracle.truffle.api.interop.UnknownIdentifierException;
-import com.oracle.truffle.api.nodes.Node;
+import com.oracle.truffle.api.interop.UnsupportedMessageException;
+import com.oracle.truffle.api.library.ExportLibrary;
+import com.oracle.truffle.api.library.ExportMessage;
 
 /**
  * Test that languages and other instruments are able to retrieve the Debugger instance.
@@ -96,10 +93,12 @@ public class DebuggerRetrievalTest {
         }
 
         @Override
-        protected Iterable<Scope> findTopScopes(Debugger context) {
-            return Collections.singleton(Scope.newBuilder("Debugger top scope", new TopScopeObject(context)).build());
+        protected Object getScope(Debugger context) {
+            return new TopScopeObject(context);
         }
 
+        @ExportLibrary(InteropLibrary.class)
+        @SuppressWarnings({"unused", "static-method"})
         static final class TopScopeObject implements TruffleObject {
 
             private final Debugger context;
@@ -108,58 +107,51 @@ public class DebuggerRetrievalTest {
                 this.context = context;
             }
 
-            @Override
-            public ForeignAccess getForeignAccess() {
-                return TopScopeObjectMessageResolutionForeign.ACCESS;
+            @ExportMessage
+            @SuppressWarnings("static-method")
+            boolean hasLanguage() {
+                return true;
             }
 
-            public static boolean isInstance(TruffleObject obj) {
-                return obj instanceof TopScopeObject;
+            @ExportMessage
+            @SuppressWarnings("static-method")
+            Class<? extends TruffleLanguage<?>> getLanguage() {
+                return LanguageThatNeedsDebugger.class;
             }
 
-            @MessageResolution(receiverType = TopScopeObject.class)
-            static class TopScopeObjectMessageResolution {
+            @ExportMessage
+            boolean isScope() {
+                return true;
+            }
 
-                @Resolve(message = "KEY_INFO")
-                abstract static class VarsMapInfoNode extends Node {
+            @ExportMessage
+            boolean hasMembers() {
+                return true;
+            }
 
-                    @SuppressWarnings("unused")
-                    public Object access(TopScopeObject ts, String name) {
-                        if ("debugger".equals(name)) {
-                            return KeyInfo.READABLE;
-                        } else {
-                            return 0;
-                        }
-                    }
-                }
+            @ExportMessage
+            boolean isMemberReadable(String member) {
+                return "debugger".equals(member);
+            }
 
-                @Resolve(message = "HAS_KEYS")
-                abstract static class HasKeysNode extends Node {
+            @ExportMessage
+            Object getMembers(boolean includeInternal) throws UnsupportedMessageException {
+                throw UnsupportedMessageException.create();
+            }
 
-                    @SuppressWarnings("unused")
-                    public Object access(TopScopeObject ts) {
-                        return true;
-                    }
-                }
-
-                @Resolve(message = "READ")
-                abstract static class VarsMapReadNode extends Node {
-
-                    @CompilerDirectives.TruffleBoundary
-                    public Object access(TopScopeObject ts, String name) {
-                        if ("debugger".equals(name)) {
-                            return ts.context != null;
-                        } else {
-                            throw UnknownIdentifierException.raise(name);
-                        }
-                    }
+            @ExportMessage
+            Object readMember(@SuppressWarnings("unused") String member) throws UnknownIdentifierException {
+                if ("debugger".equals(member)) {
+                    return context != null;
+                } else {
+                    throw UnknownIdentifierException.create(member);
                 }
             }
-        }
 
-        @Override
-        protected boolean isObjectOfLanguage(Object object) {
-            return false;
+            @ExportMessage
+            Object toDisplayString(boolean allowSideEffects) {
+                return "Debugger top scope";
+            }
         }
 
     }
@@ -175,8 +167,7 @@ public class DebuggerRetrievalTest {
         @Override
         protected void onCreate(TruffleInstrument.Env env) {
             Debugger debugger = env.lookup(env.getInstruments().get("debugger"), Debugger.class);
-            env.getOptions().set(debuggerKey, debugger.toString());
-            haveDebugger = true;
+            haveDebugger = debugger != null;
         }
 
         @Override

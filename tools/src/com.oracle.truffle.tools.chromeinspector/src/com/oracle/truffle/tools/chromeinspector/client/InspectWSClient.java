@@ -29,7 +29,6 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.net.InetSocketAddress;
-import java.net.Socket;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.nio.ByteBuffer;
@@ -41,13 +40,15 @@ import java.security.UnrecoverableKeyException;
 import java.security.cert.CertificateException;
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLSocketFactory;
 import javax.net.ssl.TrustManagerFactory;
 
+import com.oracle.truffle.tools.chromeinspector.instrument.Token;
 import org.graalvm.polyglot.io.MessageEndpoint;
 import com.oracle.truffle.api.TruffleOptions;
 
-import org.java_websocket.client.WebSocketClient;
-import org.java_websocket.handshake.ServerHandshake;
+import com.oracle.truffle.tools.utils.java_websocket.client.WebSocketClient;
+import com.oracle.truffle.tools.utils.java_websocket.handshake.ServerHandshake;
 
 import com.oracle.truffle.tools.chromeinspector.InspectorExecutionContext;
 import com.oracle.truffle.tools.chromeinspector.instrument.InspectorWSConnection;
@@ -75,6 +76,7 @@ public class InspectWSClient extends WebSocketClient implements InspectorWSConne
         }
     }
 
+    @SuppressWarnings("this-escape")
     public InspectWSClient(InetSocketAddress isa, String wsspath, InspectorExecutionContext executionContext, boolean debugBreak, boolean secure, KeyStoreOptions keyStoreOptions,
                     ConnectionWatcher connectionWatcher, PrintWriter info) throws IOException {
         super(getURI(isa, wsspath));
@@ -87,7 +89,7 @@ public class InspectWSClient extends WebSocketClient implements InspectorWSConne
             if (TruffleOptions.AOT) {
                 throw new IOException("Secure connection is not available in the native-image yet.");
             } else {
-                setSocket(createSecureSocket(keyStoreOptions));
+                setSocketFactory(createSecureSocketFactory(keyStoreOptions));
             }
         }
         try {
@@ -101,7 +103,7 @@ public class InspectWSClient extends WebSocketClient implements InspectorWSConne
         }
     }
 
-    private static Socket createSecureSocket(KeyStoreOptions keyStoreOptions) throws IOException {
+    private static SSLSocketFactory createSecureSocketFactory(KeyStoreOptions keyStoreOptions) throws IOException {
         String keyStoreFile = keyStoreOptions.getKeyStore();
         if (keyStoreFile != null) {
             try {
@@ -126,7 +128,7 @@ public class InspectWSClient extends WebSocketClient implements InspectorWSConne
 
                 SSLContext sslContext = SSLContext.getInstance("TLS");
                 sslContext.init(kmf.getKeyManagers(), tmf.getTrustManagers(), null);
-                return sslContext.getSocketFactory().createSocket();
+                return sslContext.getSocketFactory();
             } catch (KeyStoreException | KeyManagementException | NoSuchAlgorithmException | CertificateException | UnrecoverableKeyException ex) {
                 throw new IOException(ex);
             }
@@ -143,9 +145,9 @@ public class InspectWSClient extends WebSocketClient implements InspectorWSConne
     @Override
     public void onOpen(ServerHandshake sh) {
         executionContext.logMessage("CLIENT ws connection opened at ", getURI());
-        iss = InspectServerSession.create(executionContext, debugBreak, connectionWatcher);
+        iss = InspectServerSession.create(executionContext, debugBreak, connectionWatcher, () -> close());
         connectionWatcher.notifyOpen();
-        iss.setMessageListener(new MessageEndpoint() {
+        iss.open(new MessageEndpoint() {
             @Override
             public void sendText(String message) {
                 executionContext.logMessage("SERVER: ", message);
@@ -175,7 +177,11 @@ public class InspectWSClient extends WebSocketClient implements InspectorWSConne
     @Override
     public void onMessage(String message) {
         executionContext.logMessage("CLIENT: ", message);
-        iss.sendText(message);
+        try {
+            iss.sendText(message);
+        } catch (IOException e) {
+            executionContext.logException(e);
+        }
     }
 
     @Override
@@ -194,12 +200,12 @@ public class InspectWSClient extends WebSocketClient implements InspectorWSConne
     }
 
     @Override
-    public void consoleAPICall(String wsspath, String type, Object text) {
+    public void consoleAPICall(Token token, String type, Object text) {
         iss.consoleAPICall(type, text);
     }
 
     @Override
-    public void close(String wsspath) {
+    public void close(Token token) {
         close();
     }
 

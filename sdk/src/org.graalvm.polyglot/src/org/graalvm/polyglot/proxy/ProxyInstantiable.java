@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -46,7 +46,7 @@ import org.graalvm.polyglot.Value;
  * Interface to be implemented to mimic guest language objects that are instantiable.
  *
  * @see Proxy
- * @since 1.0
+ * @since 19.0
  */
 @FunctionalInterface
 public interface ProxyInstantiable extends Proxy {
@@ -56,7 +56,7 @@ public interface ProxyInstantiable extends Proxy {
      *
      * @throws UnsupportedOperationException if the proxy cannot be instantiated with the given
      *             arguments.
-     * @since 1.0
+     * @since 19.0
      */
     Object newInstance(Value... arguments);
 

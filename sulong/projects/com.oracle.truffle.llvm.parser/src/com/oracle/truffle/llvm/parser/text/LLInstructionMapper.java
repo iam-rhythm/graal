@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, Oracle and/or its affiliates.
+ * Copyright (c) 2018, 2021, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -30,12 +30,15 @@
 package com.oracle.truffle.llvm.parser.text;
 
 import java.util.ArrayDeque;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 import com.oracle.truffle.api.source.Source;
 import com.oracle.truffle.llvm.parser.LLVMParserRuntime;
 import com.oracle.truffle.llvm.parser.metadata.debuginfo.SourceFunction;
 import com.oracle.truffle.llvm.parser.model.blocks.InstructionBlock;
 import com.oracle.truffle.llvm.parser.model.functions.FunctionDefinition;
+import com.oracle.truffle.llvm.parser.model.functions.FunctionParameter;
 import com.oracle.truffle.llvm.parser.model.symbols.instructions.BranchInstruction;
 import com.oracle.truffle.llvm.parser.model.symbols.instructions.ConditionalBranchInstruction;
 import com.oracle.truffle.llvm.parser.model.symbols.instructions.DbgDeclareInstruction;
@@ -56,7 +59,9 @@ import com.oracle.truffle.llvm.parser.model.symbols.instructions.VoidCallInstruc
 import com.oracle.truffle.llvm.parser.model.symbols.instructions.VoidInvokeInstruction;
 import com.oracle.truffle.llvm.parser.model.visitors.FunctionVisitor;
 import com.oracle.truffle.llvm.parser.model.visitors.ValueInstructionVisitor;
+import com.oracle.truffle.llvm.runtime.LLVMContext;
 import com.oracle.truffle.llvm.runtime.debug.scope.LLVMSourceLocation;
+import com.oracle.truffle.llvm.runtime.types.symbols.LLVMIdentifier;
 
 final class LLInstructionMapper {
 
@@ -99,7 +104,7 @@ final class LLInstructionMapper {
 
         @Override
         public void visitValueInstruction(ValueInstruction value) {
-            assignInstructionLocation(value, value.getName());
+            assignInstructionLocation(value, LLVMIdentifier.toLocalIdentifier(value.getName()));
         }
 
         @Override
@@ -188,9 +193,42 @@ final class LLInstructionMapper {
         }
     }
 
+    private static void fillInNames(FunctionDefinition function) {
+        int symbolIndex = 0;
+
+        // in K&R style function declarations the parameters are not assigned names
+        for (final FunctionParameter parameter : function.getParameters()) {
+            if (LLVMIdentifier.UNKNOWN.equals(parameter.getName())) {
+                parameter.setName(String.valueOf(symbolIndex++));
+            }
+        }
+
+        final Set<String> explicitBlockNames = function.getBlocks().stream().map(InstructionBlock::getName).filter(blockName -> !LLVMIdentifier.isUnknown(blockName)).collect(Collectors.toSet());
+        for (final InstructionBlock block : function.getBlocks()) {
+            if (LLVMIdentifier.isUnknown(block.getName())) {
+                do {
+                    block.setName(LLVMIdentifier.toImplicitBlockName(symbolIndex++));
+                    // avoid name clashes
+                } while (explicitBlockNames.contains(block.getName()));
+            }
+            for (int i = 0; i < block.getInstructionCount(); i++) {
+                final Instruction instruction = block.getInstruction(i);
+                if (instruction instanceof ValueInstruction) {
+                    final ValueInstruction value = (ValueInstruction) instruction;
+                    if (LLVMIdentifier.isUnknown(value.getName())) {
+                        value.setName(String.valueOf(symbolIndex++));
+                    }
+                }
+            }
+        }
+    }
+
     static void setSourceLocations(LLSourceMap sourceMap, FunctionDefinition functionDefinition, LLVMParserRuntime runtime) {
         final LLSourceMap.Function function = sourceMap.getFunction(functionDefinition.getName());
         if (function == null) {
+            if (LLVMContext.llDebugWarningEnabled()) {
+                LLVMContext.llDebugWarningLog("Cannot find .ll source for function " + functionDefinition.getName());
+            }
             return;
         }
 
@@ -199,6 +237,7 @@ final class LLInstructionMapper {
         sourceFunction = new SourceFunction(location, sourceFunction.getSourceType());
         functionDefinition.setSourceFunction(sourceFunction);
 
+        fillInNames(functionDefinition);
         functionDefinition.accept((FunctionVisitor) new Mapper(sourceMap.getLLSource(), location, function.getInstructionList()));
 
         sourceMap.clearFunction(function);

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -54,11 +54,6 @@ public final class TestingLanguage extends TruffleLanguage<Object> {
     @Override
     protected CallTarget parse(ParsingRequest env) throws IOException {
         throw new IOException();
-    }
-
-    @Override
-    protected boolean isObjectOfLanguage(Object object) {
-        return false;
     }
 
     @Override

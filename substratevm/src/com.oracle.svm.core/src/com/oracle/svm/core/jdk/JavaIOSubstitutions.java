@@ -25,18 +25,23 @@
 package com.oracle.svm.core.jdk;
 
 import java.io.Closeable;
-import java.security.SecureRandom;
-import java.util.LinkedHashSet;
+import java.io.ObjectStreamClass;
+import java.io.Serializable;
+import java.lang.ref.ReferenceQueue;
 import java.util.List;
-import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 
 import com.oracle.svm.core.annotate.Alias;
-import com.oracle.svm.core.annotate.InjectAccessors;
 import com.oracle.svm.core.annotate.RecomputeFieldValue;
 import com.oracle.svm.core.annotate.RecomputeFieldValue.Kind;
 import com.oracle.svm.core.annotate.Substitute;
 import com.oracle.svm.core.annotate.TargetClass;
-import com.oracle.svm.core.util.VMError;
+import com.oracle.svm.core.annotate.TargetElement;
+import com.oracle.svm.core.fieldvaluetransformer.NewInstanceFieldValueTransformer;
+import com.oracle.svm.core.hub.DynamicHub;
+import com.oracle.svm.core.metadata.MetadataTracer;
+import com.oracle.svm.core.reflect.serialize.MissingSerializationRegistrationUtils;
 
 @TargetClass(java.io.FileDescriptor.class)
 final class Target_java_io_FileDescriptor {
@@ -45,136 +50,54 @@ final class Target_java_io_FileDescriptor {
     private List<Closeable> otherParents;
 }
 
-@TargetClass(java.io.ObjectInputStream.class)
-@SuppressWarnings({"static-method"})
-final class Target_java_io_ObjectInputStream {
+@TargetClass(java.io.ObjectStreamClass.class)
+final class Target_java_io_ObjectStreamClass {
 
     @Substitute
-    private Object readObject() {
-        throw VMError.unsupportedFeature("ObjectInputStream.readObject()");
+    private static boolean hasStaticInitializer(Class<?> cl) {
+        return DynamicHub.fromClass(cl).getClassInitializationInfo().hasInitializer();
     }
 
     @Substitute
-    private Object readUnshared() {
-        throw VMError.unsupportedFeature("ObjectInputStream.readUnshared()");
-    }
-}
+    static ObjectStreamClass lookup(Class<?> cl, boolean all) {
+        if (!(all || Serializable.class.isAssignableFrom(cl))) {
+            return null;
+        }
 
-@TargetClass(java.io.ObjectOutputStream.class)
-@SuppressWarnings({"static-method", "unused"})
-final class Target_java_io_ObjectOutputStream {
-
-    @Substitute
-    private void writeObject(Object obj) {
-        throw VMError.unsupportedFeature("ObjectOutputStream.writeObject()");
-    }
-
-    @Substitute
-    private void writeUnshared(Object obj) {
-        throw VMError.unsupportedFeature("ObjectOutputStream.writeUnshared()");
-    }
-}
-
-@TargetClass(className = "java.io.File$TempDirectory")
-final class Target_java_io_File_TempDirectory {
-
-    @Alias @InjectAccessors(FileTempDirectoryRandomAccessors.class)//
-    private static SecureRandom random;
-
-    static final class FileTempDirectoryRandomAccessors {
-        private static SecureRandom random;
-
-        static SecureRandom get() {
-            if (random == null) {
-                random = new SecureRandom();
+        if (Serializable.class.isAssignableFrom(cl) && !cl.isArray()) {
+            if (MetadataTracer.enabled()) {
+                MetadataTracer.singleton().traceSerializationType(cl.getName());
             }
-            return random;
-        }
-    }
-}
-
-/**
- * This class provides a replacement for the static initialization in {@code DeleteOnExitHook}. I do
- * not want to use the files list developed during image generation, and I can not use the
- * {@link Runnable} registered during image generation to delete files in the running image.
- *
- * If, in the running image, someone registers a file to be deleted on exit, I lazily add a
- * {@code DeleteOnExitHook} to be run on during shutdown. I am using an injected accessor to
- * intercept all uses of {@code DeleteOnExitHook.files}, though I am only interested in the use in
- * {@code DeleteOnExitHook.add(String)}.
- */
-@TargetClass(className = "java.io.DeleteOnExitHook")
-final class Target_java_io_DeleteOnExitHook {
-
-    /** Make this method more visible. */
-    @Alias//
-    static native void runHooks();
-
-    /** This field is replaced by injected accessors. */
-    @Alias @InjectAccessors(FilesAccessors.class)//
-    private static LinkedHashSet<String> files;
-
-    /** The accessor for the injected field for {@link #files}. */
-    static final class FilesAccessors {
-
-        /** The value of the injected field for {@link #files}. */
-        private static volatile LinkedHashSet<String> injectedFiles = null;
-
-        /** The get accessor for {@link Target_java_io_DeleteOnExitHook#files}. */
-        static LinkedHashSet<String> getFiles() {
-            initializeOnce();
-            return injectedFiles;
-        }
-
-        /** The set accessor for {@link Target_java_io_DeleteOnExitHook#files}. */
-        static void setFiles(LinkedHashSet<String> value) {
-            initializeOnce();
-            injectedFiles = value;
-        }
-
-        /** An initialization flag. */
-        private static volatile boolean initialized = false;
-
-        /** A lock to protect the initialization flag. */
-        private static ReentrantLock lock = new ReentrantLock();
-
-        static void initializeOnce() {
-            if (!initialized) {
-                lock.lock();
-                try {
-                    if (!initialized) {
-                        try {
-                            /*
-                             * Register a shutdown hook.
-                             *
-                             * Compare this code to the static initializations done in {@link
-                             * DeleteOnExitHook}, except I am short-circuiting the trampoline
-                             * through {@link sun.misc.SharedSecrets#getJavaLangAccess()}.
-                             */
-                            Target_java_lang_Shutdown.add(2 /* Shutdown hook invocation order */,
-                                            true /* register even if shutdown in progress */,
-                                            new Runnable() {
-                                                @Override
-                                                public void run() {
-                                                    Target_java_io_DeleteOnExitHook.runHooks();
-                                                }
-                                            });
-                        } catch (InternalError ie) {
-                            /* Someone else has registered the shutdown hook at slot 2. */
-                        } catch (IllegalStateException ise) {
-                            /* Too late to register this shutdown hook. */
-                        }
-                        /* Initialize the {@link #injectedFiles} field. */
-                        injectedFiles = new LinkedHashSet<>();
-                        /* Announce that initialization is complete. */
-                        initialized = true;
-                    }
-                } finally {
-                    lock.unlock();
-                }
+            if (!DynamicHub.fromClass(cl).isRegisteredForSerialization()) {
+                MissingSerializationRegistrationUtils.reportSerialization(cl);
             }
         }
+
+        return Target_java_io_ObjectStreamClass_Caches.localDescs0.get(cl);
     }
+
+}
+
+@TargetClass(value = java.io.ObjectStreamClass.class, innerClass = "Caches")
+final class Target_java_io_ObjectStreamClass_Caches {
+
+    @TargetElement(onlyWith = JavaIOClassCachePresent.class, name = "localDescs") @Alias @RecomputeFieldValue(kind = Kind.Custom, declClass = NewInstanceFieldValueTransformer.class) static Target_java_io_ClassCache<ObjectStreamClass> localDescs0;
+
+    @TargetElement(onlyWith = JavaIOClassCachePresent.class, name = "reflectors") @Alias @RecomputeFieldValue(kind = Kind.Custom, declClass = NewInstanceFieldValueTransformer.class) static Target_java_io_ClassCache<?> reflectors0;
+
+    @TargetElement(onlyWith = JavaIOClassCacheAbsent.class) @Alias @RecomputeFieldValue(kind = Kind.NewInstance, declClass = ConcurrentHashMap.class) static ConcurrentMap<?, ObjectStreamClass> localDescs;
+
+    @TargetElement(onlyWith = JavaIOClassCacheAbsent.class) @Alias @RecomputeFieldValue(kind = Kind.NewInstance, declClass = ConcurrentHashMap.class) static ConcurrentMap<?, ?> reflectors;
+
+    @TargetElement(onlyWith = JavaIOClassCacheAbsent.class) @Alias @RecomputeFieldValue(kind = Kind.NewInstance, declClass = ReferenceQueue.class) private static ReferenceQueue<Class<?>> localDescsQueue;
+
+    @TargetElement(onlyWith = JavaIOClassCacheAbsent.class) @Alias @RecomputeFieldValue(kind = Kind.NewInstance, declClass = ReferenceQueue.class) private static ReferenceQueue<Class<?>> reflectorsQueue;
+}
+
+@TargetClass(className = "java.io.ClassCache", onlyWith = JavaIOClassCachePresent.class)
+final class Target_java_io_ClassCache<T> {
+    @Alias
+    native T get(Class<?> cl);
 }
 
 /** Dummy class to have a class with the file's name. */

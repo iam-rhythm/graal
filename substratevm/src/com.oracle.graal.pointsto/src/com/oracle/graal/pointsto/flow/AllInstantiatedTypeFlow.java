@@ -24,36 +24,36 @@
  */
 package com.oracle.graal.pointsto.flow;
 
-import com.oracle.graal.pointsto.BigBang;
+import com.oracle.graal.pointsto.PointsToAnalysis;
 import com.oracle.graal.pointsto.meta.AnalysisType;
 
-public final class AllInstantiatedTypeFlow extends TypeFlow<AnalysisType> {
+/**
+ * Type flow containing all the instantiated sub-types of {@link #declaredType}. This is a sub set
+ * of the all assignable types. This flow is used for uses that need to be notified when a sub-type
+ * of a specific type is marked as instantiated, e.g., a saturated field access type flow needs to
+ * be notified when a sub-type of its declared type is marked as instantiated.
+ * <p>
+ * Note this flow should only be instantiated within AnalysisType. When needed, this flow should be
+ * retrieved via calling {@link AnalysisType#getTypeFlow}.
+ */
+public final class AllInstantiatedTypeFlow extends TypeFlow<AnalysisType> implements GlobalFlow {
 
-    public AllInstantiatedTypeFlow(AnalysisType declaredType) {
-        super(declaredType, declaredType);
+    public AllInstantiatedTypeFlow(AnalysisType declaredType, boolean canBeNull) {
+        super(declaredType, declaredType, canBeNull);
     }
 
     @Override
-    public TypeFlow<AnalysisType> copy(BigBang bb, MethodFlowsGraph methodFlows) {
+    public TypeFlow<AnalysisType> copy(PointsToAnalysis bb, MethodFlowsGraph methodFlows) {
         return this;
     }
 
     @Override
-    public void update(BigBang bb) {
-        assert checkUsages();
-        super.update(bb);
-    }
-
-    private boolean checkUsages() {
-        for (TypeFlow<?> use : getUses()) {
-            assert !use.isClone() || use instanceof ProxyTypeFlow || use instanceof SourceTypeFlowBase || use instanceof DynamicNewInstanceTypeFlow ||
-                            use instanceof FilterTypeFlow || use instanceof ActualReturnTypeFlow : use.getClass();
-        }
-        return true;
+    public boolean canSaturate(PointsToAnalysis bb) {
+        return false;
     }
 
     @Override
     public String toString() {
-        return "AllInstantiated" + super.toString();
+        return "AllInstantiatedTypeFlow of type <" + declaredType.toJavaName() + ">";
     }
 }

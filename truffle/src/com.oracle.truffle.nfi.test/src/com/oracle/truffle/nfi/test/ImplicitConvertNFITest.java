@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -46,6 +46,7 @@ import static org.hamcrest.core.Is.is;
 import java.util.ArrayList;
 import java.util.Collection;
 
+import org.hamcrest.MatcherAssert;
 import org.junit.Assert;
 import org.junit.Assume;
 import org.junit.Test;
@@ -56,12 +57,10 @@ import org.junit.runners.Parameterized.Parameters;
 
 import com.oracle.truffle.api.CallTarget;
 import com.oracle.truffle.api.CompilerDirectives;
-import com.oracle.truffle.api.Truffle;
 import com.oracle.truffle.api.frame.VirtualFrame;
-import com.oracle.truffle.api.interop.TruffleObject;
 import com.oracle.truffle.api.nodes.RootNode;
+import com.oracle.truffle.nfi.backend.spi.types.NativeSimpleType;
 import com.oracle.truffle.nfi.test.interop.TestCallback;
-import com.oracle.truffle.nfi.types.NativeSimpleType;
 import com.oracle.truffle.tck.TruffleRunner;
 import com.oracle.truffle.tck.TruffleRunner.Inject;
 
@@ -70,7 +69,7 @@ import com.oracle.truffle.tck.TruffleRunner.Inject;
 public class ImplicitConvertNFITest extends NFITest {
 
     private static final Object[] NUMERIC_VALUES = {
-                    false, true, (byte) 42, (short) 42, (char) 42, 42, (long) 42, (float) 42, (double) 42
+                    false, true, (byte) 42, (short) 42, 42, (long) 42, (float) 42, (double) 42
     };
 
     @Parameters(name = "{0}, ({3}) {1}")
@@ -81,8 +80,6 @@ public class ImplicitConvertNFITest extends NFITest {
                 long numericValue = 0;
                 if (value instanceof Number) {
                     numericValue = ((Number) value).longValue();
-                } else if (value instanceof Character) {
-                    numericValue = (Character) value;
                 } else if (value instanceof Boolean) {
                     numericValue = (Boolean) value ? 1 : 0;
                 }
@@ -97,10 +94,10 @@ public class ImplicitConvertNFITest extends NFITest {
     @Parameter(2) public long numericValue;
     @Parameter(3) public Class<?> valueClass;
 
-    private Object callback(Object... args) {
+    private final Object callback = new TestCallback(1, (args) -> {
         Assert.assertEquals("callback argument", numericValue + 1, NumericNFITest.unboxNumber(args[0]));
         return value;
-    }
+    });
 
     /**
      * Test implicit conversion between different numeric types when used as argument to native
@@ -116,30 +113,25 @@ public class ImplicitConvertNFITest extends NFITest {
     @Test
     public void testConvert(@Inject(TestConvertNode.class) CallTarget callTarget) {
         Assume.assumeFalse(isCompileImmediately());
-        TruffleObject callback = new TestCallback(1, this::callback);
         Object ret = callTarget.call(callback, value);
 
         if (type == NativeSimpleType.POINTER) {
-            Assert.assertThat("return value", ret, is(instanceOf(TruffleObject.class)));
-            TruffleObject obj = (TruffleObject) ret;
-            Assert.assertTrue("isBoxed", isBoxed(obj));
-            ret = unbox(obj);
-            Assert.assertThat("unboxed return value", ret, is(instanceOf(Long.class)));
+            Assert.assertTrue("isNumber", UNCACHED_INTEROP.isNumber(ret));
         } else {
-            Assert.assertThat("return value", ret, is(instanceOf(Number.class)));
+            MatcherAssert.assertThat("return value", ret, is(instanceOf(Number.class)));
         }
 
-        long retValue = ((Number) ret).longValue();
+        long retValue = NumericNFITest.unboxNumber(ret);
         Assert.assertEquals("callback return", numericValue * 2, retValue);
     }
 
     private static boolean isCompileImmediately() {
-        CallTarget target = Truffle.getRuntime().createCallTarget(new RootNode(null) {
+        CallTarget target = new RootNode(null) {
             @Override
             public Object execute(VirtualFrame frame) {
                 return CompilerDirectives.inCompiledCode();
             }
-        });
+        }.getCallTarget();
         return (boolean) target.call();
     }
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,30 +40,41 @@
  */
 package com.oracle.truffle.api.test.source;
 
-import java.io.File;
-import java.io.FileWriter;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertTrue;
 
+import java.io.File;
+import java.io.FileWriter;
+
+import org.junit.BeforeClass;
 import org.junit.Test;
 
 import com.oracle.truffle.api.TruffleFile;
 import com.oracle.truffle.api.source.Source;
 import com.oracle.truffle.api.source.SourceSection;
 import com.oracle.truffle.api.test.polyglot.AbstractPolyglotTest;
-import static com.oracle.truffle.api.test.polyglot.ValueAssert.assertFails;
+import com.oracle.truffle.tck.tests.TruffleTestAssumptions;
 
 public class SourceSectionTest extends AbstractPolyglotTest {
+
+    @BeforeClass
+    public static void runWithWeakEncapsulationOnly() {
+        TruffleTestAssumptions.assumeWeakEncapsulation();
+    }
 
     private final Source emptySource = Source.newBuilder("", "", "emptySource").build();
     private final Source emptyLineSource = Source.newBuilder("", "\n", "emptyLineSource").build();
     private final Source shortSource = Source.newBuilder("", "01", "shortSource").build();
     private final Source longSource = Source.newBuilder("", "01234\n67\n9\n", "long").build();
     private final Source noContentSource = Source.newBuilder("", "", "name").content(Source.CONTENT_NONE).build();
+
+    public SourceSectionTest() {
+        needsLanguageEnv = true;
+    }
 
     @Test
     public void emptySourceTest0() {
@@ -348,11 +359,9 @@ public class SourceSectionTest extends AbstractPolyglotTest {
         assertEquals("", section.getCharacters());
         assertNotNull(section.toString());
 
-        // Unavailable sections must not be equals otherwise builtins
-        // will be considered all identical if they share the same source.
         SourceSection other = longSource.createUnavailableSection();
-        assertFalse(section.equals(other));
-        assertNotEquals(other.hashCode(), section.hashCode());
+        assertTrue(section.equals(other));
+        assertEquals(other.hashCode(), section.hashCode());
 
         SourceSection other2 = shortSource.createUnavailableSection();
         assertFalse(section.equals(other2));
@@ -416,7 +425,7 @@ public class SourceSectionTest extends AbstractPolyglotTest {
         try (FileWriter w = new FileWriter(rawFile)) {
             w.write("Hello world!");
         }
-        TruffleFile sample = languageEnv.getTruffleFile(rawFile.getPath());
+        TruffleFile sample = languageEnv.getPublicTruffleFile(rawFile.getPath());
 
         Source complexHello = Source.newBuilder("", sample).build();
         SourceSection helloTo = complexHello.createSection(6, 5);

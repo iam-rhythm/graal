@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,54 +40,141 @@
  */
 package com.oracle.truffle.nfi;
 
+import org.graalvm.options.OptionValues;
+
+import com.oracle.truffle.api.CallTarget;
+import com.oracle.truffle.api.CompilerDirectives;
+import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
+import com.oracle.truffle.api.dsl.Cached;
+import com.oracle.truffle.api.dsl.Specialization;
 import com.oracle.truffle.api.frame.VirtualFrame;
-import com.oracle.truffle.api.interop.ForeignAccess;
 import com.oracle.truffle.api.interop.InteropException;
-import com.oracle.truffle.api.interop.Message;
-import com.oracle.truffle.api.interop.TruffleObject;
+import com.oracle.truffle.api.interop.InteropLibrary;
+import com.oracle.truffle.api.library.CachedLibrary;
 import com.oracle.truffle.api.nodes.DirectCallNode;
 import com.oracle.truffle.api.nodes.ExplodeLoop;
+import com.oracle.truffle.api.nodes.IndirectCallNode;
 import com.oracle.truffle.api.nodes.Node;
 import com.oracle.truffle.api.nodes.RootNode;
-import com.oracle.truffle.nfi.types.NativeSource;
+import com.oracle.truffle.nfi.NFIRootNodeFactory.LoadLibraryNodeGen;
+import com.oracle.truffle.nfi.NFIRootNodeFactory.LookupAndBindNodeGen;
+import com.oracle.truffle.nfi.NativeSource.ParsedLibrary;
+import com.oracle.truffle.nfi.SignatureRootNode.BuildSignatureNode;
+import com.oracle.truffle.nfi.api.SignatureLibrary;
+import com.oracle.truffle.nfi.backend.spi.NFIBackend;
+import com.oracle.truffle.nfi.backend.spi.types.NativeLibraryDescriptor;
 
 class NFIRootNode extends RootNode {
 
-    static class LookupAndBindNode extends Node {
+    abstract static class LookupAndBindNode extends Node {
 
         private final String name;
-        private final String signature;
+        @Child BuildSignatureNode signature;
 
-        @Child Node read;
-        @Child Node bind;
-
-        LookupAndBindNode(String name, String signature) {
+        LookupAndBindNode(String name, BuildSignatureNode signature) {
             this.name = name;
             this.signature = signature;
-            this.read = Message.READ.createNode();
-            this.bind = Message.INVOKE.createNode();
         }
 
-        TruffleObject execute(TruffleObject library) {
+        abstract Object execute(API api, Object library);
+
+        @Specialization(limit = "1")
+        Object doLookupAndBind(API api, Object library,
+                        @CachedLibrary("library") InteropLibrary libInterop,
+                        @CachedLibrary(limit = "1") SignatureLibrary signatures) {
             try {
-                TruffleObject symbol = (TruffleObject) ForeignAccess.sendRead(read, library, name);
-                return (TruffleObject) ForeignAccess.sendInvoke(bind, symbol, "bind", signature);
+                Object symbol = libInterop.readMember(library, name);
+                Object sig = signature.execute(api);
+                return signatures.bind(sig, symbol);
             } catch (InteropException ex) {
-                throw ex.raise();
+                CompilerDirectives.transferToInterpreter();
+                throw new NFIPreBindException(ex.getMessage(), this);
             }
         }
     }
 
-    @Child DirectCallNode loadLibrary;
+    abstract static class LoadLibraryNode extends Node {
+
+        private final NativeLibraryDescriptor descriptor;
+
+        LoadLibraryNode(NativeLibraryDescriptor descriptor) {
+            this.descriptor = descriptor;
+        }
+
+        protected abstract Object execute(NFIBackend backend);
+
+        @TruffleBoundary
+        CallTarget parseLibrary(NFIBackend backend) {
+            return backend.parse(descriptor);
+        }
+
+        @Specialization(limit = "5", guards = "backend == cachedBackend")
+        Object doCached(NFIBackend backend,
+                        @Cached(value = "backend", weak = true) NFIBackend cachedBackend,
+                        @Cached("create(parseLibrary(cachedBackend))") DirectCallNode callNode) {
+            assert backend == cachedBackend;
+            return callNode.call();
+        }
+
+        @Specialization(replaces = "doCached")
+        Object doGeneric(NFIBackend backend,
+                        @Cached IndirectCallNode callNode) {
+            return callNode.call(parseLibrary(backend));
+        }
+    }
+
+    private abstract class GetBackendNode extends Node {
+
+        abstract API execute();
+    }
+
+    private final class GetSelectedBackendNode extends GetBackendNode {
+
+        private final String backendId;
+
+        GetSelectedBackendNode(String backendId) {
+            this.backendId = backendId;
+        }
+
+        @Override
+        API execute() {
+            return NFIContext.get(this).getAPI(backendId, this);
+        }
+    }
+
+    private final class GetDefaultBackendNode extends GetBackendNode {
+
+        @TruffleBoundary
+        String getDefaultBackendOption(OptionValues values) {
+            return values.get(NFIOptions.DEFAULT_BACKEND);
+        }
+
+        @Override
+        API execute() {
+            NFIContext ctx = NFIContext.get(this);
+            String defaultBackendId = getDefaultBackendOption(ctx.env.getOptions());
+            return ctx.getAPI(defaultBackendId, this);
+        }
+    }
+
+    @Child LoadLibraryNode loadLibrary;
     @Children LookupAndBindNode[] lookupAndBind;
 
-    NFIRootNode(NFILanguage language, DirectCallNode loadLibrary, NativeSource source) {
+    @Child GetBackendNode getBackend;
+
+    NFIRootNode(NFILanguage language, ParsedLibrary source, String backendId) {
         super(language);
-        this.loadLibrary = loadLibrary;
+        this.loadLibrary = LoadLibraryNodeGen.create(source.getLibraryDescriptor());
         this.lookupAndBind = new LookupAndBindNode[source.preBoundSymbolsLength()];
 
+        if (backendId == null) {
+            getBackend = new GetDefaultBackendNode();
+        } else {
+            getBackend = new GetSelectedBackendNode(backendId);
+        }
+
         for (int i = 0; i < lookupAndBind.length; i++) {
-            lookupAndBind[i] = new LookupAndBindNode(source.getPreBoundSymbol(i), source.getPreBoundSignature(i));
+            lookupAndBind[i] = LookupAndBindNodeGen.create(source.getPreBoundSymbol(i), source.getPreBoundSignature(i));
         }
     }
 
@@ -99,13 +186,15 @@ class NFIRootNode extends RootNode {
     @Override
     @ExplodeLoop
     public Object execute(VirtualFrame frame) {
-        TruffleObject library = (TruffleObject) loadLibrary.call(new Object[0]);
+        API api = getBackend.execute();
+
+        Object library = loadLibrary.execute(api.backend);
         if (lookupAndBind.length == 0) {
             return library;
         } else {
             NFILibrary ret = new NFILibrary(library);
-            for (int i = 0; i < lookupAndBind.length; i++) {
-                ret.preBindSymbol(lookupAndBind[i].name, lookupAndBind[i].execute(library));
+            for (LookupAndBindNode l : lookupAndBind) {
+                ret.preBindSymbol(l.name, l.execute(api, library));
             }
             return ret;
         }

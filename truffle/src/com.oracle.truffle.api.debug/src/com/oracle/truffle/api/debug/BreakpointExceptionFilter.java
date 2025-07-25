@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -46,16 +46,13 @@ import java.util.WeakHashMap;
 
 import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
 import com.oracle.truffle.api.Truffle;
-import com.oracle.truffle.api.TruffleException;
 import com.oracle.truffle.api.debug.DebugException.CatchLocation;
-import com.oracle.truffle.api.debug.ObjectStructures.MessageNodes;
 import com.oracle.truffle.api.frame.FrameInstance;
 import com.oracle.truffle.api.frame.FrameInstanceVisitor;
 import com.oracle.truffle.api.instrumentation.InstrumentableNode;
 import com.oracle.truffle.api.instrumentation.StandardTags.TryBlockTag;
 import com.oracle.truffle.api.interop.ArityException;
-import com.oracle.truffle.api.interop.ForeignAccess;
-import com.oracle.truffle.api.interop.KeyInfo;
+import com.oracle.truffle.api.interop.InteropLibrary;
 import com.oracle.truffle.api.interop.TruffleObject;
 import com.oracle.truffle.api.interop.UnknownIdentifierException;
 import com.oracle.truffle.api.interop.UnsupportedMessageException;
@@ -94,15 +91,15 @@ final class BreakpointExceptionFilter {
 
     @TruffleBoundary
     private Match testExceptionCaught(Node throwNode, Throwable exception) {
-        if (!(exception instanceof TruffleException)) {
+        if (!InteropLibrary.getUncached().isException(exception)) {
             return uncaught ? Match.MATCHED : Match.UNMATCHED;
         }
-        CatchLocation catchLocation = getCatchNode(debugger, throwNode, exception);
+        CatchLocation catchLocation = getCatchNode(throwNode, exception);
         boolean exceptionCaught = catchLocation != null;
         return new Match(caught && exceptionCaught || uncaught && !exceptionCaught, catchLocation);
     }
 
-    static CatchLocation getCatchNode(Debugger debugger, Node throwNode, Throwable exception) {
+    static CatchLocation getCatchNode(Node throwNode, Throwable exception) {
         CatchLocation[] catchLocationPtr = new CatchLocation[]{null};
         Truffle.getRuntime().iterateFrames(new FrameInstanceVisitor<FrameInstance>() {
             private int depth = 0;
@@ -116,7 +113,7 @@ final class BreakpointExceptionFilter {
                     node = frameInstance.getCallNode();
                 }
                 if (node != null) {
-                    Node catchNode = getCatchNode(debugger.getMessageNodes(), node, exception);
+                    Node catchNode = getCatchNodeImpl(node, exception);
                     if (catchNode != null) {
                         catchLocationPtr[0] = new CatchLocation(catchNode.getSourceSection(), frameInstance, depth);
                         return frameInstance;
@@ -129,19 +126,18 @@ final class BreakpointExceptionFilter {
         return catchLocationPtr[0];
     }
 
-    private static Node getCatchNode(MessageNodes msgNodes, Node node, Throwable exception) {
+    private static Node getCatchNodeImpl(Node node, Throwable exception) {
         if (node instanceof InstrumentableNode) {
             InstrumentableNode inode = (InstrumentableNode) node;
             if (inode.isInstrumentable() && inode.hasTag(TryBlockTag.class)) {
-                Object exceptionObject = ((TruffleException) exception).getExceptionObject();
                 Object nodeObject = inode.getNodeObject();
-                if (nodeObject instanceof TruffleObject && exceptionObject != null) {
+                if (nodeObject != null) {
+                    InteropLibrary library = InteropLibrary.getFactory().getUncached(nodeObject);
                     TruffleObject object = (TruffleObject) nodeObject;
-                    int keyInfo = ForeignAccess.sendKeyInfo(msgNodes.keyInfo, object, "catches");
-                    if (KeyInfo.isInvocable(keyInfo)) {
+                    if (library.isMemberInvocable(nodeObject, "catches")) {
                         Object catches;
                         try {
-                            catches = ForeignAccess.sendInvoke(msgNodes.invoke1, object, "catches", exceptionObject);
+                            catches = library.invokeMember(nodeObject, "catches", exception);
                         } catch (UnsupportedTypeException | ArityException | UnknownIdentifierException | UnsupportedMessageException ex) {
                             throw new IllegalStateException("Unexpected exception from 'catches' on '" + object, exception);
                         }
@@ -161,7 +157,7 @@ final class BreakpointExceptionFilter {
         }
         Node parent = node.getParent();
         if (parent != null) {
-            return getCatchNode(msgNodes, parent, exception);
+            return getCatchNodeImpl(parent, exception);
         }
         return null;
     }

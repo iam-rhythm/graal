@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -42,6 +42,7 @@ package com.oracle.truffle.api.source;
 
 import java.net.URI;
 import java.net.URL;
+import java.util.Map;
 
 import org.graalvm.polyglot.io.ByteSequence;
 
@@ -71,6 +72,11 @@ final class SubSourceImpl extends Source {
     }
 
     @Override
+    Map<String, String> getOptions() {
+        return key.base.getOptions();
+    }
+
+    @Override
     public boolean hasCharacters() {
         return key.base.hasCharacters();
     }
@@ -86,13 +92,13 @@ final class SubSourceImpl extends Source {
     }
 
     @Override
-    public String getName() {
-        return key.base.getName();
+    Object getSourceKey() {
+        return key;
     }
 
     @Override
-    boolean isLegacy() {
-        return key.base.isLegacy();
+    public String getName() {
+        return key.base.getName();
     }
 
     @Override

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2019, Oracle and/or its affiliates.
+ * Copyright (c) 2016, 2023, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -29,9 +29,6 @@
  */
 package com.oracle.truffle.llvm.parser;
 
-import java.util.ArrayList;
-import java.util.List;
-
 import com.oracle.truffle.api.source.Source;
 import com.oracle.truffle.llvm.parser.model.ModelModule;
 import com.oracle.truffle.llvm.parser.model.SymbolImpl;
@@ -39,209 +36,203 @@ import com.oracle.truffle.llvm.parser.model.functions.FunctionDeclaration;
 import com.oracle.truffle.llvm.parser.model.functions.FunctionDefinition;
 import com.oracle.truffle.llvm.parser.model.functions.FunctionSymbol;
 import com.oracle.truffle.llvm.parser.model.symbols.constants.CastConstant;
+import com.oracle.truffle.llvm.parser.model.symbols.constants.GetElementPointerConstant;
 import com.oracle.truffle.llvm.parser.model.symbols.globals.GlobalAlias;
 import com.oracle.truffle.llvm.parser.model.symbols.globals.GlobalVariable;
-import com.oracle.truffle.llvm.parser.model.target.TargetDataLayout;
-import com.oracle.truffle.llvm.parser.nodes.LLVMSymbolReadResolver;
+import com.oracle.truffle.llvm.parser.model.target.TargetTriple;
 import com.oracle.truffle.llvm.runtime.GetStackSpaceFactory;
 import com.oracle.truffle.llvm.runtime.LLVMAlias;
-import com.oracle.truffle.llvm.runtime.LLVMContext;
-import com.oracle.truffle.llvm.runtime.LLVMContext.ExternalLibrary;
-import com.oracle.truffle.llvm.runtime.LLVMFunctionDescriptor;
-import com.oracle.truffle.llvm.runtime.LLVMFunctionDescriptor.Function;
-import com.oracle.truffle.llvm.runtime.LLVMFunctionDescriptor.LazyLLVMIRFunction;
+import com.oracle.truffle.llvm.runtime.LLVMElemPtrSymbol;
+import com.oracle.truffle.llvm.runtime.LLVMFunction;
+import com.oracle.truffle.llvm.runtime.LLVMFunctionCode.Function;
+import com.oracle.truffle.llvm.runtime.LLVMFunctionCode.LazyLLVMIRFunction;
+import com.oracle.truffle.llvm.runtime.LLVMLanguage;
 import com.oracle.truffle.llvm.runtime.LLVMSymbol;
+import com.oracle.truffle.llvm.runtime.LLVMThreadLocalSymbol;
 import com.oracle.truffle.llvm.runtime.datalayout.DataLayout;
-import com.oracle.truffle.llvm.runtime.debug.LLVMSourceContext;
-import com.oracle.truffle.llvm.runtime.debug.value.LLVMDebugObjectBuilder;
 import com.oracle.truffle.llvm.runtime.except.LLVMLinkerException;
 import com.oracle.truffle.llvm.runtime.global.LLVMGlobal;
 import com.oracle.truffle.llvm.runtime.nodes.api.LLVMExpressionNode;
 import com.oracle.truffle.llvm.runtime.options.SulongEngineOption;
+import com.oracle.truffle.llvm.runtime.types.PointerType;
+import com.oracle.truffle.llvm.runtime.types.PrimitiveType;
+import com.oracle.truffle.llvm.runtime.types.Type;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.function.Supplier;
 
 public final class LLVMParser {
     private final Source source;
     private final LLVMParserRuntime runtime;
-    private final LLVMContext context;
-    private final ExternalLibrary library;
+    private int threadLocalGlobalObjectCounter;
 
     public LLVMParser(Source source, LLVMParserRuntime runtime) {
         this.source = source;
         this.runtime = runtime;
-        this.context = runtime.getContext();
-        this.library = runtime.getLibrary();
+        threadLocalGlobalObjectCounter = 0;
     }
 
-    public LLVMParserResult parse(ModelModule module) {
-        TargetDataLayout layout = module.getTargetDataLayout();
-        DataLayout targetDataLayout = new DataLayout(layout.getDataLayout());
-        runtime.getContext().addDataLayout(targetDataLayout);
-
+    public LLVMParserResult parse(ModelModule module, DataLayout targetDataLayout) {
         List<GlobalVariable> externalGlobals = new ArrayList<>();
         List<GlobalVariable> definedGlobals = new ArrayList<>();
+        List<GlobalVariable> threadLocalGlobals = new ArrayList<>();
         List<FunctionSymbol> externalFunctions = new ArrayList<>();
-        List<String> importedSymbols = new ArrayList<>();
+        List<FunctionSymbol> definedFunctions = new ArrayList<>();
 
-        defineGlobals(module.getGlobalVariables(), definedGlobals, externalGlobals, importedSymbols);
-        defineFunctions(module, externalFunctions, importedSymbols);
-        defineAliases(module.getAliases(), importedSymbols);
+        defineGlobals(module.getGlobalVariables(), definedGlobals, externalGlobals, threadLocalGlobals);
+        defineFunctions(module, definedFunctions, externalFunctions, targetDataLayout);
+        defineAliases(module.getAliases(), targetDataLayout);
 
-        LLVMSymbolReadResolver symbolResolver = new LLVMSymbolReadResolver(runtime, StackManager.createRootFrame(), GetStackSpaceFactory.createAllocaFactory());
-        createDebugInfo(module, symbolResolver);
-
-        return new LLVMParserResult(runtime, externalFunctions, definedGlobals, externalGlobals, importedSymbols);
+        return new LLVMParserResult(runtime, definedFunctions, externalFunctions, definedGlobals, externalGlobals, threadLocalGlobals, threadLocalGlobalObjectCounter, targetDataLayout,
+                        module.getTargetInformation(TargetTriple.class), module.getTotalSize());
     }
 
-    private void defineGlobals(List<GlobalVariable> globals, List<GlobalVariable> definedGlobals, List<GlobalVariable> externalGlobals, List<String> importedSymbols) {
+    private static boolean ignoreGlobal(GlobalVariable g) {
+        String name = g.getName();
+        /*
+         * Dummy array to keep other globals alive during compilation and linking. We do not
+         * initialize it as it's not relevant for execution, and it can cause problems during module
+         * initialization (e.g. if a TLS variable is referenced).
+         */
+        return name.equals("llvm.used") || name.equals("llvm.compiler.used");
+    }
+
+    private void defineGlobals(List<GlobalVariable> globals, List<GlobalVariable> definedGlobals, List<GlobalVariable> externalGlobals, List<GlobalVariable> threadLocalGlobals) {
         for (GlobalVariable global : globals) {
+            if (ignoreGlobal(global)) {
+                continue;
+            }
             if (global.isExternal()) {
                 externalGlobals.add(global);
-                importedSymbols.add(global.getName());
             } else {
-                defineGlobal(global, importedSymbols);
-                definedGlobals.add(global);
+                defineGlobal(global, definedGlobals, threadLocalGlobals);
             }
         }
     }
 
-    private void defineFunctions(ModelModule model, List<FunctionSymbol> externalFunctions, List<String> importedSymbols) {
+    private void defineFunctions(ModelModule model, List<FunctionSymbol> definedFunctions, List<FunctionSymbol> externalFunctions, DataLayout dataLayout) {
         for (FunctionDefinition function : model.getDefinedFunctions()) {
             if (function.isExternal()) {
                 externalFunctions.add(function);
-                importedSymbols.add(function.getName());
             } else {
-                defineFunction(function, model, importedSymbols);
+                defineFunction(function, model, dataLayout);
+                definedFunctions.add(function);
             }
         }
 
         for (FunctionDeclaration function : model.getDeclaredFunctions()) {
             assert function.isExternal();
             externalFunctions.add(function);
-            importedSymbols.add(function.getName());
         }
     }
 
-    private void defineAliases(List<GlobalAlias> aliases, List<String> importedSymbols) {
+    private void defineAliases(List<GlobalAlias> aliases, DataLayout targetDataLayout) {
         for (GlobalAlias alias : aliases) {
-            defineAlias(alias, importedSymbols);
+            defineAlias(alias, targetDataLayout);
         }
     }
 
-    private void defineGlobal(GlobalVariable global, List<String> importedSymbols) {
+    private void defineGlobal(GlobalVariable global, List<GlobalVariable> definedGlobals, List<GlobalVariable> threadLocalGlobals) {
         assert !global.isExternal();
-        // handle the file scope
-        LLVMGlobal descriptor = LLVMGlobal.create(context, global.getName(), global.getType(), global.getSourceSymbol(), global.isReadOnly());
-        descriptor.define(global.getType(), library);
-        runtime.getFileScope().register(descriptor);
-
-        // handle the global scope
-        if (global.isExported()) {
-            LLVMSymbol exportedDescriptor = runtime.getGlobalScope().get(global.getName());
-            if (exportedDescriptor == null) {
-                runtime.getGlobalScope().register(descriptor);
-            } else if (exportedDescriptor.isGlobalVariable()) {
-                importedSymbols.add(global.getName());
-            } else {
-                assert exportedDescriptor.isFunction();
-                throw new LLVMLinkerException("The global variable " + global.getName() + " conflicts with a function that has the same name.");
+        LLVMSymbol symbol;
+        if (global.isThreadLocal()) {
+            symbol = LLVMThreadLocalSymbol.create(global.getName(), global.getSourceSymbol(), runtime.getBitcodeID(), global.getIndex(), global.isExported(), global.isExternalWeak());
+            Type type = global.getType().getPointeeType();
+            if (isSpecialGlobalSlot(type)) {
+                threadLocalGlobalObjectCounter++;
             }
+            threadLocalGlobals.add(global);
+        } else {
+            symbol = LLVMGlobal.create(global.getName(), global.getType(), global.getSourceSymbol(), global.isReadOnly(), global.getIndex(), runtime.getBitcodeID(), global.isExported(),
+                            global.isExternalWeak());
+            definedGlobals.add(global);
+        }
+        runtime.getFileScope().register(symbol);
+        registerInPublicFileScope(symbol);
+    }
+
+    /**
+     * Globals of pointer type need to be handles specially because they can potentially contain a
+     * foreign object.
+     */
+    public static boolean isSpecialGlobalSlot(Type type) {
+        if (type instanceof PointerType) {
+            return true;
+        } else {
+            return type == PrimitiveType.I64;
         }
     }
 
-    private void defineFunction(FunctionSymbol functionSymbol, ModelModule model, List<String> importedSymbols) {
+    private void defineFunction(FunctionSymbol functionSymbol, ModelModule model, DataLayout dataLayout) {
         assert !functionSymbol.isExternal();
-        // handle the file scope
-        LLVMFunctionDescriptor descriptor = context.createFunctionDescriptor(functionSymbol.getName(), functionSymbol.getType());
         FunctionDefinition functionDefinition = (FunctionDefinition) functionSymbol;
         LazyToTruffleConverterImpl lazyConverter = new LazyToTruffleConverterImpl(runtime, functionDefinition, source, model.getFunctionParser(functionDefinition),
-                        model.getFunctionProcessor());
+                        model.getFunctionProcessor(), dataLayout);
         Function function = new LazyLLVMIRFunction(lazyConverter);
-        descriptor.define(library, function);
-        runtime.getFileScope().register(descriptor);
-
-        // handle the global scope
-        if (functionSymbol.isExported()) {
-            LLVMSymbol exportedDescriptor = runtime.getGlobalScope().get(functionSymbol.getName());
-            if (exportedDescriptor == null) {
-                runtime.getGlobalScope().register(descriptor);
-            } else if (exportedDescriptor.isFunction()) {
-                importedSymbols.add(functionSymbol.getName());
-            } else {
-                assert exportedDescriptor.isGlobalVariable();
-                throw new LLVMLinkerException("The function " + functionSymbol.getName() + " conflicts with a global variable that has the same name.");
-            }
+        LLVMFunction llvmFunction = LLVMFunction.create(functionSymbol.getName(), function, functionSymbol.getType(), runtime.getBitcodeID(), functionSymbol.getIndex(),
+                        functionDefinition.isExported(), runtime.getPath(), functionDefinition.isExternalWeak());
+        lazyConverter.setRootFunction(llvmFunction);
+        runtime.getFileScope().register(llvmFunction);
+        registerInPublicFileScope(llvmFunction);
+        final boolean cxxInterop = LLVMLanguage.getContext().getEnv().getOptions().get(SulongEngineOption.CXX_INTEROP);
+        if (cxxInterop) {
+            model.getFunctionParser(functionDefinition).parseLinkageName(runtime);
         }
     }
 
-    private void defineAlias(GlobalAlias alias, List<String> importedSymbols) {
+    private void defineAlias(GlobalAlias alias, DataLayout targetDataLayout) {
         LLVMSymbol alreadyRegisteredSymbol = runtime.getFileScope().get(alias.getName());
         if (alreadyRegisteredSymbol != null) {
             // this alias was already registered by a recursive call
             assert alreadyRegisteredSymbol instanceof LLVMAlias;
             return;
         }
-
-        defineAlias(alias.getName(), alias.isExported(), alias.getValue(), importedSymbols);
+        defineAlias(alias.getName(), alias.isExported(), alias.getValue(), targetDataLayout);
     }
 
-    private void defineAlias(String aliasName, boolean isAliasExported, SymbolImpl value, List<String> importedSymbols) {
+    private void registerInPublicFileScope(LLVMSymbol symbol) {
+        if (symbol.isExported()) {
+            runtime.getPublicFileScope().register(symbol);
+        }
+    }
+
+    private void defineAlias(String aliasName, boolean isAliasExported, SymbolImpl value, DataLayout targetDataLayout) {
         if (value instanceof FunctionSymbol) {
             FunctionSymbol function = (FunctionSymbol) value;
-            defineAlias(function.getName(), function.isExported(), aliasName, isAliasExported, importedSymbols);
+            defineAlias(function.getName(), aliasName, isAliasExported);
         } else if (value instanceof GlobalVariable) {
             GlobalVariable global = (GlobalVariable) value;
-            defineAlias(global.getName(), global.isExported(), aliasName, isAliasExported, importedSymbols);
+            defineAlias(global.getName(), aliasName, isAliasExported);
         } else if (value instanceof GlobalAlias) {
             GlobalAlias target = (GlobalAlias) value;
-            defineAlias(target, importedSymbols);
-            defineAlias(target.getName(), target.isExported(), aliasName, isAliasExported, importedSymbols);
+            defineAlias(target, targetDataLayout);
+            defineAlias(target.getName(), aliasName, isAliasExported);
         } else if (value instanceof CastConstant) {
             // TODO (chaeubl): this is not perfectly accurate as we are loosing the type cast
             CastConstant cast = (CastConstant) value;
-            defineAlias(aliasName, isAliasExported, cast.getValue(), importedSymbols);
+            defineAlias(aliasName, isAliasExported, cast.getValue(), targetDataLayout);
+        } else if (value instanceof GetElementPointerConstant) {
+            GetElementPointerConstant elementPointerConstant = (GetElementPointerConstant) value;
+            defineExpressionSymbol(aliasName, isAliasExported, elementPointerConstant, targetDataLayout);
         } else {
             throw new LLVMLinkerException("Unknown alias type: " + value.getClass());
         }
     }
 
-    private void defineAlias(String existingName, boolean existingExported, String newName, boolean newExported, List<String> importedSymbols) {
-        // handle the file scope
-        LLVMSymbol aliasTarget = runtime.lookupSymbol(existingName, existingExported);
-        LLVMAlias descriptor = new LLVMAlias(library, newName, aliasTarget);
-        runtime.getFileScope().register(descriptor);
-
-        if (existingExported && aliasTarget.getLibrary() != library) {
-            importedSymbols.add(aliasTarget.getName());
-        }
-
-        // handle the global scope
-        if (newExported) {
-            LLVMSymbol exportedDescriptor = runtime.getGlobalScope().get(newName);
-            if (exportedDescriptor == null) {
-                runtime.getGlobalScope().register(descriptor);
-            } else if (descriptor.isFunction() && exportedDescriptor.isFunction() || descriptor.isGlobalVariable() && exportedDescriptor.isGlobalVariable()) {
-                importedSymbols.add(newName);
-            } else {
-                throw new LLVMLinkerException("The alias " + newName + " conflicts with another symbol that has a different type but the same name.");
-            }
-        }
+    private void defineExpressionSymbol(String aliasName, boolean isAliasExported, GetElementPointerConstant elementPointerConstant, DataLayout targetDataLayout) {
+        LLVMSymbol baseSymbol = runtime.getFileScope().get(elementPointerConstant.getBasePointer().toString());
+        Supplier<LLVMExpressionNode> createElemPtrNode = () -> elementPointerConstant.createNode(runtime, targetDataLayout, GetStackSpaceFactory.createAllocaFactory());
+        LLVMElemPtrSymbol expressionSymbol = new LLVMElemPtrSymbol(aliasName, runtime.getBitcodeID(), -1, isAliasExported,
+                        elementPointerConstant.getType(), baseSymbol, createElemPtrNode);
+        runtime.getFileScope().register(expressionSymbol);
     }
 
-    private void createDebugInfo(ModelModule model, LLVMSymbolReadResolver symbolResolver) {
-        if (context.getEnv().getOptions().get(SulongEngineOption.ENABLE_LVI)) {
-            final LLVMSourceContext sourceContext = context.getSourceContext();
-
-            model.getSourceGlobals().forEach((symbol, irValue) -> {
-                final LLVMExpressionNode node = symbolResolver.resolve(irValue);
-                final LLVMDebugObjectBuilder value = context.getNodeFactory().createDebugStaticValue(node, irValue instanceof GlobalVariable);
-                sourceContext.registerStatic(symbol, value);
-            });
-
-            model.getSourceStaticMembers().forEach(((type, symbol) -> {
-                final LLVMExpressionNode node = symbolResolver.resolve(symbol);
-                final LLVMDebugObjectBuilder value = context.getNodeFactory().createDebugStaticValue(node, symbol instanceof GlobalVariable);
-                type.setValue(value);
-            }));
-        }
+    private void defineAlias(String existingName, String newName, boolean newExported) {
+        // handle the file scope
+        LLVMSymbol aliasTarget = runtime.lookupSymbol(existingName);
+        LLVMAlias aliasSymbol = new LLVMAlias(newName, aliasTarget, newExported);
+        runtime.getFileScope().register(aliasSymbol);
+        registerInPublicFileScope(aliasSymbol);
     }
 }

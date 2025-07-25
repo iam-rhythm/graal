@@ -24,35 +24,44 @@
  */
 package com.oracle.svm.core.jdk;
 
-// Checkstyle: allow reflection
-
-import java.io.ByteArrayInputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
+import java.net.MalformedURLException;
 import java.net.URL;
 import java.net.URLConnection;
 import java.net.URLStreamHandler;
+import java.net.URLStreamHandlerFactory;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Hashtable;
 import java.util.List;
+import java.util.Set;
 
-import org.graalvm.nativeimage.Feature;
+import jdk.graal.compiler.word.Word;
 import org.graalvm.nativeimage.ImageSingletons;
 import org.graalvm.nativeimage.Platform;
 import org.graalvm.nativeimage.Platforms;
+import org.graalvm.word.LocationIdentity;
+import org.graalvm.word.Pointer;
+import org.graalvm.word.SignedWord;
 
 import com.oracle.svm.core.SubstrateOptions;
-import com.oracle.svm.core.annotate.AutomaticFeature;
+import com.oracle.svm.core.annotate.Alias;
 import com.oracle.svm.core.annotate.Delete;
+import com.oracle.svm.core.annotate.InjectAccessors;
 import com.oracle.svm.core.annotate.Substitute;
 import com.oracle.svm.core.annotate.TargetClass;
-import com.oracle.svm.core.option.OptionUtils;
+import com.oracle.svm.core.c.CGlobalData;
+import com.oracle.svm.core.c.CGlobalDataFactory;
+import com.oracle.svm.core.feature.AutomaticallyRegisteredFeature;
+import com.oracle.svm.core.feature.AutomaticallyRegisteredImageSingleton;
+import com.oracle.svm.core.feature.InternalFeature;
+import com.oracle.svm.core.jdk.resources.ResourceURLConnection;
 import com.oracle.svm.core.option.SubstrateOptionsParser;
 import com.oracle.svm.core.util.VMError;
+import com.oracle.svm.util.LogUtils;
+import com.oracle.svm.util.ReflectionUtil;
+
+import sun.net.NetProperties;
 
 @TargetClass(java.net.URL.class)
 final class Target_java_net_URL {
@@ -60,52 +69,105 @@ final class Target_java_net_URL {
     @Delete private static Hashtable<?, ?> handlers;
 
     @Substitute
-    private static URLStreamHandler getURLStreamHandler(String protocol) {
+    private static URLStreamHandler getURLStreamHandler(String protocol) throws MalformedURLException {
+        /*
+         * The original version of this method does not throw MalformedURLException directly, but
+         * instead returns null if no handler is found. The callers then check the result and throw
+         * the exception when the return value is null. Implementing our substitution the same way
+         * would mean that we cannot provide a helpful exception message why a protocol is not
+         * available, and how to add a protocol at image build time.
+         */
         return JavaNetSubstitutions.getURLStreamHandler(protocol);
+    }
+
+    @Substitute
+    @SuppressWarnings("unused")
+    public static void setURLStreamHandlerFactory(URLStreamHandlerFactory fac) {
+        VMError.unsupportedFeature("Setting a custom URLStreamHandlerFactory.");
     }
 }
 
-@AutomaticFeature
-class JavaNetFeature implements Feature {
+@TargetClass(className = "sun.net.spi.DefaultProxySelector")
+final class Target_sun_net_spi_DefaultProxySelector {
 
-    @Override
-    public void afterRegistration(AfterRegistrationAccess access) {
-        ImageSingletons.add(URLProtocolsSupport.class, new URLProtocolsSupport());
+    @Alias @InjectAccessors(DefaultProxySelectorSystemProxiesAccessor.class) //
+    static boolean hasSystemProxies;
+
+    @Alias
+    static native boolean init();
+}
+
+final class DefaultProxySelectorSystemProxiesAccessor {
+    static Boolean hasSystemProxies = null;
+
+    static boolean get() {
+        if (hasSystemProxies == null) {
+            hasSystemProxies = ensureInitialized();
+        }
+        return hasSystemProxies;
     }
+
+    static final SignedWord UNINITIALIZED = Word.signed(-2);
+    static final SignedWord INITIALIZING = Word.signed(-1);
+
+    static final CGlobalData<Pointer> initState = CGlobalDataFactory.createWord(UNINITIALIZED);
+
+    /** Avoids calling init() more than once per process, which can leak resources with isolates. */
+    static boolean ensureInitialized() {
+        Boolean b = NetProperties.getBoolean("java.net.useSystemProxies");
+        if (b != null && b) {
+            // NOTE: System.loadLibrary("net") has already been called early on
+            while (true) {
+                SignedWord value = initState.get().readWord(0);
+                if (value.greaterOrEqual(0)) {
+                    return value.notEqual(0);
+                }
+                if (initState.get().logicCompareAndSwapWord(0, UNINITIALIZED, INITIALIZING, LocationIdentity.ANY_LOCATION)) {
+                    boolean result = Target_sun_net_spi_DefaultProxySelector.init();
+                    initState.get().writeWord(0, Word.signed(result ? 1 : 0));
+                }
+            }
+        }
+        return false;
+    }
+}
+
+@AutomaticallyRegisteredFeature
+class JavaNetFeature implements InternalFeature {
 
     @Override
     public void duringSetup(DuringSetupAccess access) {
+        Set<String> disabledURLProtocols = new HashSet<>(SubstrateOptions.DisableURLProtocols.getValue().values());
+
         JavaNetSubstitutions.defaultProtocols.forEach(protocol -> {
-            boolean registered = JavaNetSubstitutions.addURLStreamHandler(protocol);
-            VMError.guarantee(registered, "The URL protocol " + protocol + " is not available.");
+            if (!disabledURLProtocols.contains(protocol)) {
+                boolean registered = JavaNetSubstitutions.addURLStreamHandler(protocol);
+                VMError.guarantee(registered, "The URL protocol %s is not available. It should be available as it is supported by default.", protocol);
+            }
         });
 
-        for (String protocol : OptionUtils.flatten(",", SubstrateOptions.EnableURLProtocols.getValue())) {
+        for (String protocol : SubstrateOptions.EnableURLProtocols.getValue().values()) {
+            if (disabledURLProtocols.contains(protocol)) {
+                continue;
+            }
+
             if (JavaNetSubstitutions.defaultProtocols.contains(protocol)) {
-                printWarning("The URL protocol " + protocol + " is enabled by default. " +
-                                "The option " + JavaNetSubstitutions.enableProtocolsOption + protocol + " is not needed.");
+                LogUtils.warning("The URL protocol " + protocol + " is enabled by default. The option " + JavaNetSubstitutions.enableProtocolsOption + protocol + " is not needed.");
             } else if (JavaNetSubstitutions.onDemandProtocols.contains(protocol)) {
                 boolean registered = JavaNetSubstitutions.addURLStreamHandler(protocol);
-                VMError.guarantee(registered, "The URL protocol " + protocol + " is not available.");
+                VMError.guarantee(registered, "The URL protocol %s is not available. It should be available as it is a supported on-demand protocol.", protocol);
             } else {
-                printWarning("The URL protocol " + protocol + " is not tested and might not work as expected." +
-                                System.lineSeparator() + JavaNetSubstitutions.supportedProtocols());
                 boolean registered = JavaNetSubstitutions.addURLStreamHandler(protocol);
                 if (!registered) {
-                    printWarning("Registering the " + protocol + " URL protocol failed. " +
-                                    "It will not be available at runtime." + System.lineSeparator());
+                    LogUtils.warning("Registering the " + protocol + " URL protocol failed. It will not be available at runtime.");
                 }
             }
         }
     }
 
-    private static void printWarning(String warningMessage) {
-        // Checkstyle: stop
-        System.out.println(warningMessage);
-        // Checkstyle: resume}
-    }
 }
 
+@AutomaticallyRegisteredImageSingleton
 class URLProtocolsSupport {
 
     @Platforms(Platform.HOSTED_ONLY.class)
@@ -124,12 +186,11 @@ class URLProtocolsSupport {
 public final class JavaNetSubstitutions {
 
     public static final String FILE_PROTOCOL = "file";
+    public static final String RESOURCE_PROTOCOL = "resource";
     public static final String HTTP_PROTOCOL = "http";
     public static final String HTTPS_PROTOCOL = "https";
 
-    public static final String RESOURCE_PROTOCOL = "resource";
-
-    static final List<String> defaultProtocols = Collections.singletonList(FILE_PROTOCOL);
+    static final List<String> defaultProtocols = Arrays.asList(FILE_PROTOCOL, RESOURCE_PROTOCOL);
     static final List<String> onDemandProtocols = Arrays.asList(HTTP_PROTOCOL, HTTPS_PROTOCOL);
 
     static final String enableProtocolsOption = SubstrateOptionsParser.commandArgument(SubstrateOptions.EnableURLProtocols, "");
@@ -142,28 +203,26 @@ public final class JavaNetSubstitutions {
             return true;
         }
         try {
-            Method method = URL.class.getDeclaredMethod("getURLStreamHandler", String.class);
-            method.setAccessible(true);
-            URLStreamHandler handler = (URLStreamHandler) method.invoke(null, protocol);
+            URLStreamHandler handler = (URLStreamHandler) ReflectionUtil.lookupMethod(URL.class, "getURLStreamHandler", String.class).invoke(null, protocol);
             if (handler != null) {
                 URLProtocolsSupport.put(protocol, handler);
                 return true;
             }
             return false;
-        } catch (IllegalAccessException | IllegalArgumentException | InvocationTargetException | NoSuchMethodException | SecurityException ex) {
-            throw new Error(ex);
+        } catch (ReflectiveOperationException ex) {
+            throw VMError.shouldNotReachHere(ex);
         }
     }
 
-    static URLStreamHandler getURLStreamHandler(String protocol) {
+    static URLStreamHandler getURLStreamHandler(String protocol) throws MalformedURLException {
         URLStreamHandler result = URLProtocolsSupport.get(protocol);
         if (result == null) {
             if (onDemandProtocols.contains(protocol)) {
-                unsupported("Accessing an URL protocol that was not enabled. The URL protocol " + protocol +
+                unsupported("Accessing a URL protocol that was not enabled. The URL protocol " + protocol +
                                 " is supported but not enabled by default. It must be enabled by adding the " + enableProtocolsOption + protocol +
                                 " option to the native-image command.");
             } else {
-                unsupported("Accessing an URL protocol that was not enabled. The URL protocol " + protocol +
+                unsupported("Accessing a URL protocol that was not enabled. The URL protocol " + protocol +
                                 " is not tested and might not work as expected. It can be enabled by adding the " + enableProtocolsOption + protocol +
                                 " option to the native-image command.");
             }
@@ -174,31 +233,18 @@ public final class JavaNetSubstitutions {
     static URLStreamHandler createResourcesURLStreamHandler() {
         return new URLStreamHandler() {
             @Override
-            protected URLConnection openConnection(URL url) throws IOException {
-                return new URLConnection(url) {
-                    @Override
-                    public void connect() throws IOException {
-                    }
-
-                    @Override
-                    public InputStream getInputStream() throws IOException {
-                        Resources.ResourcesSupport support = ImageSingletons.lookup(Resources.ResourcesSupport.class);
-                        // remove "protcol:" from url to get the resource name
-                        String resName = url.toString().substring(1 + JavaNetSubstitutions.RESOURCE_PROTOCOL.length());
-                        final List<byte[]> bytes = support.resources.get(resName);
-                        if (bytes == null || bytes.size() < 1) {
-                            return null;
-                        } else {
-                            return new ByteArrayInputStream(bytes.get(0));
-                        }
-                    }
-                };
+            protected URLConnection openConnection(URL url) {
+                return new ResourceURLConnection(url);
             }
         };
     }
 
-    private static void unsupported(String message) {
-        throw VMError.unsupportedFeature(message);
+    private static void unsupported(String message) throws MalformedURLException {
+        /*
+         * We throw a MalformedURLException and not our own unsupported feature error to be
+         * consistent with the specification of URL.
+         */
+        throw new MalformedURLException(message);
     }
 
     static String supportedProtocols() {

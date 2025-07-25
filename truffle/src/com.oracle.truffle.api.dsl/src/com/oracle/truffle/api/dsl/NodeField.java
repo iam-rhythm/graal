@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -46,14 +46,25 @@ import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
+import com.oracle.truffle.api.CompilerDirectives.CompilationFinal;
 import com.oracle.truffle.api.nodes.Node;
 
 /**
  * A {@link NodeField} element defines a field for the generated {@link Node}. A {@link Node}
  * contains multiple {@link NodeFields} specified in linear declaration order. The field can be
- * accessed by declaring an abstract getter named
- * <code>"get" + firstLetterUpperCase({@link #name()})()</code>.
+ * accessed by declaring an abstract getter or setter named
+ * <code>"get" + firstLetterUpperCase({@link #name()})()</code> (or
+ * <code>"is" + firstLetterUpperCase({@link #name()})()</code> in case of a boolean node field) and
+ * <code>"set" + firstLetterUpperCase({@link #name()})()</code>. If no setter is specified then the
+ * resulting field will be final and passed in as constructor argument to the create factory method.
+ * If an abstract setter was specified then the field will be mutable and not passed in as
+ * constructor argument. Note that the generated mutable field will not be {@link CompilationFinal}.
+ * <p>
+ * If the {@link NodeField} is used in combination with {@link GenerateUncached} then the generated
+ * getters or setters throw an {@link UnsupportedOperationException} for the uncached variant of the
+ * node.
  *
+ * @see GenerateUncached
  * @since 0.8 or earlier
  */
 @Retention(RetentionPolicy.CLASS)

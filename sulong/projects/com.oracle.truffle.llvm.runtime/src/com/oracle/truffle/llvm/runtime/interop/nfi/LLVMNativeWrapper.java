@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, Oracle and/or its affiliates.
+ * Copyright (c) 2018, 2021, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -31,24 +31,19 @@ package com.oracle.truffle.llvm.runtime.interop.nfi;
 
 import com.oracle.truffle.api.CallTarget;
 import com.oracle.truffle.api.CompilerDirectives;
-import com.oracle.truffle.api.CompilerDirectives.CompilationFinal;
-import com.oracle.truffle.api.TruffleLanguage.ContextReference;
 import com.oracle.truffle.api.dsl.Cached;
+import com.oracle.truffle.api.dsl.ImportStatic;
 import com.oracle.truffle.api.dsl.Specialization;
-import com.oracle.truffle.api.interop.ForeignAccess;
-import com.oracle.truffle.api.interop.MessageResolution;
-import com.oracle.truffle.api.interop.Resolve;
+import com.oracle.truffle.api.interop.InteropLibrary;
 import com.oracle.truffle.api.interop.TruffleObject;
+import com.oracle.truffle.api.library.ExportLibrary;
+import com.oracle.truffle.api.library.ExportMessage;
 import com.oracle.truffle.api.nodes.DirectCallNode;
 import com.oracle.truffle.api.nodes.ExplodeLoop;
-import com.oracle.truffle.api.nodes.Node;
-import com.oracle.truffle.llvm.runtime.LLVMContext;
-import com.oracle.truffle.llvm.runtime.LLVMFunctionDescriptor;
-import com.oracle.truffle.llvm.runtime.LLVMGetStackNode;
+import com.oracle.truffle.llvm.runtime.LLVMFunctionCode;
+import com.oracle.truffle.llvm.runtime.LLVMGetStackFromThreadNode;
 import com.oracle.truffle.llvm.runtime.LLVMLanguage;
-import com.oracle.truffle.llvm.runtime.interop.nfi.LLVMNativeWrapperFactory.CallbackHelperNodeGen;
-import com.oracle.truffle.llvm.runtime.memory.LLVMStack.StackPointer;
-import com.oracle.truffle.llvm.runtime.memory.LLVMThreadingStack;
+import com.oracle.truffle.llvm.runtime.memory.LLVMStack;
 import com.oracle.truffle.llvm.runtime.nodes.api.LLVMNode;
 import com.oracle.truffle.llvm.runtime.types.FunctionType;
 
@@ -56,104 +51,100 @@ import com.oracle.truffle.llvm.runtime.types.FunctionType;
  * Wrapper object for LLVMFunctionDescriptor that is used when functions are passed to the NFI. This
  * is used because arguments have to be handled slightly differently in that case.
  */
-@MessageResolution(receiverType = LLVMNativeWrapper.class)
+@ExportLibrary(InteropLibrary.class)
+@SuppressWarnings("static-method")
 public final class LLVMNativeWrapper implements TruffleObject {
 
-    private final LLVMFunctionDescriptor function;
+    final LLVMFunctionCode code;
 
-    public LLVMNativeWrapper(LLVMFunctionDescriptor function) {
-        assert function.isLLVMIRFunction() || function.isIntrinsicFunction();
-        this.function = function;
-    }
-
-    static boolean isInstance(TruffleObject obj) {
-        return obj instanceof LLVMNativeWrapper;
+    public LLVMNativeWrapper(LLVMFunctionCode code) {
+        assert code.isLLVMIRFunction() || code.isIntrinsicFunctionSlowPath();
+        this.code = code;
     }
 
     @Override
     public String toString() {
-        return function.toString();
+        return code.getLLVMFunction().toString();
     }
 
-    @Override
-    public ForeignAccess getForeignAccess() {
-        return LLVMNativeWrapperForeign.ACCESS;
+    @ExportMessage
+    boolean isExecutable() {
+        return true;
     }
 
-    @Resolve(message = "EXECUTE")
-    abstract static class ExecuteCallback extends Node {
+    @ExportMessage
+    static final class Execute {
 
-        @Child CallbackHelperNode callbackHelper = CallbackHelperNodeGen.create();
+        @Specialization(limit = "1", guards = "wrapper == callbackHelper.wrapper")
+        static Object doExecute(LLVMNativeWrapper wrapper, Object[] args,
+                        @Cached("create(wrapper)") CallbackHelperNode callbackHelper) {
+            assert wrapper == callbackHelper.wrapper;
+            return callbackHelper.execute(args);
+        }
 
-        Object access(LLVMNativeWrapper receiver, Object[] args) {
-            return callbackHelper.execute(receiver.function, args);
+        /**
+         * This should never happen. This code is only called from the NFI, and we explicitly
+         * instruct the NFI to create a separate CallTarget for every distinct LLVMNativeWrapper
+         * object, so we should never see uncached calls or multiple instances at one call site.
+         *
+         * @param wrapper
+         * @param args
+         */
+        @Specialization(replaces = "doExecute")
+        static Object doError(LLVMNativeWrapper wrapper, Object[] args) {
+            throw CompilerDirectives.shouldNotReachHere("unexpected generic case in LLVMNativeWrapper");
         }
     }
 
+    @ImportStatic(LLVMLanguage.class)
     abstract static class CallbackHelperNode extends LLVMNode {
 
-        @CompilationFinal ContextReference<LLVMContext> ctxRef;
-        @Child LLVMGetStackNode getStack = LLVMGetStackNode.create();
+        final LLVMNativeWrapper wrapper;
 
-        abstract Object execute(LLVMFunctionDescriptor function, Object[] args);
-
-        @Specialization(guards = "function == cachedFunction")
-        Object doCached(@SuppressWarnings("unused") LLVMFunctionDescriptor function, Object[] args,
-                        @Cached("function") @SuppressWarnings("unused") LLVMFunctionDescriptor cachedFunction,
-                        @Cached("createCallNode(cachedFunction)") DirectCallNode call,
-                        @Cached("createFromNativeNodes(cachedFunction.getType())") LLVMNativeConvertNode[] convertArgs,
-                        @Cached("createToNative(cachedFunction.getType().getReturnType())") LLVMNativeConvertNode convertRet) {
-            try (StackPointer stackPointer = newStackFrame()) {
-                Object[] preparedArgs = prepareCallbackArguments(stackPointer, args, convertArgs);
-                Object ret = call.call(preparedArgs);
-                return convertRet.executeConvert(ret);
-            }
+        CallbackHelperNode(LLVMNativeWrapper wrapper) {
+            this.wrapper = wrapper;
         }
 
-        @Specialization(replaces = "doCached")
-        @SuppressWarnings("unused")
-        Object doGeneric(LLVMFunctionDescriptor function, Object[] args) {
-            /*
-             * This should never happen. This node is only called from the NFI, and the NFI creates
-             * a separate CallTarget for every distinct callback object, so we should never see more
-             * than one distinct LLVMFunctionDescriptor.
-             */
-            throw new IllegalStateException("unexpected generic case in LLVMNativeCallback");
+        abstract Object execute(Object[] args);
+
+        @Specialization
+        Object doCached(Object[] args,
+                        @Cached LLVMGetStackFromThreadNode getStack,
+                        @Cached("createCallNode()") DirectCallNode call,
+                        @Cached("createFromNativeNodes()") LLVMNativeConvertNode[] convertArgs,
+                        @Cached("createToNative(wrapper.code.getLLVMFunction().getType().getReturnType())") LLVMNativeConvertNode convertRet) {
+            LLVMStack stack = getStack.executeWithTarget(getContext().getThreadingStack(), Thread.currentThread());
+            Object[] preparedArgs = prepareCallbackArguments(stack, args, convertArgs);
+            Object ret = call.call(preparedArgs);
+            return convertRet.executeConvert(ret);
         }
 
-        DirectCallNode createCallNode(LLVMFunctionDescriptor function) {
+        DirectCallNode createCallNode() {
+            LLVMFunctionCode functionCode = wrapper.code;
             CallTarget callTarget;
-            if (function.isLLVMIRFunction()) {
-                callTarget = function.getLLVMIRFunction();
-            } else if (function.isIntrinsicFunction()) {
-                callTarget = function.getIntrinsic().cachedCallTarget(function.getType());
+            if (functionCode.isLLVMIRFunction()) {
+                callTarget = functionCode.getLLVMIRFunctionSlowPath();
+            } else if (functionCode.isIntrinsicFunctionSlowPath()) {
+                callTarget = functionCode.getIntrinsicSlowPath().cachedCallTarget(functionCode.getLLVMFunction().getType());
             } else {
-                throw new IllegalStateException("unexpected function: " + function.toString());
+                throw new IllegalStateException("unexpected function: " + functionCode.getLLVMFunction().toString());
             }
             return DirectCallNode.create(callTarget);
         }
 
-        private StackPointer newStackFrame() {
-            if (ctxRef == null) {
-                CompilerDirectives.transferToInterpreterAndInvalidate();
-                ctxRef = LLVMLanguage.getLLVMContextReference();
-            }
-            LLVMThreadingStack threadingStack = ctxRef.get().getThreadingStack();
-            return getStack.executeWithTarget(threadingStack, Thread.currentThread()).newFrame();
-        }
-
-        protected static LLVMNativeConvertNode[] createFromNativeNodes(FunctionType type) {
-            LLVMNativeConvertNode[] ret = new LLVMNativeConvertNode[type.getArgumentTypes().length];
-            for (int i = 0; i < type.getArgumentTypes().length; i++) {
-                ret[i] = LLVMNativeConvertNode.createFromNative(type.getArgumentTypes()[i]);
+        protected LLVMNativeConvertNode[] createFromNativeNodes() {
+            FunctionType type = wrapper.code.getLLVMFunction().getType();
+            LLVMNativeConvertNode[] ret = new LLVMNativeConvertNode[type.getNumberOfArguments()];
+            for (int i = 0; i < type.getNumberOfArguments(); i++) {
+                ret[i] = LLVMNativeConvertNode.createFromNative(type.getArgumentType(i));
             }
             return ret;
         }
 
         @ExplodeLoop
-        private static Object[] prepareCallbackArguments(StackPointer stackPointer, Object[] arguments, LLVMNativeConvertNode[] fromNative) {
+        private static Object[] prepareCallbackArguments(LLVMStack stack, Object[] arguments, LLVMNativeConvertNode[] fromNative) {
             Object[] callbackArgs = new Object[fromNative.length + 1];
-            callbackArgs[0] = stackPointer;
+            callbackArgs[0] = stack;
             for (int i = 0; i < fromNative.length; i++) {
                 callbackArgs[i + 1] = fromNative[i].executeConvert(arguments[i]);
             }

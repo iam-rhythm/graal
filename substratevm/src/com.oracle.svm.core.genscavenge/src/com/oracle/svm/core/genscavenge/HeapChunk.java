@@ -24,107 +24,113 @@
  */
 package com.oracle.svm.core.genscavenge;
 
-import org.graalvm.compiler.word.Word;
-import org.graalvm.nativeimage.Platform;
-import org.graalvm.nativeimage.Platforms;
+import java.util.function.IntUnaryOperator;
+
 import org.graalvm.nativeimage.c.struct.RawField;
+import org.graalvm.nativeimage.c.struct.RawFieldOffset;
+import org.graalvm.nativeimage.c.struct.RawFieldAddress;
 import org.graalvm.nativeimage.c.struct.RawStructure;
 import org.graalvm.nativeimage.c.struct.UniqueLocationIdentity;
+import org.graalvm.word.ComparableWord;
+import org.graalvm.word.LocationIdentity;
 import org.graalvm.word.Pointer;
 import org.graalvm.word.PointerBase;
+import org.graalvm.word.SignedWord;
 import org.graalvm.word.UnsignedWord;
 
-import com.oracle.svm.core.MemoryWalker;
-import com.oracle.svm.core.annotate.Uninterruptible;
+import com.oracle.svm.core.AlwaysInline;
+import com.oracle.svm.core.NeverInline;
+import com.oracle.svm.core.Uninterruptible;
 import com.oracle.svm.core.c.struct.PinnedObjectField;
-import com.oracle.svm.core.heap.Heap;
-import com.oracle.svm.core.heap.ObjectHeader;
 import com.oracle.svm.core.heap.ObjectVisitor;
-import com.oracle.svm.core.hub.DynamicHub;
 import com.oracle.svm.core.hub.LayoutEncoding;
-import com.oracle.svm.core.log.Log;
+import com.oracle.svm.core.identityhashcode.IdentityHashCodeSupport;
+import com.oracle.svm.core.util.VMError;
+
+import jdk.graal.compiler.api.directives.GraalDirectives;
+import jdk.graal.compiler.nodes.NamedLocationIdentity;
+import jdk.graal.compiler.word.Word;
 
 /**
- * HeapChunk is a superclass for the memory that makes up the Heap. HeapChunks are aggregated into
- * Spaces.
+ * The common structure of the chunks of memory which make up the heap. HeapChunks are aggregated
+ * into {@linkplain Space spaces}. A specific "subtype" of chunk should be accessed via its own
+ * accessor class, such as {@link AlignedHeapChunk}, which provides methods that are specific to the
+ * type of chunk and its layout. (Such classes intentionally do not subclass {@link HeapChunk} so to
+ * not directly expose its methods.)
  * <p>
- * A HeapChunk is not a normal Object, so can't be allocated/constructed/initialized using new. A
- * HeapChunk is raw memory with a {@linkplain Header} on the beginning that keeps bookkeeping
+ * A HeapChunk is raw memory with a {@linkplain Header} on the beginning that stores bookkeeping
  * information about the HeapChunk. HeapChunks do not have any instance methods: instead they have
  * static methods that take the HeapChunk.Header as a parameter.
  * <p>
- * HeapChunks maintain Pointers to the current allocation point (top) with them, and the limit (end)
- * where Objects can be allocated. Subclasses of HeapChunks can add additional fields as needed. For
- * example, a HeapChunk in the CardRememberedSet heap can be pinned, and maintains an additional
- * field in its header to record if a HeapChunk is pinned or not.
+ * HeapChunks maintain offsets of the current allocation point (top) with them, and the limit (end)
+ * where Objects can be allocated. Subclasses of HeapChunks can add additional fields as needed.
  * <p>
  * HeapChunks maintain some fields that would otherwise have to be maintained in per-HeapChunk
  * memory by the Space that contains them. For example, the fields for linking lists of HeapChunks
  * in a Space is kept in each HeapChunk rather than in some storage outside the HeapChunk.
  * <p>
- * For fields that are maintained as more-specifically-typed Pointers by leaf "sub-classes",
+ * For fields that are maintained as more-specifically-typed offsets by leaf "sub-classes",
  * HeapChunk defines the generic (Pointer) "get" methods, and only the "sub-classes" define "set"
  * methods that store more-specifically-typed Pointers, for type safety.
  * <p>
- * Some things that seem like they should be field access instead just compute (rather than store)
- * Pointers. For example, the start of where Objects can be allocated within a HeapChunk depends on
- * the size of the Header for the HeapChunk, which depends on the layout of the various leaf
- * "sub-classes" of HeapChunk. If HeapChunk were a regular Java object, the method that returned the
- * Pointer to "start" might be declared as an abstract virtual method, but HeapChunk does not have
- * methods like that, so each leaf class declares a static method to return "start". Virtual method
- * access can be provided by, for example,
- * {@linkplain AlignedHeapChunk#getAlignedHeapChunkStart(AlignedHeapChunk.AlignedHeader)} and
- * {@linkplain UnalignedHeapChunk#getUnalignedStart(UnalignedHeapChunk.UnalignedHeader)}.
- * <p>
- * In addition to the declared fields of a HeapChunk.Header, for example, a
- * CardRememberedSetHeapChunk keeps a card table for the write barrier, but because they are
- * variable-sized, rather than declaring field in the Header, static methods are used to compute
- * Pointers to those "fields".
- * <p>
- * HeapChunk <em>could</em> have a private constructor to prevent instances from being created, but
- * that prevents sub-classing HeapChunk and the inheritance of the static methods defined here.
+ * In addition to the declared fields of a HeapChunk.Header, for example, a subtype keeps a card
+ * table for the write barrier, but because they are variable-sized, rather than declaring field in
+ * the Header, static methods are used to compute Pointers to those "fields".
  * <p>
  * HeapChunks are *not* examined for interior Object references by the collector, though the Objects
  * allocated within the HeapChunk are examined by the collector.
  */
-public class HeapChunk {
+public final class HeapChunk {
 
+    public static final LocationIdentity CHUNK_HEADER_TOP_IDENTITY = NamedLocationIdentity.mutable("ChunkHeader.top");
+
+    private HeapChunk() { // all static
+    }
+
+    static class HeaderPaddingSizeProvider implements IntUnaryOperator {
+        @Override
+        public int applyAsInt(int operand) {
+            assert operand == 0 : "padding structure does not declare any fields";
+            return SerialAndEpsilonGCOptions.HeapChunkHeaderPadding.getValue();
+        }
+    }
+
+    @RawStructure(sizeProvider = HeaderPaddingSizeProvider.class)
+    private interface HeaderPadding extends PointerBase {
+    }
+
+    /**
+     * The header of a chunk. All locations are given as offsets relative to the start of this
+     * chunk, including the links to the previous and next chunk in the linked list in which this
+     * chunk is inserted. This is necessary because the runtime addresses are not yet known for the
+     * chunks in the image heap, and relocations need to be avoided.
+     */
     @RawStructure
-    public interface Header<T extends Header<T>> extends PointerBase {
-
+    public interface Header<T extends Header<T>> extends HeaderPadding {
         /**
-         * Pointer to the memory available for allocation, i.e., the end of the last allocated
-         * object in the chunk.
+         * Offset of the memory available for allocation, i.e., the end of the last allocated object
+         * in the chunk.
          */
         @RawField
+        UnsignedWord getTopOffset(LocationIdentity topIdentity);
+
+        @RawField
+        void setTopOffset(UnsignedWord newTop, LocationIdentity topIdentity);
+
+        @RawFieldOffset
+        static int offsetOfTopOffset() {
+            // replaced
+            throw VMError.shouldNotReachHereAtRuntime(); // ExcludeFromJacocoGeneratedReport
+        }
+
+        /** Offset of the limit of memory available for allocation. */
+        @RawField
         @UniqueLocationIdentity
-        Pointer getTop();
+        UnsignedWord getEndOffset();
 
         @RawField
         @UniqueLocationIdentity
-        void setTop(Pointer newTop);
-
-        /**
-         * Pointer to limit of the memory available for allocation, i.e., the end of the memory.
-         */
-        @RawField
-        @UniqueLocationIdentity
-        Pointer getEnd();
-
-        @RawField
-        @UniqueLocationIdentity
-        void setEnd(Pointer newEnd);
-
-        /**
-         * Whether this chunk is pinned.
-         */
-        @RawField
-        @UniqueLocationIdentity
-        boolean getPinned();
-
-        @RawField
-        @UniqueLocationIdentity
-        void setPinned(boolean isPinned);
+        void setEndOffset(UnsignedWord newEnd);
 
         /**
          * The Space this HeapChunk is part of.
@@ -143,190 +149,219 @@ public class HeapChunk {
         void setSpace(Space newSpace);
 
         /**
-         * The previous HeapChunk in the doubly-linked list maintained by the Space.
+         * Address offset of the previous HeapChunk relative to this chunk's address in a
+         * doubly-linked list of chunks.
          */
         @RawField
         @UniqueLocationIdentity
-        T getPrevious();
+        SignedWord getOffsetToPreviousChunk();
 
         @RawField
         @UniqueLocationIdentity
-        void setPrevious(T newPrevious);
+        void setOffsetToPreviousChunk(SignedWord newPrevious);
 
         /**
-         * The next HeapChunk in the doubly-linked list maintained by the Space.
+         * Address offset of the next HeapChunk relative to this chunk's address in a doubly-linked
+         * list of chunks.
          */
         @RawField
         @UniqueLocationIdentity
-        T getNext();
+        SignedWord getOffsetToNextChunk();
 
         @RawField
         @UniqueLocationIdentity
-        void setNext(T newNext);
+        void setOffsetToNextChunk(SignedWord newNext);
+
+        @RawField
+        UnsignedWord getIdentityHashSalt(LocationIdentity identity);
+
+        @RawField
+        void setIdentityHashSalt(UnsignedWord value, LocationIdentity identity);
+
+        @RawField
+        int getPinnedObjectCount();
+
+        @RawFieldAddress
+        Pointer addressOfPinnedObjectCount();
     }
 
-    /** Apply an ObjectVisitor to all the Objects in the given HeapChunk. */
-    public static boolean walkObjectsFrom(Header<?> that, Pointer offset, ObjectVisitor visitor) {
-        final Log trace = Log.noopLog().string("[HeapChunk.walkObjectsFrom:");
-        trace.string("  that: ").hex(that).string("  offset: ").hex(offset).string("  getTop(): ").hex(that.getTop());
-        /* Get the Object at the offset, or null. */
-        Object obj = (offset.belowThan(that.getTop()) ? offset.toObject() : null);
-        while (obj != null) {
-            assert walkObjectsFromAssert(obj, that, offset) : "HeapChunk.walkObjectsFrom: hub fails to verify.";
-            trace.newline().string("  o: ").object(obj).newline();
-            if (!visitor.visitObjectInline(obj)) {
-                trace.string("  visitObject fails").string("  returns false").string("]").newline();
-                return false;
-            }
-            /* Step by Object. */
-            obj = getNextObject(that, obj);
-        }
-        trace.string("  returns true").string("]").newline();
-        return true;
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public static void initialize(Header<?> chunk, Pointer objectsStart, UnsignedWord endOffset) {
+        HeapChunk.setEndOffset(chunk, endOffset);
+        HeapChunk.setTopPointer(chunk, objectsStart);
+        HeapChunk.setSpace(chunk, null);
+        HeapChunk.setNext(chunk, Word.nullPointer());
+        HeapChunk.setPrevious(chunk, Word.nullPointer());
+
+        /*
+         * The epoch is obviously not random, but cheap to use, and we cannot use a random number
+         * generator object in all contexts where we are called from, particularly during GC.
+         * Together with a good bit mixer function, it seems sufficient.
+         */
+        HeapChunk.setIdentityHashSalt(chunk, GCImpl.getGCImpl().getCollectionEpoch());
     }
 
-    /** Assert that the hub of obj is well-formed. For GR-9912. */
-    private static boolean walkObjectsFromAssert(Object obj, Header<?> that, Pointer offset) {
-        if (GCImpl.runtimeAssertions() && !HeapImpl.getHeapImpl().assertHubOfObject(obj)) {
-            final Log failureLog = Log.log().string("[HeapChunk.walkObjectsFromAssert:").indent(true);
-            failureLog.string("  that: ").hex(that).newline()
-                            .string("  offset: ").hex(offset).newline()
-                            .string("  getTop: ").hex(that.getTop()).newline()
-                            .string("  obj: ").hex(Word.objectToUntrackedPointer(obj)).newline();
-            final UnsignedWord header = ObjectHeader.readHeaderFromObject(obj);
-            final DynamicHub hub = ObjectHeader.dynamicHubFromObjectHeader(header);
-            failureLog.string("  header: ").hex(header)
-                            .string("  hub: ").hex(Word.objectToUntrackedPointer(hub))
-                            .string("  headerBits: ").string(Heap.getHeap().getObjectHeader().toStringFromHeader(header)).newline();
-            failureLog.string("  hub fails to verify.]").indent(false);
-            return false;
-        }
-        return true;
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public static UnsignedWord getTopOffset(Header<?> that) {
+        assert getTopPointer(that).isNonNull() : "Not safe: top currently points to NULL.";
+        return that.getTopOffset(CHUNK_HEADER_TOP_IDENTITY);
     }
 
-    /** Given an Object, return the next Object in this HeapChunk, or null. */
-    private static Object getNextObject(Header<?> that, Object obj) {
-        final Log trace = Log.noopLog().string("[HeapChunk.getNextObject:").newline();
-        final Pointer objEnd = LayoutEncoding.getObjectEnd(obj);
-        trace.string("  o: ").object(obj).string("  objEnd: ").hex(objEnd).string("  top: ").hex(that.getTop()).newline();
-        /* Check if top is below the proposed next object. */
-        if (that.getTop().belowOrEqual(objEnd)) {
-            trace.string("  returns null").string("]").newline();
-            return null;
-        }
-        final Object result = objEnd.toObject();
-        /* TODO: How do I assert that result is an Object? */
-        trace.string(" returns ").object(result).string("]").newline();
-        return result;
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public static Pointer getTopPointer(Header<?> that) {
+        return asPointer(that).add(that.getTopOffset(CHUNK_HEADER_TOP_IDENTITY));
     }
 
-    /** How much space is available for objects in a HeapChunk? */
-    @Uninterruptible(reason = "Called from uninterruptible code.")
-    public static UnsignedWord availableObjectMemory(Header<?> that) {
-        final Pointer top = that.getTop();
-        final Pointer end = that.getEnd();
-        return end.subtract(top);
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public static void setTopPointer(Header<?> that, Pointer newTop) {
+        // Note that the address arithmetic also works for newTop == NULL, e.g. in TLAB allocation
+        that.setTopOffset(newTop.subtract(asPointer(that)), CHUNK_HEADER_TOP_IDENTITY);
     }
 
-    /** Set top, being careful that it is between the current top and end. */
-    @Uninterruptible(reason = "Called from uninterruptible code.")
-    protected static void setTopCarefully(Header<?> that, Pointer newTop) {
-        assert that.getTop().belowOrEqual(newTop) : "newTop too low.";
-        assert newTop.belowOrEqual(that.getEnd()) : "newTop too high.";
-        that.setTop(newTop);
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public static void setTopPointerCarefully(Header<?> that, Pointer newTop) {
+        assert getTopPointer(that).isNonNull() : "Not safe: top currently points to NULL.";
+        assert getTopPointer(that).belowOrEqual(newTop) : "newTop too low.";
+        assert newTop.belowOrEqual(getEndPointer(that)) : "newTop too high.";
+        setTopPointer(that, newTop);
+    }
+
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public static UnsignedWord getEndOffset(Header<?> that) {
+        return that.getEndOffset();
+    }
+
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public static Pointer getEndPointer(Header<?> that) {
+        return asPointer(that).add(getEndOffset(that));
+    }
+
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public static void setEndOffset(Header<?> that, UnsignedWord newEnd) {
+        that.setEndOffset(newEnd);
+    }
+
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public static Space getSpace(Header<?> that) {
+        return that.getSpace();
+    }
+
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public static void setSpace(Header<?> that, Space newSpace) {
+        that.setSpace(newSpace);
+    }
+
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public static <T extends Header<T>> T getPrevious(Header<T> that) {
+        return pointerFromOffset(that, that.getOffsetToPreviousChunk());
+    }
+
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public static <T extends Header<T>> void setPrevious(Header<T> that, T newPrevious) {
+        that.setOffsetToPreviousChunk(offsetFromPointer(that, newPrevious));
+    }
+
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public static <T extends Header<T>> T getNext(Header<T> that) {
+        return pointerFromOffset(that, that.getOffsetToNextChunk());
+    }
+
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public static <T extends Header<T>> void setNext(Header<T> that, T newNext) {
+        that.setOffsetToNextChunk(offsetFromPointer(that, newNext));
+    }
+
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public static UnsignedWord getIdentityHashSalt(Header<?> that) {
+        return that.getIdentityHashSalt(IdentityHashCodeSupport.IDENTITY_HASHCODE_SALT_LOCATION);
+    }
+
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public static void setIdentityHashSalt(Header<?> that, UnsignedWord value) {
+        that.setIdentityHashSalt(value, IdentityHashCodeSupport.IDENTITY_HASHCODE_SALT_LOCATION);
     }
 
     /**
-     * Convenience method: Cast a {@link Header} to a {@link Pointer} to allow address arithmetic.
+     * Converts from an offset to a pointer, where a zero offset translates to {@code NULL}. This is
+     * necessary for treating image heap chunks, where addresses at runtime are not yet known.
      */
     @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
-    protected static Pointer asPointer(Header<?> that) {
+    @SuppressWarnings("unchecked")
+    private static <T extends PointerBase> T pointerFromOffset(Header<?> that, ComparableWord offset) {
+        T pointer = Word.nullPointer();
+        if (offset.notEqual(Word.zero())) {
+            pointer = (T) ((SignedWord) that).add((SignedWord) offset);
+        }
+        return pointer;
+    }
+
+    /**
+     * Converts from a pointer to an offset, where {@code NULL} translates to zero. This method is
+     * used only at runtime and in contexts where technically, special treatment of {@code NULL} is
+     * not necessary because it would be covered by the arithmetic, but it is done for consistency.
+     */
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    private static SignedWord offsetFromPointer(Header<?> that, PointerBase pointer) {
+        SignedWord offset = Word.zero();
+        if (pointer.isNonNull()) {
+            offset = ((SignedWord) pointer).subtract((SignedWord) that);
+        }
+        return offset;
+    }
+
+    @NeverInline("Not performance critical")
+    @Uninterruptible(reason = "Forced inlining (StoredContinuation objects must not move).")
+    public static void walkObjectsFrom(Header<?> that, Pointer start, ObjectVisitor visitor) {
+        walkObjectsFromInline(that, start, visitor);
+    }
+
+    @AlwaysInline("GC performance")
+    @Uninterruptible(reason = "Forced inlining (StoredContinuation objects must not move).", callerMustBe = true)
+    public static void walkObjectsFromInline(Header<?> that, Pointer start, ObjectVisitor visitor) {
+        Pointer p = start;
+        while (p.belowThan(getTopPointer(that))) { // crucial: top can move, so always re-read
+            Object obj = p.toObjectNonNull();
+            callVisitor(visitor, obj);
+            p = p.add(LayoutEncoding.getSizeFromObjectInlineInGC(obj));
+        }
+    }
+
+    @AlwaysInline("de-virtualize calls to ObjectReferenceVisitor")
+    @Uninterruptible(reason = "Bridge between uninterruptible and potentially interruptible code.", mayBeInlined = true, calleeMustBe = false)
+    private static void callVisitor(ObjectVisitor visitor, Object obj) {
+        visitor.visitObject(obj);
+    }
+
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public static UnsignedWord availableObjectMemory(Header<?> that) {
+        return that.getEndOffset().subtract(that.getTopOffset(CHUNK_HEADER_TOP_IDENTITY));
+    }
+
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public static Pointer asPointer(Header<?> that) {
         return (Pointer) that;
     }
 
-    /** Shared methods for a MemoryWalker to access a heap chunk. */
-    public abstract static class MemoryWalkerAccessImpl<T extends HeapChunk.Header<?>> implements MemoryWalker.HeapChunkAccess<T> {
-
-        /** A constructor for subclasses. */
-        @Platforms(Platform.HOSTED_ONLY.class)
-        protected MemoryWalkerAccessImpl() {
-            super();
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public static HeapChunk.Header<?> getEnclosingHeapChunk(Object obj) {
+        if (!GraalDirectives.inIntrinsic()) {
+            assert !ObjectHeaderImpl.isPointerToForwardedObject(Word.objectToUntrackedPointer(obj)) : "Forwarded objects must be a pointer and not an object";
         }
-
-        @Override
-        public UnsignedWord getStart(T heapChunk) {
-            return (UnsignedWord) heapChunk;
-        }
-
-        @Override
-        public UnsignedWord getSize(T heapChunk) {
-            return heapChunk.getEnd().subtract(getStart(heapChunk));
-        }
-
-        @Override
-        public UnsignedWord getAllocationEnd(T heapChunk) {
-            return heapChunk.getTop();
-        }
-
-        @Override
-        public String getRegion(T heapChunk) {
-            /* This method knows too much about spaces, especially the "free" space. */
-            final Space space = heapChunk.getSpace();
-            final String result;
-            if (space == null) {
-                result = "free";
-            } else if (space.isYoungSpace()) {
-                result = "young";
-            } else {
-                result = "old";
+        if (ObjectHeaderImpl.isAlignedObject(obj)) {
+            return AlignedHeapChunk.getEnclosingChunk(obj);
+        } else {
+            if (!GraalDirectives.inIntrinsic()) {
+                assert ObjectHeaderImpl.isUnalignedObject(obj);
             }
-            return result;
-        }
-
-        @Override
-        public boolean isPinned(T heapChunk) {
-            /*
-             * Pinned chunks are those in the pinned space of the old generation. I.e., from
-             * PinnedAllocators. I do not try to identify individual objects that have been pinned,
-             * because that would be slow.
-             */
-            return (heapChunk.getSpace() == HeapImpl.getHeapImpl().getOldGeneration().getPinnedFromSpace());
+            return UnalignedHeapChunk.getEnclosingChunk(obj);
         }
     }
 
-    /*
-     * Verification.
-     */
-
-    /** Verify a chunk. */
-    static boolean verifyHeapChunk(Header<?> that, Pointer start) {
-        /* Verify all the objects in this chunk. */
-        final Log trace = HeapImpl.getHeapImpl().getHeapVerifierImpl().getTraceLog().string("[HeapChunk.verify:");
-        trace.string("  that:  ").hex(that).string("  start: ").hex(start).string("  top: ").hex(that.getTop()).string("  end: ").hex(that.getEnd());
-        Pointer p = start;
-        while (p.belowThan(that.getTop())) {
-            if (!HeapImpl.getHeapImpl().getHeapVerifierImpl().verifyObjectAt(p)) {
-                final Log witness = HeapImpl.getHeapImpl().getHeapVerifierImpl().getWitnessLog().string("[HeapChunk.verify:");
-                witness.string("  that:  ").hex(that).string("  start: ").hex(start).string("  top: ").hex(that.getTop()).string("  end: ").hex(that.getEnd());
-                witness.string("  space: ").string(that.getSpace().getName());
-                witness.string("  object at p: ").hex(p).string("  fails to verify").string("]").newline();
-                trace.string("  returns false]").newline();
-                return false;
-            }
-            /* Step carefully over the object. */
-            final UnsignedWord header = ObjectHeaderImpl.readHeaderFromPointerCarefully(p);
-            final Object o;
-
-            if (ObjectHeaderImpl.getObjectHeaderImpl().isForwardedHeaderCarefully(header)) {
-                /* Use the forwarded object to get the size. */
-                o = ObjectHeaderImpl.getObjectHeaderImpl().getForwardedObject(p);
-            } else {
-                /* Use the object to get the size. */
-                o = p.toObject();
-            }
-            p = p.add(LayoutEncoding.getSizeFromObject(o));
+    public static HeapChunk.Header<?> getEnclosingHeapChunk(Pointer ptrToObj, UnsignedWord header) {
+        if (ObjectHeaderImpl.isAlignedHeader(header)) {
+            return AlignedHeapChunk.getEnclosingChunkFromObjectPointer(ptrToObj);
+        } else {
+            return UnalignedHeapChunk.getEnclosingChunkFromObjectPointer(ptrToObj);
         }
-        trace.string("  returns true]").newline();
-        return true;
     }
 }

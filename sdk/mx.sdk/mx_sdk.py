@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2018, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2018, 2024, Oracle and/or its affiliates. All rights reserved.
 # DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
 #
 # The Universal Permissive License (UPL), Version 1.0
@@ -39,31 +39,49 @@
 # SOFTWARE.
 #
 
-from abc import ABCMeta
+from __future__ import print_function
+import os
 
 import mx
 import mx_gate
-import mx_subst
+import mx_sdk_vm
+import mx_sdk_vm_impl
+import mx_sdk_vm_ng
+import pathlib
+import mx_sdk_benchmark # pylint: disable=unused-import
+import mx_sdk_clangformat # pylint: disable=unused-import
+import argparse
 import datetime
+import shutil
+import tempfile
+from mx_bisect import define_bisect_default_build_steps
+from mx_bisect_strategy import BuildStepsGraalVMStrategy
 
 from mx_gate import Task
 from mx_unittest import unittest
 
+# re-export custom mx project classes, so they can be used from suite.py
+from mx_sdk_toolchain import ToolchainTestProject # pylint: disable=unused-import
+from mx_sdk_shaded import ShadedLibraryProject # pylint: disable=unused-import
+
 _suite = mx.suite('sdk')
 
-graalvm_hostvm_configs = [
-    ('jvm', [], ['--jvm'], 50),
-    ('native', [], ['--native'], 100)
-]
+
+define_bisect_default_build_steps(BuildStepsGraalVMStrategy())
 
 
 def _sdk_gate_runner(args, tasks):
-    with Task('SDK UnitTests', tasks, tags=['test']) as t:
-        if t: unittest(['--suite', 'sdk', '--enable-timing', '--verbose', '--fail-fast'])
+    with Task('SDK UnitTests', tasks, tags=['test'], report=True) as t:
+        if t:
+            unittest(['--suite', 'sdk', '--enable-timing', '--verbose', '--max-class-failures=25'], test_report_tags={'task': t.title})
     with Task('Check Copyrights', tasks) as t:
-        if t: mx.checkcopyrights(['--primary'])
+        if t:
+            if mx.command_function('checkcopyrights')(['--primary', '--', '--projects', 'src']) != 0:
+                t.abort('Copyright errors found. Please run "mx checkcopyrights --primary -- --fix" to fix them.')
+
 
 mx_gate.add_gate_runner(_suite, _sdk_gate_runner)
+
 
 def build_oracle_compliant_javadoc_args(suite, product_name, feature_name):
     """
@@ -71,282 +89,334 @@ def build_oracle_compliant_javadoc_args(suite, product_name, feature_name):
     :type feature_name: str
     """
     version = suite.release_version()
-    revision = suite.vc.parent(suite.vc_dir)
-    copyright_year = str(datetime.datetime.fromtimestamp(suite.vc.parent_info(suite.vc_dir)['committer-ts']).year)
+    if suite.vc:
+        revision = suite.vc.parent(suite.vc_dir)
+        copyright_year = str(datetime.datetime.fromtimestamp(suite.vc.parent_info(suite.vc_dir)['committer-ts']).year)
+    else:
+        revision = None
+        copyright_year = datetime.datetime.now().year
     return ['--arg', '@-header', '--arg', '<b>%s %s Java API Reference<br>%s</b><br>%s' % (product_name, feature_name, version, revision),
             '--arg', '@-bottom', '--arg', '<center>Copyright &copy; 2012, %s, Oracle and/or its affiliates. All rights reserved.</center>' % (copyright_year),
             '--arg', '@-windowtitle', '--arg', '%s %s Java API Reference' % (product_name, feature_name)]
 
+
 def javadoc(args):
     """build the Javadoc for all API packages"""
     extraArgs = build_oracle_compliant_javadoc_args(_suite, 'GraalVM', 'SDK')
-    mx.javadoc(['--unified', '--exclude-packages', 'org.graalvm.polyglot.tck'] + extraArgs + args)
+    excludedPackages = [
+        'org.graalvm.polyglot.tck',
+        'org.graalvm.sdk',
+        'org.graalvm.shadowed.org.jline.reader',
+        'org.graalvm.shadowed.org.jline.reader.impl.completer',
+        'org.graalvm.shadowed.org.jline.reader.impl.history',
+        'org.graalvm.shadowed.org.jline.terminal.impl',
+        'org.graalvm.shadowed.org.jline.utils',
+    ]
+    mx.javadoc(['--unified', '--disallow-all-warnings', '--exclude-packages', ','.join(excludedPackages)] + extraArgs + args)
 
-def add_graalvm_hostvm_config(name, java_args=None, launcher_args=None, priority=0):
-    """
-    :type name: str
-    :type java_args: list[str] | None
-    :type launcher_args: list[str] | None
-    :type priority: int
-    """
-    graalvm_hostvm_configs.append((name, java_args, launcher_args, priority))
-
-
-class AbstractNativeImageConfig(object):
-    __metaclass__ = ABCMeta
-
-    def __init__(self, destination, jar_distributions, build_args, links=None):
-        """
-        :type destination: str
-        :type jar_distributions: list[str]
-        :type build_args: list[str]
-        :type links: list[str]
-        """
-        self.destination = mx_subst.path_substitutions.substitute(destination)
-        self.jar_distributions = jar_distributions
-        self.build_args = build_args
-        self.links = [mx_subst.path_substitutions.substitute(link) for link in links] if links else []
-
-        assert isinstance(self.jar_distributions, list)
-        assert isinstance(self.build_args, list)
-
-    def __str__(self):
-        return self.destination
-
-    def __repr__(self):
-        return str(self)
+def upx(args):
+    """compress binaries using the upx tool"""
+    upx_directory = mx.library("UPX", True).get_path(True)
+    upx_path = os.path.join(upx_directory, mx.exe_suffix("upx"))
+    upx_cmd = [upx_path] + args
+    mx.run(upx_cmd, mx.TeeOutputCapture(mx.OutputCapture()), mx.TeeOutputCapture(mx.OutputCapture()))
 
 
-class LauncherConfig(AbstractNativeImageConfig):
-    def __init__(self, destination, jar_distributions, main_class, build_args, links=None, is_main_launcher=True,
-                 default_symlinks=True):
-        """
-        :type main_class: str
-        :type default_symlinks: bool
-        """
-        super(LauncherConfig, self).__init__(destination, jar_distributions, build_args, links=links)
-        self.main_class = main_class
-        self.is_main_launcher = is_main_launcher
-        self.default_symlinks = default_symlinks
+# SDK modules included if truffle, compiler and native-image is included
+graalvm_sdk_component = mx_sdk_vm.GraalVmJreComponent(
+    suite=_suite,
+    name='Graal SDK',
+    short_name='sdk',
+    dir_name='graalvm',
+    license_files=[],
+    third_party_license_files=[],
+    dependencies=['sdkni'],
+    jar_distributions=[],
+    boot_jars=['sdk:POLYGLOT', 'sdk:GRAAL_SDK'],
+    stability="supported",
+)
+mx_sdk_vm.register_graalvm_component(graalvm_sdk_component)
+
+# SDK modules included if the compiler (jargraal) is included
+graal_sdk_compiler_component = mx_sdk_vm.GraalVmJreComponent(
+    suite=_suite,
+    name='Graal SDK Compiler',
+    short_name='sdkc',
+    dir_name='graalvm',
+    license_files=[],
+    third_party_license_files=[],
+    dependencies=[],
+    jar_distributions=[],
+    boot_jars=['sdk:WORD', 'sdk:COLLECTIONS', 'sdk:NATIVEIMAGE'],
+    stability="supported",
+)
+mx_sdk_vm.register_graalvm_component(graal_sdk_compiler_component)
+
+# SDK modules included if the compiler and native-image is included
+graalvm_sdk_native_image_component = mx_sdk_vm.GraalVmJreComponent(
+    suite=_suite,
+    name='Graal SDK Native Image',
+    short_name='sdkni',
+    dir_name='graalvm',
+    license_files=[],
+    third_party_license_files=[],
+    dependencies=['sdkc'],
+    jar_distributions=[],
+    boot_jars=['sdk:NATIVEIMAGE', 'sdk:NATIVEIMAGE_LIBGRAAL', 'sdk:WEBIMAGE_PREVIEW'],
+    stability="supported",
+)
+mx_sdk_vm.register_graalvm_component(graalvm_sdk_native_image_component)
+
+graalvm_launcher_common_component = mx_sdk_vm.GraalVmJreComponent(
+    suite=_suite,
+    name='GraalVM Launcher Common',
+    short_name='sdkl',
+    dir_name='graalvm',
+    license_files=[],
+    third_party_license_files=[],
+    dependencies=['Graal SDK'],
+    jar_distributions=['sdk:LAUNCHER_COMMON', 'sdk:JLINE3'],
+    boot_jars=[],
+    stability="supported",
+)
+mx_sdk_vm.register_graalvm_component(graalvm_launcher_common_component)
+
+mx_sdk_vm.register_graalvm_component(mx_sdk_vm.GraalVmJreComponent(
+    suite=_suite,
+    name='LLVM.org toolchain',
+    short_name='llp',
+    dir_name='llvm',
+    license_files=[],
+    third_party_license_files=['3rd_party_license_llvm-toolchain.txt'],
+    dependencies=[],
+    support_distributions=['LLVM_TOOLCHAIN'],
+    stability="supported",
+))
+
+def mx_register_dynamic_suite_constituents(register_project, register_distribution):
+    mx_sdk_vm_impl.mx_register_dynamic_suite_constituents(register_project, register_distribution)
+    mx_sdk_vm_ng.mx_register_dynamic_suite_constituents(register_project, register_distribution)
 
 
-class LanguageLauncherConfig(LauncherConfig):
-    pass
-
-
-class LibraryConfig(AbstractNativeImageConfig):
-    def __init__(self, destination, jar_distributions, build_args, links=None, jvm_library=False):
-        """
-        :type jvm_library: bool
-        """
-        super(LibraryConfig, self).__init__(destination, jar_distributions, build_args, links=links)
-        self.jvm_library = jvm_library
-
-
-class GraalVmComponent(object):
-    def __init__(self, suite, name, short_name, license_files, third_party_license_files,
-                 jar_distributions=None, builder_jar_distributions=None, support_distributions=None,
-                 dir_name=None, launcher_configs=None, library_configs=None, provided_executables=None,
-                 polyglot_lib_build_args=None, polyglot_lib_jar_dependencies=None, polyglot_lib_build_dependencies=None,
-                 has_polyglot_lib_entrypoints=False,
-                 boot_jars=None, priority=None):
-        """
-        :param suite mx.Suite: the suite this component belongs to
-        :type name: str
-        :param str short_name: a short, unique name for this component
-        :param str | None | False dir_name: the directory name in which this component lives. If `None`, the `short_name` is used. If `False`, files are copied to the root-dir for the component type.
-        :type license_files: list[str]
-        :type third_party_license_files: list[str]
-        :type provided_executables: list[str]
-        :type polyglot_lib_build_args: list[str]
-        :type polyglot_lib_jar_dependencies: list[str]
-        :type polyglot_lib_build_dependencies: list[str]
-        :type has_polyglot_lib_entrypoints: bool
-        :type boot_jars: list[str]
-        :type launcher_configs: list[LauncherConfig]
-        :type library_configs: list[LibraryConfig]
-        :type jar_distributions: list[str]
-        :type builder_jar_distributions: list[str]
-        :type support_distributions: list[str]
-        :type priority: int
-        """
-        self.suite = suite
-        self.name = name
-        self.short_name = short_name
-        self.dir_name = dir_name if dir_name is not None else short_name
-        self.license_files = license_files
-        self.third_party_license_files = third_party_license_files
-        self.provided_executables = provided_executables or []
-        self.polyglot_lib_build_args = polyglot_lib_build_args or []
-        self.polyglot_lib_jar_dependencies = polyglot_lib_jar_dependencies or []
-        self.polyglot_lib_build_dependencies = polyglot_lib_build_dependencies or []
-        self.has_polyglot_lib_entrypoints = has_polyglot_lib_entrypoints
-        self.boot_jars = boot_jars or []
-        self.jar_distributions = jar_distributions or []
-        self.builder_jar_distributions = builder_jar_distributions or []
-        self.support_distributions = support_distributions or []
-        self.priority = priority or 0
-        """ priority with a higher value means higher priority """
-        self.launcher_configs = launcher_configs or []
-        self.library_configs = library_configs or []
-
-        assert isinstance(self.jar_distributions, list)
-        assert isinstance(self.builder_jar_distributions, list)
-        assert isinstance(self.support_distributions, list)
-        assert isinstance(self.license_files, list)
-        assert isinstance(self.third_party_license_files, list)
-        assert isinstance(self.provided_executables, list)
-        assert isinstance(self.polyglot_lib_build_args, list)
-        assert isinstance(self.polyglot_lib_jar_dependencies, list)
-        assert isinstance(self.polyglot_lib_build_dependencies, list)
-        assert isinstance(self.boot_jars, list)
-        assert isinstance(self.launcher_configs, list)
-        assert isinstance(self.library_configs, list)
-
-    def __str__(self):
-        return "{} ({})".format(self.name, self.dir_name)
-
-
-class GraalVmTruffleComponent(GraalVmComponent):
-    def __init__(self, suite, name, short_name, license_files, third_party_license_files, truffle_jars,
-                 builder_jar_distributions=None, support_distributions=None, dir_name=None, launcher_configs=None,
-                 library_configs=None, provided_executables=None, polyglot_lib_build_args=None,
-                 polyglot_lib_jar_dependencies=None, polyglot_lib_build_dependencies=None,
-                 has_polyglot_lib_entrypoints=False, boot_jars=None, include_in_polyglot=True, priority=None,
-                 post_install_msg=None):
-        """
-        :param truffle_jars list[str]: JAR distributions that should be on the classpath for the language implementation.
-        :param bool include_in_polyglot: whether this component is included in `--language:all` or `--tool:all` and should be part of polyglot images.
-        :param post_install_msg: Post-installation message to be printed
-        :type post_install_msg: str
-        """
-        super(GraalVmTruffleComponent, self).__init__(suite, name, short_name, license_files, third_party_license_files,
-                                                      truffle_jars, builder_jar_distributions, support_distributions,
-                                                      dir_name, launcher_configs, library_configs, provided_executables,
-                                                      polyglot_lib_build_args, polyglot_lib_jar_dependencies,
-                                                      polyglot_lib_build_dependencies, has_polyglot_lib_entrypoints,
-                                                      boot_jars, priority)
-        self.include_in_polyglot = include_in_polyglot
-        self.post_install_msg = post_install_msg
-        assert isinstance(self.include_in_polyglot, bool)
-
-
-class GraalVmLanguage(GraalVmTruffleComponent):
-    pass
-
-
-class GraalVmTool(GraalVmTruffleComponent):
-    def __init__(self, suite, name, short_name, license_files, third_party_license_files, truffle_jars,
-                 builder_jar_distributions=None, support_distributions=None, dir_name=None, launcher_configs=None,
-                 library_configs=None, provided_executables=None, polyglot_lib_build_args=None,
-                 polyglot_lib_jar_dependencies=None, polyglot_lib_build_dependencies=None,
-                 has_polyglot_lib_entrypoints=False, boot_jars=None, include_in_polyglot=True, include_by_default=False,
-                 priority=None):
-        super(GraalVmTool, self).__init__(suite,
-                                          name,
-                                          short_name,
-                                          license_files,
-                                          third_party_license_files,
-                                          truffle_jars,
-                                          builder_jar_distributions,
-                                          support_distributions,
-                                          dir_name,
-                                          launcher_configs,
-                                          library_configs,
-                                          provided_executables,
-                                          polyglot_lib_build_args,
-                                          polyglot_lib_jar_dependencies,
-                                          polyglot_lib_build_dependencies,
-                                          has_polyglot_lib_entrypoints,
-                                          boot_jars,
-                                          include_in_polyglot,
-                                          priority)
-        self.include_by_default = include_by_default
-
-
-class GraalVmJdkComponent(GraalVmComponent):
-    pass
-
-
-class GraalVmJreComponent(GraalVmComponent):
-    pass
-
-
-class GraalVmJvmciComponent(GraalVmJreComponent):
-    def __init__(self, suite, name, short_name, license_files, third_party_license_files, jvmci_jars,
-                 jar_distributions=None, builder_jar_distributions=None, support_distributions=None,
-                 graal_compiler=None, dir_name=None, launcher_configs=None, library_configs=None,
-                 provided_executables=None, polyglot_lib_build_args=None, polyglot_lib_jar_dependencies=None,
-                 polyglot_lib_build_dependencies=None, has_polyglot_lib_entrypoints=False, boot_jars=None,
-                 priority=None):
-        """
-        :type jvmci_jars: list[str]
-        :type graal_compiler: str
-        """
-        super(GraalVmJvmciComponent, self).__init__(suite,
-                                                    name,
-                                                    short_name,
-                                                    license_files,
-                                                    third_party_license_files,
-                                                    jar_distributions,
-                                                    builder_jar_distributions,
-                                                    support_distributions,
-                                                    dir_name,
-                                                    launcher_configs,
-                                                    library_configs,
-                                                    provided_executables,
-                                                    polyglot_lib_build_args,
-                                                    polyglot_lib_jar_dependencies,
-                                                    polyglot_lib_build_dependencies,
-                                                    has_polyglot_lib_entrypoints,
-                                                    boot_jars,
-                                                    priority)
-
-        self.graal_compiler = graal_compiler
-        self.jvmci_jars = jvmci_jars or []
-
-        assert isinstance(self.jvmci_jars, list)
-
-
-_graalvm_components = dict()
-
-
-def register_graalvm_component(component):
-    """
-    :type component: GraalVmComponent
-    :type suite: mx.Suite
-    """
-    def _log_ignored_component(kept, ignored):
-        """
-        :type kept: GraalVmComponent
-        :type ignored: GraalVmComponent
-        """
-        mx.logv('Suites \'{}\' and \'{}\' are registering a component with the same short name (\'{}\'), with priority \'{}\' and \'{}\' respectively.'.format(kept.suite.name, ignored.suite.name, kept.short_name, kept.priority, ignored.priority))
-        mx.logv('Ignoring the one from suite \'{}\'.'.format(ignored.suite.name))
-
-    _prev = _graalvm_components.get(component.short_name, None)
-    if _prev:
-        if _prev.priority == component.priority:
-            mx.abort('Suites \'{}\' and \'{}\' are registering a component with the same short name (\'{}\') and priority (\'{}\')'.format(_prev.suite.name, component.suite.name, _prev.short_name, _prev.priority))
-        elif _prev.priority < component.priority:
-            _graalvm_components[component.short_name] = component
-            _log_ignored_component(component, _prev)
-        else:
-            _log_ignored_component(_prev, component)
-    else:
-        _graalvm_components[component.short_name] = component
-
-
-def graalvm_components(opt_limit_to_suite=False):
-    """
-    :rtype: list[GraalVmComponent]
-    """
-    if opt_limit_to_suite and mx.get_opts().specific_suites:
-        return [c for c in _graalvm_components.values() if c.suite.name in mx.get_opts().specific_suites]
-    else:
-        return _graalvm_components.values()
+def mx_post_parse_cmd_line(args):
+    mx_sdk_vm_impl.mx_post_parse_cmd_line(args)
 
 
 mx.update_commands(_suite, {
     'javadoc': [javadoc, '[SL args|@VM options]'],
+    'upx': [upx, ''],
 })
+
+
+# For backward compatibility
+
+AbstractNativeImageConfig = mx_sdk_vm.AbstractNativeImageConfig
+LauncherConfig = mx_sdk_vm.LauncherConfig
+LanguageLauncherConfig = mx_sdk_vm.LanguageLauncherConfig
+LibraryConfig = mx_sdk_vm.LibraryConfig
+LanguageLibraryConfig = mx_sdk_vm.LanguageLibraryConfig
+GraalVmComponent = mx_sdk_vm.GraalVmComponent
+GraalVmTruffleComponent = mx_sdk_vm.GraalVmTruffleComponent
+GraalVmLanguage = mx_sdk_vm.GraalVmLanguage
+GraalVmTool = mx_sdk_vm.GraalVmTool
+GraalVMSvmMacro = mx_sdk_vm.GraalVMSvmMacro
+GraalVmSvmTool = mx_sdk_vm.GraalVmSvmTool
+GraalVmJdkComponent = mx_sdk_vm.GraalVmJdkComponent
+GraalVmJreComponent = mx_sdk_vm.GraalVmJreComponent
+GraalVmJvmciComponent = mx_sdk_vm.GraalVmJvmciComponent
+
+
+def register_graalvm_component(component):
+    return mx_sdk_vm.register_graalvm_component(component)
+
+
+def graalvm_component_by_name(name, fatalIfMissing=True):
+    return mx_sdk_vm.graalvm_component_by_name(name, fatalIfMissing=fatalIfMissing)
+
+
+def graalvm_components(opt_limit_to_suite=False):
+    return mx_sdk_vm.graalvm_components(opt_limit_to_suite=opt_limit_to_suite)
+
+
+def add_graalvm_hostvm_config(name, java_args=None, launcher_args=None, priority=0):
+    return add_graalvm_hostvm_config(name, java_args=java_args, launcher_args=launcher_args, priority=priority)
+
+
+def jdk_enables_jvmci_by_default(jdk):
+    return mx_sdk_vm.jdk_enables_jvmci_by_default(jdk)
+
+
+def jlink_new_jdk(jdk, dst_jdk_dir, module_dists, ignore_dists,
+                  root_module_names=None,
+                  missing_export_target_action=None,
+                  with_source=lambda x: True,
+                  vendor_info=None,
+                  use_upgrade_module_path=False,
+                  default_to_jvmci=False):
+    return mx_sdk_vm.jlink_new_jdk(jdk, dst_jdk_dir, module_dists, ignore_dists,
+                                   root_module_names=root_module_names,
+                                   missing_export_target_action=missing_export_target_action,
+                                   with_source=with_source,
+                                   vendor_info=vendor_info,
+                                   use_upgrade_module_path=use_upgrade_module_path,
+                                   default_to_jvmci=default_to_jvmci)
+
+class GraalVMJDKConfig(mx.JDKConfig):
+
+    # Oracle JDK includes the libjvmci compiler, allowing it to function as GraalVM.
+    # However, the Graal compiler is disabled by default and must be explicitly
+    # enabled using the -XX:+UseGraalJIT option.
+    libgraal_additional_vm_args = [
+        '-XX:+UnlockExperimentalVMOptions',
+        '-XX:+EnableJVMCI',
+        '-XX:+UseGraalJIT',
+        '-XX:-UnlockExperimentalVMOptions'
+    ]
+    """
+    A JDKConfig that configures the built GraalVM as a JDK config.
+    """
+    def __init__(self):
+        default_jdk = mx.get_jdk(tag='default')
+        if GraalVMJDKConfig.is_graalvm(default_jdk.home):
+            graalvm_home = default_jdk.home
+            additional_vm_args = []
+        elif GraalVMJDKConfig.is_libgraal_jdk(default_jdk.home):
+            graalvm_home = default_jdk.home
+            additional_vm_args = GraalVMJDKConfig.libgraal_additional_vm_args
+        else:
+            graalvm_home = mx_sdk_vm.graalvm_home(fatalIfMissing=True)
+            additional_vm_args = []
+        self._home_internal = graalvm_home
+        self._vm_args = additional_vm_args
+        mx.JDKConfig.__init__(self, graalvm_home, tag='graalvm')
+
+    @property
+    def home(self):
+        return self._home_internal
+
+    @home.setter
+    def home(self, home):
+        return
+
+    def processArgs(self, args, addDefaultArgs=True):
+        processed_args = super(GraalVMJDKConfig, self).processArgs(args, addDefaultArgs)
+        if addDefaultArgs and self._vm_args:
+            processed_args = self._vm_args + processed_args
+        return processed_args
+
+    @staticmethod
+    def is_graalvm(java_home):
+        release_file = os.path.join(java_home, 'release')
+        if not os.path.isfile(release_file):
+            return False
+        with open(release_file, 'r') as file:
+            for line in file:
+                if line.startswith('GRAALVM_VERSION'):
+                    return True
+        return False
+
+    @staticmethod
+    def is_libgraal_jdk(java_home):
+        release_file = os.path.join(java_home, 'release')
+        if not os.path.isfile(release_file):
+            return False
+        with open(release_file, 'r') as file:
+            for line in file:
+                if line.startswith('MODULES') and 'jdk.graal.compiler.lib' in line:
+                    # Oracle JDK has libjvmcicompiler
+                    return True
+        return False
+
+class GraalVMJDK(mx.JDKFactory):
+
+    def getJDKConfig(self):
+        return GraalVMJDKConfig()
+
+    def description(self):
+        return "GraalVM JDK"
+
+mx.addJDKFactory('graalvm', mx.get_jdk(tag='default').javaCompliance, GraalVMJDK())
+
+
+def maven_deploy_public_repo_dir():
+    return os.path.join(_suite.get_mx_output_dir(), 'public-maven-repo')
+
+@mx.command(_suite.name, 'maven-deploy-public')
+def maven_deploy_public(args, licenses=None, deploy_snapshots=True):
+    """Helper to simplify deploying all public Maven dependendencies into the mxbuild directory"""
+    if deploy_snapshots:
+        artifact_version = f'{mx_sdk_vm_impl.graalvm_version("graalvm")}-SNAPSHOT'
+    else:
+        artifact_version = f'{mx_sdk_vm_impl.graalvm_version("graalvm")}'
+    path = maven_deploy_public_repo_dir()
+    mx.rmtree(path, ignore_errors=True)
+    os.mkdir(path)
+
+    if not licenses:
+        # default licenses used
+        licenses = ['GFTC', 'EPL-2.0', 'PSF-License', 'GPLv2-CPE', 'ICU,GPLv2', 'BSD-simplified', 'BSD-new', 'UPL', 'MIT']
+
+    deploy_args = [
+            '--tags=public',
+            '--all-suites',
+            '--all-distribution-types',
+            f'--version-string={artifact_version}',
+            '--validate=full',
+            '--licenses', ','.join(licenses),
+            'local',
+            pathlib.Path(path).as_uri(),
+        ]
+    if mx.get_jdk().javaCompliance > '17':
+        mx.warn("Javadoc won't be deployed as a JDK > 17 is not yet compatible with javadoc doclets. In order to deploy javadoc use a JDK 17 as a JDK on JAVA_HOME.")
+        deploy_args += ["--suppress-javadoc"]
+
+    mx.log(f'mx maven-deploy {" ".join(deploy_args)}')
+    mx.maven_deploy(deploy_args)
+    mx.log(f'Deployed Maven artefacts to {path}')
+    return path
+
+@mx.command(_suite.name, 'nativebridge-benchmark')
+def nativebridge_benchmark(args):
+    parser = argparse.ArgumentParser(prog='mx nativebridge-benchmark', description='Executes nativebridge benchmarks',
+                            usage='mx nativebridge-benchmark [--target-folder <folder> | --isolate-library <isolate-library> | mode+]')
+    parser.add_argument('--target-folder', help='Folder where the benchmark isolate library will be generated.', default=None)
+    parser.add_argument('--isolate-library', help='Use the given isolate library.', default=None)
+    parsed_args, args = parser.parse_known_args(args)
+
+    jdk = mx.get_jdk(tag='graalvm')
+    benchmark_dist = mx.distribution('NATIVEBRIDGE_BENCHMARK')
+    isolate_library = parsed_args.isolate_library if parsed_args.isolate_library else None
+    try:
+        if not isolate_library:
+            native_image_path = jdk.exe_path('native-image')
+            if not os.path.exists(native_image_path):
+                native_image_path = os.path.join(jdk.home, 'bin', mx.cmd_suffix('native-image'))
+            if not os.path.exists(native_image_path):
+                mx.abort(f"No native-image installed in GraalVM {jdk.home}. Switch to an environment that has an installed native-image command.")
+
+            target_dir = parsed_args.target_folder if parsed_args.target_folder else tempfile.mkdtemp()
+            target = os.path.join(target_dir, "bench")
+            native_image_args = mx.get_runtime_jvm_args(benchmark_dist, jdk=jdk) + [
+                '--shared',
+                '-o',
+                target
+            ]
+            mx.run([native_image_path] + native_image_args)
+            for n in os.listdir(target_dir):
+                _, ext = os.path.splitext(n)
+                if ext in ('.so', '.dylib', '.dll'):
+                    isolate_library = os.path.join(target_dir, n)
+                    break
+
+        launcher_project = mx.project('org.graalvm.nativebridge.launcher')
+        launcher = next(launcher_project.getArchivableResults(single=True))[0]
+        java_args = mx.get_runtime_jvm_args(benchmark_dist, jdk=jdk) + [
+            '--enable-native-access=ALL-UNNAMED',
+            'org.graalvm.nativebridge.benchmark.Main',
+            launcher,
+            isolate_library
+        ] + args
+        mx.run_java(java_args, jdk=jdk)
+    finally:
+        if not parsed_args.isolate_library and not parsed_args.target_folder:
+            shutil.rmtree(target_dir)

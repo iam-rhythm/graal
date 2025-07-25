@@ -1,52 +1,57 @@
 /*
- * Copyright (c) 2016, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
- * This code is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 only, as
- * published by the Free Software Foundation.  Oracle designates this
- * particular file as subject to the "Classpath" exception as provided
- * by Oracle in the LICENSE file that accompanied this code.
+ * The Universal Permissive License (UPL), Version 1.0
  *
- * This code is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
- * version 2 for more details (a copy is included in the LICENSE file that
- * accompanied this code).
+ * Subject to the condition set forth below, permission is hereby granted to any
+ * person obtaining a copy of this software, associated documentation and/or
+ * data (collectively the "Software"), free of charge and under any and all
+ * copyright rights in the Software, and any and all patent rights owned or
+ * freely licensable by each licensor hereunder covering either (i) the
+ * unmodified Software as contributed to or provided by such licensor, or (ii)
+ * the Larger Works (as defined below), to deal in both
  *
- * You should have received a copy of the GNU General Public License version
- * 2 along with this work; if not, write to the Free Software Foundation,
- * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+ * (a) the Software, and
  *
- * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
- * or visit www.oracle.com if you need additional information or have any
- * questions.
+ * (b) any piece of software and/or hardware listed in the lrgrwrks.txt file if
+ * one is included with the Software each a "Larger Work" to which the Software
+ * is contributed by such licensors),
+ *
+ * without restriction, including without limitation the rights to copy, create
+ * derivative works of, display, perform, and distribute the Software and make,
+ * use, sell, offer for sale, import, export, have made, and have sold the
+ * Software and the Larger Work(s), and to sublicense the foregoing rights on
+ * either these or other terms.
+ *
+ * This license is subject to the following condition:
+ *
+ * The above copyright notice and either this complete permission notice or at a
+ * minimum a reference to the UPL must be included in all copies or substantial
+ * portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 package com.oracle.truffle.regex.tregex.util;
-
-import com.oracle.truffle.api.TruffleLogger;
-import com.oracle.truffle.regex.chardata.Constants;
-import com.oracle.truffle.regex.util.CompilationFinalBitSet;
 
 import java.util.Random;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import static com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
+import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
+import com.oracle.truffle.regex.charset.Constants;
+import com.oracle.truffle.regex.charset.SortedListOfRanges;
+import com.oracle.truffle.regex.util.TBitSet;
 
 public class DebugUtil {
 
-    public static final TruffleLogger LOG_SWITCH_TO_EAGER = TruffleLogger.getLogger("regex", "SwitchToEager");
-    public static final TruffleLogger LOG_TOTAL_COMPILATION_TIME = TruffleLogger.getLogger("regex", "TotalCompilationTime");
-    public static final TruffleLogger LOG_PHASES = TruffleLogger.getLogger("regex", "Phases");
-    public static final TruffleLogger LOG_BAILOUT_MESSAGES = TruffleLogger.getLogger("regex", "BailoutMessages");
-    public static final TruffleLogger LOG_AUTOMATON_SIZES = TruffleLogger.getLogger("regex", "AutomatonSizes");
-    public static final TruffleLogger LOG_COMPILER_FALLBACK = TruffleLogger.getLogger("regex", "CompilerFallback");
-    public static final TruffleLogger LOG_INTERNAL_ERRORS = TruffleLogger.getLogger("regex", "InternalErrors");
-    public static final TruffleLogger LOG_TREGEX_COMPILATIONS = TruffleLogger.getLogger("regex", "TRegexCompilations");
-
-    private static final CompilationFinalBitSet validSpecialCharsForFileNames = CompilationFinalBitSet.valueOf(
-                    '^', '$', '.', '*', '+', '-', '?', '(', ')', '[', ']', '{', '}', '|');
+    private static final TBitSet validSpecialCharsForFileNames = TBitSet.valueOf('$', '(', ')', '*', '+', '-', '.', '?', '[', ']', '^', '{', '|', '}');
 
     @TruffleBoundary
     public static String charToString(int c) {
@@ -70,6 +75,29 @@ public class DebugUtil {
         return ret.toString();
     }
 
+    public static String regexSourceEscape(String pattern, String flags) {
+        StringBuilder sb = new StringBuilder(pattern.length() + 2);
+        sb.append('/');
+        javaStringEscape(sb, pattern);
+        return sb.append('/').append(flags).toString();
+    }
+
+    public static String javaStringEscape(String string) {
+        return javaStringEscape(new StringBuilder(string.length()), string).toString();
+    }
+
+    private static StringBuilder javaStringEscape(StringBuilder sb, String string) {
+        for (int i = 0; i < string.length(); i++) {
+            int c = string.charAt(i);
+            if (0x20 <= c && c <= 0x7e) {
+                sb.appendCodePoint(c);
+            } else {
+                sb.append("\\u").append(String.format("%04x", c));
+            }
+        }
+        return sb;
+    }
+
     @TruffleBoundary
     public static StringBuilder appendNodeId(StringBuilder sb, int id) {
         return sb.append(nodeID(id));
@@ -84,18 +112,31 @@ public class DebugUtil {
 
     @TruffleBoundary
     public static String jsStringEscape(String str) {
-        StringBuffer escapedString = new StringBuffer();
+        StringBuilder escapedString = new StringBuilder();
         Matcher m = specialChars.matcher(str);
         while (m.find()) {
             String replacement;
             char c = str.charAt(m.start());
-            if (c == '"') {
-                replacement = "\\\\\"";
-            } else if (c == '\\') {
-                replacement = "\\\\\\\\";
-            } else {
-                assert Character.isISOControl(c);
-                replacement = String.format("\\\\u%04x", (int) c);
+            switch (c) {
+                case '"':
+                    replacement = "\\\\\"";
+                    break;
+                case '\\':
+                    replacement = "\\\\\\\\";
+                    break;
+                case '\r':
+                    replacement = "\\\\r";
+                    break;
+                case '\n':
+                    replacement = "\\\\n";
+                    break;
+                case '\t':
+                    replacement = "\\\\t";
+                    break;
+                default:
+                    assert Character.isISOControl(c);
+                    replacement = String.format("\\\\u%04x", (int) c);
+                    break;
             }
             m.appendReplacement(escapedString, replacement);
         }
@@ -104,20 +145,22 @@ public class DebugUtil {
     }
 
     @TruffleBoundary
-    public static String randomJsStringFromRanges(char[] ranges, int length) {
+    public static String randomJsStringFromRanges(SortedListOfRanges ranges, int length) {
         Random random = new Random(System.currentTimeMillis());
         StringBuilder stringBuilder = new StringBuilder(length);
         for (int i = 0; i < length; i++) {
-            int rangeIndex = random.nextInt(ranges.length / 2);
-            char lo = ranges[rangeIndex * 2];
-            char hi = ranges[rangeIndex * 2 + 1];
-            char randChar = (char) (lo + random.nextInt((hi + 1) - lo));
+            int rangeIndex = random.nextInt(ranges.size());
+            int lo = ranges.getLo(rangeIndex);
+            int hi = ranges.getHi(rangeIndex);
+            int randChar = lo + random.nextInt((hi + 1) - lo);
             if (randChar == '"') {
                 stringBuilder.append("\\\\\"");
             } else if (randChar == '\\') {
                 stringBuilder.append("\\\\\\\\");
+            } else if (randChar > 0xffff) {
+                stringBuilder.append(String.format("\\u{%06x}", randChar));
             } else if (randChar > 0x7f || Character.isISOControl(randChar)) {
-                stringBuilder.append(String.format("\\u%04x", (int) randChar));
+                stringBuilder.append(String.format("\\u%04x", randChar));
             } else {
                 stringBuilder.append(randChar);
             }
@@ -149,5 +192,4 @@ public class DebugUtil {
             return String.format("%fms", elapsed / 1e6);
         }
     }
-
 }

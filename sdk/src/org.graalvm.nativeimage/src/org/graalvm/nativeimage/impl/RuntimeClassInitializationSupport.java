@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -42,7 +42,29 @@ package org.graalvm.nativeimage.impl;
 
 public interface RuntimeClassInitializationSupport {
 
-    void delayClassInitialization(Class<?>[] classes);
+    void initializeAtRunTime(String name, String reason);
 
-    void rerunClassInitialization(Class<?>[] classes);
+    void initializeAtBuildTime(String name, String reason);
+
+    @Deprecated
+    default void rerunInitialization(String name, String reason) {
+        /*
+         * There is no more difference between initializing a class at run-time and re-running the
+         * class initializer at run time.
+         */
+        initializeAtRunTime(name, reason);
+    }
+
+    void initializeAtRunTime(Class<?> aClass, String reason);
+
+    @Deprecated
+    default void rerunInitialization(Class<?> aClass, String reason) {
+        /*
+         * There is no more difference between initializing a class at run-time and re-running the
+         * class initializer at run time.
+         */
+        initializeAtRunTime(aClass, reason);
+    }
+
+    void initializeAtBuildTime(Class<?> aClass, String reason);
 }

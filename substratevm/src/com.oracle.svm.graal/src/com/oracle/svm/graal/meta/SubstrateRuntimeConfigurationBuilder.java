@@ -26,56 +26,88 @@ package com.oracle.svm.graal.meta;
 
 import java.util.function.Function;
 
-import org.graalvm.compiler.api.replacements.SnippetReflectionProvider;
-import org.graalvm.compiler.bytecode.BytecodeProvider;
-import org.graalvm.compiler.bytecode.ResolvedJavaMethodBytecodeProvider;
-import org.graalvm.compiler.core.common.spi.ConstantFieldProvider;
-import org.graalvm.compiler.nodes.spi.Replacements;
-import org.graalvm.compiler.options.OptionValues;
-import org.graalvm.compiler.phases.util.Providers;
-
+import com.oracle.graal.pointsto.infrastructure.UniverseMetaAccess;
 import com.oracle.graal.pointsto.meta.AnalysisUniverse;
+import com.oracle.svm.core.SubstrateOptions;
 import com.oracle.svm.core.config.ConfigurationValues;
 import com.oracle.svm.core.graal.code.SubstrateBackend;
+import com.oracle.svm.core.graal.code.SubstratePlatformConfigurationProvider;
+import com.oracle.svm.core.graal.meta.SharedCodeCacheProvider;
+import com.oracle.svm.core.graal.meta.SubstrateLoweringProvider;
 import com.oracle.svm.core.graal.meta.SubstrateReplacements;
-import com.oracle.svm.hosted.ClassInitializationSupport;
+import com.oracle.svm.graal.isolated.IsolateAwareCodeCacheProvider;
 import com.oracle.svm.hosted.SVMHost;
 import com.oracle.svm.hosted.ameta.AnalysisConstantFieldProvider;
 import com.oracle.svm.hosted.ameta.AnalysisConstantReflectionProvider;
+import com.oracle.svm.hosted.classinitialization.ClassInitializationSupport;
 import com.oracle.svm.hosted.code.SharedRuntimeConfigurationBuilder;
 import com.oracle.svm.hosted.code.SubstrateGraphMakerFactory;
 
+import jdk.graal.compiler.api.replacements.SnippetReflectionProvider;
+import jdk.graal.compiler.bytecode.BytecodeProvider;
+import jdk.graal.compiler.bytecode.ResolvedJavaMethodBytecodeProvider;
+import jdk.graal.compiler.core.common.spi.ConstantFieldProvider;
+import jdk.graal.compiler.core.common.spi.ForeignCallsProvider;
+import jdk.graal.compiler.core.common.spi.MetaAccessExtensionProvider;
+import jdk.graal.compiler.nodes.spi.IdentityHashCodeProvider;
+import jdk.graal.compiler.nodes.spi.LoopsDataProvider;
+import jdk.graal.compiler.nodes.spi.LoweringProvider;
+import jdk.graal.compiler.nodes.spi.PlatformConfigurationProvider;
+import jdk.graal.compiler.nodes.spi.Replacements;
+import jdk.graal.compiler.nodes.spi.StampProvider;
+import jdk.graal.compiler.options.OptionValues;
+import jdk.graal.compiler.phases.util.Providers;
+import jdk.graal.compiler.word.WordTypes;
+import jdk.vm.ci.code.CodeCacheProvider;
+import jdk.vm.ci.code.RegisterConfig;
 import jdk.vm.ci.meta.ConstantReflectionProvider;
-import jdk.vm.ci.meta.MetaAccessProvider;
 
 public class SubstrateRuntimeConfigurationBuilder extends SharedRuntimeConfigurationBuilder {
 
     private final AnalysisUniverse aUniverse;
-    private final ConstantReflectionProvider originalReflectionProvider;
-    private final ClassInitializationSupport classInitializationSupport;
 
-    public SubstrateRuntimeConfigurationBuilder(OptionValues options, SVMHost hostVM, AnalysisUniverse aUniverse, MetaAccessProvider metaAccess,
-                    ConstantReflectionProvider originalReflectionProvider, Function<Providers, SubstrateBackend> backendProvider,
-                    ClassInitializationSupport classInitializationSupport) {
-        super(options, hostVM, metaAccess, backendProvider);
+    public SubstrateRuntimeConfigurationBuilder(OptionValues options, SVMHost hostVM, AnalysisUniverse aUniverse, UniverseMetaAccess metaAccess,
+                    Function<Providers, SubstrateBackend> backendProvider, ClassInitializationSupport classInitializationSupport, SubstratePlatformConfigurationProvider platformConfig,
+                    SnippetReflectionProvider snippetReflection) {
+        super(options, hostVM, metaAccess, backendProvider, classInitializationSupport, platformConfig, snippetReflection);
         this.aUniverse = aUniverse;
-        this.originalReflectionProvider = originalReflectionProvider;
-        this.classInitializationSupport = classInitializationSupport;
     }
 
     @Override
-    protected ConstantReflectionProvider createConstantReflectionProvider(Providers p) {
-        return new AnalysisConstantReflectionProvider(aUniverse, originalReflectionProvider, classInitializationSupport);
+    protected Providers createProviders(CodeCacheProvider codeCache, ConstantReflectionProvider constantReflection, ConstantFieldProvider constantFieldProvider, ForeignCallsProvider foreignCalls,
+                    LoweringProvider lowerer, Replacements replacements, StampProvider stampProvider, SnippetReflectionProvider reflectionProvider,
+                    PlatformConfigurationProvider platformConfigurationProvider, MetaAccessExtensionProvider metaAccessExtensionProvider, WordTypes wordTypes, LoopsDataProvider loopsDataProvider,
+                    IdentityHashCodeProvider identityHashCodeProvider) {
+        return new Providers(metaAccess, codeCache, constantReflection, constantFieldProvider, foreignCalls, lowerer, replacements, stampProvider, platformConfigurationProvider,
+                        metaAccessExtensionProvider, reflectionProvider, wordTypes, loopsDataProvider, identityHashCodeProvider);
     }
 
     @Override
-    protected ConstantFieldProvider createConstantFieldProvider(Providers p) {
-        return new AnalysisConstantFieldProvider(aUniverse, p.getMetaAccess(), (AnalysisConstantReflectionProvider) p.getConstantReflection(), classInitializationSupport);
+    protected ConstantReflectionProvider createConstantReflectionProvider() {
+        return new AnalysisConstantReflectionProvider(aUniverse, metaAccess, classInitializationSupport);
     }
 
     @Override
-    protected Replacements createReplacements(Providers p, SnippetReflectionProvider snippetReflection) {
+    protected ConstantFieldProvider createConstantFieldProvider() {
+        return new AnalysisConstantFieldProvider(metaAccess, hostVM);
+    }
+
+    @Override
+    protected LoweringProvider createLoweringProvider(ForeignCallsProvider foreignCalls, MetaAccessExtensionProvider metaAccessExtensionProvider) {
+        return SubstrateLoweringProvider.createForRuntime(metaAccess, foreignCalls, platformConfig, metaAccessExtensionProvider);
+    }
+
+    @Override
+    protected Replacements createReplacements(Providers p) {
         BytecodeProvider bytecodeProvider = new ResolvedJavaMethodBytecodeProvider();
-        return new SubstrateReplacements(options, p, snippetReflection, bytecodeProvider, ConfigurationValues.getTarget(), new SubstrateGraphMakerFactory(wordTypes));
+        return new SubstrateReplacements(p, bytecodeProvider, ConfigurationValues.getTarget(), new SubstrateGraphMakerFactory());
+    }
+
+    @Override
+    protected SharedCodeCacheProvider createCodeCacheProvider(RegisterConfig registerConfig) {
+        if (SubstrateOptions.supportCompileInIsolates()) {
+            return new IsolateAwareCodeCacheProvider(ConfigurationValues.getTarget(), registerConfig);
+        }
+        return new SubstrateCodeCacheProvider(ConfigurationValues.getTarget(), registerConfig);
     }
 }

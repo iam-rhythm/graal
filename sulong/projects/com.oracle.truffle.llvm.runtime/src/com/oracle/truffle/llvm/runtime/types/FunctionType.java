@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates.
+ * Copyright (c) 2017, 2022, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -30,55 +30,90 @@
 package com.oracle.truffle.llvm.runtime.types;
 
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
 
-import com.oracle.truffle.api.Assumption;
-import com.oracle.truffle.api.CompilerDirectives;
-import com.oracle.truffle.api.CompilerDirectives.CompilationFinal;
+import com.oracle.truffle.api.CompilerAsserts;
 import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
-import com.oracle.truffle.api.Truffle;
-import com.oracle.truffle.llvm.runtime.nodes.api.LLVMNode;
+import com.oracle.truffle.llvm.runtime.CommonNodeFactory;
+import com.oracle.truffle.llvm.runtime.GetStackSpaceFactory;
+import com.oracle.truffle.llvm.runtime.NodeFactory;
 import com.oracle.truffle.llvm.runtime.datalayout.DataLayout;
+import com.oracle.truffle.llvm.runtime.nodes.api.LLVMExpressionNode;
+import com.oracle.truffle.llvm.runtime.nodes.api.LLVMNode;
 import com.oracle.truffle.llvm.runtime.types.visitors.TypeVisitor;
 
 public final class FunctionType extends Type {
+    public static final int NOT_VARARGS = -1;
 
-    @CompilationFinal private Assumption returnTypeAssumption;
-    @CompilationFinal private Type returnType;
+    private Type returnType;
 
     private final Type[] argumentTypes;
-    private final boolean isVarargs;
+    private final int fixedArgs;
 
-    public FunctionType(Type returnType, Type[] argumentTypes, boolean isVarargs) {
-        this.returnTypeAssumption = Truffle.getRuntime().createAssumption("FunctionType.returnType");
+    private FunctionType(Type returnType, Type[] argumentTypes, int fixedArgs) {
         this.returnType = returnType;
         this.argumentTypes = argumentTypes;
-        this.isVarargs = isVarargs;
+        this.fixedArgs = fixedArgs;
     }
 
-    public Type[] getArgumentTypes() {
-        return argumentTypes;
+    /**
+     * Creates a function type with a single argument type.
+     */
+    public static FunctionType create(Type returnType, Type arg0) {
+        return new FunctionType(returnType, new Type[]{arg0}, NOT_VARARGS);
+    }
+
+    public FunctionType(Type returnType, TypeArrayBuilder argumentTypes, int fixedArgs) {
+        this(returnType, getRawTypeArray(argumentTypes), fixedArgs);
+    }
+
+    public FunctionType(Type returnType, int numArguments, int fixedArgs) {
+        this(returnType, new Type[numArguments], fixedArgs);
+    }
+
+    public static FunctionType copy(FunctionType type) {
+        return new FunctionType(type.returnType, type.argumentTypes.clone(), type.fixedArgs);
+    }
+
+    public void setArgumentType(int idx, Type type) {
+        verifyCycleFree(type);
+        argumentTypes[idx] = type;
+    }
+
+    public List<Type> getArgumentTypes() {
+        return Collections.unmodifiableList(Arrays.asList(argumentTypes));
+    }
+
+    public Type getArgumentType(int idx) {
+        return argumentTypes[idx];
+    }
+
+    public int getNumberOfArguments() {
+        return argumentTypes.length;
     }
 
     public Type getReturnType() {
-        if (!returnTypeAssumption.isValid()) {
-            CompilerDirectives.transferToInterpreterAndInvalidate();
-        }
+        CompilerAsserts.neverPartOfCompilation();
         return returnType;
     }
 
     public void setReturnType(Type returnType) {
-        CompilerDirectives.transferToInterpreterAndInvalidate();
-        this.returnTypeAssumption.invalidate();
+        CompilerAsserts.neverPartOfCompilation();
+        verifyCycleFree(returnType);
         this.returnType = returnType;
-        this.returnTypeAssumption = Truffle.getRuntime().createAssumption("FunctionType.returnType");
     }
 
     public boolean isVarargs() {
-        return isVarargs;
+        return fixedArgs != NOT_VARARGS;
+    }
+
+    public int getFixedArgs() {
+        return fixedArgs;
     }
 
     @Override
-    public int getBitSize() {
+    public long getBitSize() {
         return 0;
     }
 
@@ -97,14 +132,8 @@ public final class FunctionType extends Type {
     }
 
     @Override
-    public int getSize(DataLayout targetDataLayout) {
+    public long getSize(DataLayout targetDataLayout) {
         return LLVMNode.ADDRESS_SIZE_IN_BYTES;
-    }
-
-    @Override
-    public Type shallowCopy() {
-        final FunctionType copy = new FunctionType(getReturnType(), argumentTypes, isVarargs);
-        return copy;
     }
 
     @Override
@@ -118,13 +147,13 @@ public final class FunctionType extends Type {
             if (i > 0) {
                 sb.append(", ");
             }
+            if (i == fixedArgs) {
+                sb.append("...");
+            }
             sb.append(argumentTypes[i]);
         }
 
-        if (isVarargs) {
-            if (argumentTypes.length > 0) {
-                sb.append(", ");
-            }
+        if (fixedArgs == argumentTypes.length) {
             sb.append("...");
         }
         sb.append(")");
@@ -137,7 +166,7 @@ public final class FunctionType extends Type {
         final int prime = 31;
         int result = 1;
         result = prime * result + Arrays.hashCode(argumentTypes);
-        result = prime * result + (isVarargs ? 1231 : 1237);
+        result = prime * result + Integer.hashCode(fixedArgs);
         result = prime * result + ((getReturnType() == null) ? 0 : getReturnType().hashCode());
         return result;
     }
@@ -157,7 +186,7 @@ public final class FunctionType extends Type {
         if (!Arrays.equals(argumentTypes, other.argumentTypes)) {
             return false;
         }
-        if (isVarargs != other.isVarargs) {
+        if (fixedArgs != other.fixedArgs) {
             return false;
         }
         if (getReturnType() == null) {
@@ -168,5 +197,10 @@ public final class FunctionType extends Type {
             return false;
         }
         return true;
+    }
+
+    @Override
+    public LLVMExpressionNode createNullConstant(NodeFactory nodeFactory, DataLayout dataLayout, GetStackSpaceFactory stackFactory) {
+        return CommonNodeFactory.createSimpleConstantNoArray(null, this);
     }
 }

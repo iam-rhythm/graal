@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,26 +40,27 @@
  */
 package com.oracle.truffle.dsl.processor.parser;
 
-import java.lang.annotation.Annotation;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
 
 import javax.annotation.processing.ProcessingEnvironment;
 import javax.lang.model.element.AnnotationMirror;
 import javax.lang.model.element.Element;
-import javax.lang.model.element.ElementKind;
-import javax.lang.model.element.ExecutableElement;
+import javax.lang.model.element.TypeElement;
+import javax.lang.model.type.DeclaredType;
 import javax.tools.Diagnostic.Kind;
 
 import com.oracle.truffle.dsl.processor.CompileErrorException;
 import com.oracle.truffle.dsl.processor.Log;
 import com.oracle.truffle.dsl.processor.ProcessorContext;
+import com.oracle.truffle.dsl.processor.Timer;
+import com.oracle.truffle.dsl.processor.TruffleProcessorOptions;
+import com.oracle.truffle.dsl.processor.TruffleTypes;
+import com.oracle.truffle.dsl.processor.bytecode.model.BytecodeDSLModels;
 import com.oracle.truffle.dsl.processor.java.ElementUtils;
+import com.oracle.truffle.dsl.processor.library.LibraryData;
 import com.oracle.truffle.dsl.processor.model.MessageContainer;
-import com.oracle.truffle.dsl.processor.model.MessageContainer.Message;
 import com.oracle.truffle.dsl.processor.model.NodeData;
 
 /**
@@ -69,6 +70,9 @@ public abstract class AbstractParser<M extends MessageContainer> {
 
     protected final ProcessorContext context;
     protected final ProcessingEnvironment processingEnv;
+    protected final TruffleTypes types = ProcessorContext.getInstance().getTypes();
+    protected boolean generateSlowPathOnly;
+    protected final String generateSlowPathOnlyFilter;
 
     protected final Log log;
 
@@ -76,100 +80,82 @@ public abstract class AbstractParser<M extends MessageContainer> {
         this.context = ProcessorContext.getInstance();
         this.processingEnv = context.getEnvironment();
         this.log = context.getLog();
+        this.generateSlowPathOnly = TruffleProcessorOptions.generateSlowPathOnly(processingEnv);
+        this.generateSlowPathOnlyFilter = TruffleProcessorOptions.generateSlowPathOnlyFilter(processingEnv);
     }
 
-    public final M parse(Element element) {
+    protected void setGenerateSlowPathOnly(boolean flag) {
+        this.generateSlowPathOnly = flag;
+    }
+
+    protected boolean isGenerateSlowPathOnly(NodeData node) {
+        return isGenerateSlowPathOnly(node.getTemplateType());
+    }
+
+    protected boolean isGenerateSlowPathOnly(TypeElement element) {
+        if (types.AlwaysSlowPath != null && ElementUtils.findAnnotationMirror(element, types.AlwaysSlowPath) != null) {
+            return true;
+        }
+        if (!generateSlowPathOnly) {
+            return false;
+        }
+        if (generateSlowPathOnlyFilter != null) {
+            String nodeQName = element.getQualifiedName().toString();
+            return nodeQName.startsWith(generateSlowPathOnlyFilter);
+        }
+        return true;
+    }
+
+    @SuppressWarnings({"unchecked", "try"})
+    public final M parse(Element element, boolean emitErrors) {
         M model = null;
-        try {
-            AnnotationMirror mirror = null;
+        try (Timer timer = Timer.create(getClass().getSimpleName(), element)) {
+            List<AnnotationMirror> mirrors = null;
             if (getAnnotationType() != null) {
-                mirror = ElementUtils.findAnnotationMirror(processingEnv, element.getAnnotationMirrors(), getAnnotationType());
+                mirrors = ElementUtils.getRepeatedAnnotation(element.getAnnotationMirrors(), getAnnotationType());
             }
 
-            if (!context.getTruffleTypes().verify(context, element, mirror)) {
-                return null;
-            }
-            model = parse(element, mirror);
+            model = parse(element, mirrors);
             if (model == null) {
                 return null;
             }
 
-            redirectMessages(new HashSet<MessageContainer>(), model, model);
-            model.emitMessages(context, log);
-            if (model instanceof NodeData) {
+            if (emitErrors) {
+                model.emitMessages(log);
+            }
+            if (model instanceof NodeData || model instanceof LibraryData || model instanceof BytecodeDSLModels) {
                 return model;
             } else {
-                return filterErrorElements(model);
+                return emitErrors ? filterErrorElements(model) : model;
             }
         } catch (CompileErrorException e) {
-            log.message(Kind.WARNING, element, null, null, "The truffle processor could not parse class due to error: %s", e.getMessage());
+            log.message(Kind.WARNING, element, null, null, "The truffle processor could not parse class due to error: %s%nError: ", e.getMessage(), ElementUtils.printException(e));
             return null;
         }
     }
 
-    private void redirectMessages(Set<MessageContainer> visitedSinks, MessageContainer model, MessageContainer baseContainer) {
-        List<Message> messages = model.getMessages();
-        for (int i = messages.size() - 1; i >= 0; i--) {
-            Message message = messages.get(i);
-            if (!ElementUtils.isEnclosedIn(baseContainer.getMessageElement(), message.getOriginalContainer().getMessageElement())) {
-                // redirect message
-                MessageContainer original = message.getOriginalContainer();
-                String text = wrapText(original.getMessageElement(), original.getMessageAnnotation(), message.getText());
-                Message redirectedMessage = new Message(null, null, baseContainer, text, message.getKind());
-                model.getMessages().remove(i);
-                baseContainer.getMessages().add(redirectedMessage);
-            }
-        }
-
-        for (MessageContainer childContainer : model) {
-            if (visitedSinks.contains(childContainer)) {
-                continue;
-            }
-            visitedSinks.add(childContainer);
-
-            MessageContainer newBase = baseContainer;
-            if (childContainer.getBaseContainer() != null) {
-                newBase = childContainer.getBaseContainer();
-            }
-            redirectMessages(visitedSinks, childContainer, newBase);
-        }
-    }
-
-    private static String wrapText(Element element, AnnotationMirror mirror, String text) {
-        StringBuilder b = new StringBuilder();
-        if (element != null) {
-            if (element.getKind() == ElementKind.METHOD) {
-                b.append("Method " + ElementUtils.createReferenceName((ExecutableElement) element));
-            } else {
-                b.append("Element " + element.getSimpleName());
-            }
-        }
-        if (mirror != null) {
-            b.append(" at annotation @" + ElementUtils.getSimpleName(mirror.getAnnotationType()).trim());
-        }
-
-        if (b.length() > 0) {
-            b.append(" is erroneous: ").append(text);
-            return b.toString();
-        } else {
-            return text;
-        }
+    public final M parse(Element element) {
+        return parse(element, true);
     }
 
     protected M filterErrorElements(M model) {
         return model.hasErrors() ? null : model;
     }
 
-    protected abstract M parse(Element element, AnnotationMirror mirror);
+    protected abstract M parse(Element element, List<AnnotationMirror> mirror);
 
-    public abstract Class<? extends Annotation> getAnnotationType();
+    public abstract DeclaredType getAnnotationType();
+
+    public DeclaredType getRepeatAnnotationType() {
+        return null;
+    }
 
     public boolean isDelegateToRootDeclaredType() {
         return false;
     }
 
-    public List<Class<? extends Annotation>> getAllAnnotationTypes() {
-        List<Class<? extends Annotation>> list = new ArrayList<>();
+    public List<DeclaredType> getAllAnnotationTypes() {
+        List<DeclaredType> list = new ArrayList<>();
         if (getAnnotationType() != null) {
             list.add(getAnnotationType());
         }
@@ -177,7 +163,7 @@ public abstract class AbstractParser<M extends MessageContainer> {
         return list;
     }
 
-    public List<Class<? extends Annotation>> getTypeDelegatedAnnotationTypes() {
+    public List<DeclaredType> getTypeDelegatedAnnotationTypes() {
         return Collections.emptyList();
     }
 

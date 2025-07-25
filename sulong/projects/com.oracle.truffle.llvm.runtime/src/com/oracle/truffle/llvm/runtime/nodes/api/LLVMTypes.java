@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2018, Oracle and/or its affiliates.
+ * Copyright (c) 2016, 2019, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -29,11 +29,14 @@
  */
 package com.oracle.truffle.llvm.runtime.nodes.api;
 
+import com.oracle.truffle.api.dsl.ImplicitCast;
 import com.oracle.truffle.api.dsl.TypeCast;
 import com.oracle.truffle.api.dsl.TypeCheck;
 import com.oracle.truffle.api.dsl.TypeSystem;
 import com.oracle.truffle.api.interop.TruffleObject;
 import com.oracle.truffle.llvm.runtime.LLVMIVarBit;
+import com.oracle.truffle.llvm.runtime.LLVMIVarBitLarge;
+import com.oracle.truffle.llvm.runtime.LLVMIVarBitSmall;
 import com.oracle.truffle.llvm.runtime.floating.LLVM80BitFloat;
 import com.oracle.truffle.llvm.runtime.pointer.LLVMManagedPointer;
 import com.oracle.truffle.llvm.runtime.pointer.LLVMNativePointer;
@@ -82,5 +85,48 @@ public class LLVMTypes {
     @TypeCast(LLVMManagedPointer.class)
     public static LLVMManagedPointer asManagedPointer(Object object) {
         return LLVMManagedPointer.cast(object);
+    }
+
+    // Automatic type profiling for LLVMIVarBitSmall vs. LLVMIVarBitLarge:
+    // The type never changes (it depends on the bit width), so this is always a perfect profile.
+
+    @TypeCheck(LLVMIVarBitSmall.class)
+    public static boolean isLLVMIVarBitSmall(Object object) {
+        return object instanceof LLVMIVarBitSmall;
+    }
+
+    @TypeCast(LLVMIVarBitSmall.class)
+    public static LLVMIVarBitSmall asLLVMIVarBitSmall(Object object) {
+        return (LLVMIVarBitSmall) object;
+    }
+
+    @TypeCheck(LLVMIVarBitLarge.class)
+    public static boolean isLLVMIVarBitLarge(Object object) {
+        return object instanceof LLVMIVarBitLarge;
+    }
+
+    @TypeCast(LLVMIVarBitLarge.class)
+    public static LLVMIVarBitLarge asLLVMIVarBitLarge(Object object) {
+        return (LLVMIVarBitLarge) object;
+    }
+
+    @TypeCheck(LLVMIVarBit.class)
+    public static boolean isLLVMIVarBit(@SuppressWarnings("unused") Object object) {
+        return false;
+    }
+
+    @TypeCast(LLVMIVarBit.class)
+    public static LLVMIVarBit asLLVMIVarBit(@SuppressWarnings("unused") Object object) {
+        throw new IllegalStateException("LLVMIVarBit should always be cast via small/large");
+    }
+
+    @ImplicitCast
+    public static LLVMIVarBit asIVarBit(LLVMIVarBitSmall small) {
+        return small;
+    }
+
+    @ImplicitCast
+    public static LLVMIVarBit asIVarBit(LLVMIVarBitLarge large) {
+        return large;
     }
 }

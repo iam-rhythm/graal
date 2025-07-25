@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2018, Oracle and/or its affiliates.
+ * Copyright (c) 2016, 2022, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -32,11 +32,13 @@ package com.oracle.truffle.llvm.parser.model.functions;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-import java.util.Set;
-import java.util.stream.Collectors;
 
 import com.oracle.truffle.api.CompilerAsserts;
+import com.oracle.truffle.llvm.parser.LLVMParserRuntime;
+import com.oracle.truffle.llvm.parser.listeners.OperandBundleTags;
 import com.oracle.truffle.llvm.parser.metadata.MDAttachment;
+import com.oracle.truffle.llvm.parser.metadata.MDString;
+import com.oracle.truffle.llvm.parser.metadata.MDSubprogram;
 import com.oracle.truffle.llvm.parser.metadata.MetadataAttachmentHolder;
 import com.oracle.truffle.llvm.parser.metadata.debuginfo.SourceFunction;
 import com.oracle.truffle.llvm.parser.model.SymbolImpl;
@@ -46,23 +48,24 @@ import com.oracle.truffle.llvm.parser.model.blocks.InstructionBlock;
 import com.oracle.truffle.llvm.parser.model.enums.Linkage;
 import com.oracle.truffle.llvm.parser.model.enums.Visibility;
 import com.oracle.truffle.llvm.parser.model.symbols.constants.Constant;
-import com.oracle.truffle.llvm.parser.model.symbols.instructions.Instruction;
-import com.oracle.truffle.llvm.parser.model.symbols.instructions.ValueInstruction;
 import com.oracle.truffle.llvm.parser.model.visitors.FunctionVisitor;
 import com.oracle.truffle.llvm.parser.model.visitors.SymbolVisitor;
+import com.oracle.truffle.llvm.runtime.CommonNodeFactory;
+import com.oracle.truffle.llvm.runtime.GetStackSpaceFactory;
+import com.oracle.truffle.llvm.runtime.LLVMFunction;
+import com.oracle.truffle.llvm.runtime.datalayout.DataLayout;
 import com.oracle.truffle.llvm.runtime.debug.scope.LLVMSourceLocation;
+import com.oracle.truffle.llvm.runtime.nodes.api.LLVMExpressionNode;
 import com.oracle.truffle.llvm.runtime.types.FunctionType;
 import com.oracle.truffle.llvm.runtime.types.Type;
 import com.oracle.truffle.llvm.runtime.types.symbols.LLVMIdentifier;
 
-public final class FunctionDefinition implements Constant, FunctionSymbol, MetadataAttachmentHolder {
+public final class FunctionDefinition extends FunctionSymbol implements Constant, MetadataAttachmentHolder {
 
-    private static final InstructionBlock[] EMPTY = new InstructionBlock[0];
+    public static final InstructionBlock[] EMPTY = new InstructionBlock[0];
 
     private final List<FunctionParameter> parameters = new ArrayList<>();
-    private final FunctionType type;
-    private final AttributesCodeEntry paramAttr;
-    private final Linkage linkage;
+    private final OperandBundleTags operandBundleTags;
     private final Visibility visibility;
 
     private List<MDAttachment> mdAttachments = null;
@@ -70,23 +73,24 @@ public final class FunctionDefinition implements Constant, FunctionSymbol, Metad
 
     private InstructionBlock[] blocks = EMPTY;
     private int currentBlock = 0;
-    private String name;
 
-    public FunctionDefinition(FunctionType type, String name, Linkage linkage, Visibility visibility, AttributesCodeEntry paramAttr) {
-        this.type = type;
-        this.name = name;
-        this.paramAttr = paramAttr;
-        this.linkage = linkage;
+    private FunctionDefinition(FunctionType type, String name, Linkage linkage, Visibility visibility, AttributesCodeEntry paramAttr, int index, OperandBundleTags operandBundleTags) {
+        super(type, name, linkage, paramAttr, index);
         this.visibility = visibility;
+        this.operandBundleTags = operandBundleTags;
     }
 
-    public FunctionDefinition(FunctionType type, Linkage linkage, Visibility visibility, AttributesCodeEntry paramAttr) {
-        this(type, LLVMIdentifier.UNKNOWN, linkage, visibility, paramAttr);
+    public FunctionDefinition(FunctionType type, Linkage linkage, Visibility visibility, AttributesCodeEntry paramAttr, int index, OperandBundleTags operandBundleTags) {
+        this(type, LLVMIdentifier.UNKNOWN, linkage, visibility, paramAttr, index, operandBundleTags);
     }
 
     @Override
     public boolean hasAttachedMetadata() {
         return mdAttachments != null;
+    }
+
+    public OperandBundleTags getOperandBundleTags() {
+        return operandBundleTags;
     }
 
     @Override
@@ -97,24 +101,27 @@ public final class FunctionDefinition implements Constant, FunctionSymbol, Metad
         return mdAttachments;
     }
 
-    public Linkage getLinkage() {
-        return linkage;
-    }
-
-    @Override
-    public String getName() {
-        assert name != null;
-        return name;
-    }
-
     public String getSourceName() {
         final String scopeName = sourceFunction.getName();
         return SourceFunction.DEFAULT_SOURCE_NAME.equals(scopeName) ? null : scopeName;
     }
 
-    @Override
-    public void setName(String name) {
-        this.name = name;
+    public String getDisplayName() {
+        /*
+         * For LLVM code produced from C++ sources, function.name stores the linkage name, but not
+         * 'original' C++ name.
+         */
+        if (mdAttachments != null && mdAttachments.size() > 0) {
+            for (MDAttachment mdAttachment : mdAttachments) {
+                if (mdAttachment.getValue() instanceof MDSubprogram) {
+                    MDSubprogram mdSubprogram = (MDSubprogram) mdAttachment.getValue();
+                    if (mdSubprogram.getName() instanceof MDString) {
+                        return ((MDString) mdSubprogram.getName()).getString();
+                    }
+                }
+            }
+        }
+        return getSourceName();
     }
 
     @Override
@@ -139,61 +146,12 @@ public final class FunctionDefinition implements Constant, FunctionSymbol, Metad
         }
     }
 
-    @Override
-    public FunctionType getType() {
-        return type;
-    }
-
-    public AttributesGroup getFunctionAttributesGroup() {
-        CompilerAsserts.neverPartOfCompilation();
-        return paramAttr.getFunctionAttributesGroup();
-    }
-
-    public AttributesGroup getReturnAttributesGroup() {
-        CompilerAsserts.neverPartOfCompilation();
-        return paramAttr.getReturnAttributesGroup();
-    }
-
-    public AttributesGroup getParameterAttributesGroup(int idx) {
-        CompilerAsserts.neverPartOfCompilation();
-        return paramAttr.getParameterAttributesGroup(idx);
-    }
-
     public FunctionParameter createParameter(Type t) {
-        final AttributesGroup attrGroup = paramAttr.getParameterAttributesGroup(parameters.size());
-        final FunctionParameter parameter = new FunctionParameter(t, attrGroup);
+        final int argIndex = parameters.size();
+        final AttributesGroup attrGroup = getParameterAttributesGroup(argIndex);
+        final FunctionParameter parameter = new FunctionParameter(t, attrGroup, argIndex);
         parameters.add(parameter);
         return parameter;
-    }
-
-    public void exitLocalScope() {
-        int symbolIndex = 0;
-
-        // in K&R style function declarations the parameters are not assigned names
-        for (final FunctionParameter parameter : parameters) {
-            if (LLVMIdentifier.UNKNOWN.equals(parameter.getName())) {
-                parameter.setName(String.valueOf(symbolIndex++));
-            }
-        }
-
-        final Set<String> explicitBlockNames = Arrays.stream(blocks).map(InstructionBlock::getName).filter(blockName -> !LLVMIdentifier.UNKNOWN.equals(blockName)).collect(Collectors.toSet());
-        for (final InstructionBlock block : blocks) {
-            if (block.getName().equals(LLVMIdentifier.UNKNOWN)) {
-                do {
-                    block.setName(LLVMIdentifier.toImplicitBlockName(symbolIndex++));
-                    // avoid name clashes
-                } while (explicitBlockNames.contains(block.getName()));
-            }
-            for (int i = 0; i < block.getInstructionCount(); i++) {
-                final Instruction instruction = block.getInstruction(i);
-                if (instruction instanceof ValueInstruction) {
-                    final ValueInstruction value = (ValueInstruction) instruction;
-                    if (value.getName().equals(LLVMIdentifier.UNKNOWN)) {
-                        value.setName(String.valueOf(symbolIndex++));
-                    }
-                }
-            }
-        }
     }
 
     public InstructionBlock generateBlock() {
@@ -216,7 +174,7 @@ public final class FunctionDefinition implements Constant, FunctionSymbol, Metad
     }
 
     public void nameBlock(int index, String argName) {
-        blocks[index].setName(LLVMIdentifier.toExplicitBlockName(argName));
+        blocks[index].setName(argName);
     }
 
     public void onAfterParse() {
@@ -243,7 +201,7 @@ public final class FunctionDefinition implements Constant, FunctionSymbol, Metad
     @Override
     public String toString() {
         CompilerAsserts.neverPartOfCompilation();
-        return String.format("%s %s {...}", type.toString(), name);
+        return String.format("%s %s {...}", getType(), getName());
     }
 
     public LLVMSourceLocation getLexicalScope() {
@@ -260,16 +218,27 @@ public final class FunctionDefinition implements Constant, FunctionSymbol, Metad
 
     @Override
     public boolean isExported() {
-        return Linkage.isExported(linkage, visibility);
+        return Linkage.isExported(getLinkage(), visibility);
     }
 
     @Override
     public boolean isOverridable() {
-        return Linkage.isOverridable(linkage, visibility);
+        return Linkage.isOverridable(getLinkage(), visibility);
     }
 
     @Override
     public boolean isExternal() {
-        return Linkage.isExternal(linkage);
+        return Linkage.isExternal(getLinkage());
+    }
+
+    @Override
+    public boolean isExternalWeak() {
+        return getLinkage() == Linkage.EXTERN_WEAK;
+    }
+
+    @Override
+    public LLVMExpressionNode createNode(LLVMParserRuntime runtime, DataLayout dataLayout, GetStackSpaceFactory stackFactory) {
+        LLVMFunction value = runtime.lookupFunction(getName());
+        return CommonNodeFactory.createLiteral(value, getType());
     }
 }

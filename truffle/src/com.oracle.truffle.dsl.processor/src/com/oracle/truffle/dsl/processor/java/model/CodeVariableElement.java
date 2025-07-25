@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,6 +40,7 @@
  */
 package com.oracle.truffle.dsl.processor.java.model;
 
+import java.util.Objects;
 import java.util.Set;
 
 import javax.lang.model.element.AnnotationMirror;
@@ -65,21 +66,18 @@ public final class CodeVariableElement extends CodeElement<Element> implements V
 
     public CodeVariableElement(TypeMirror type, String name) {
         super(ElementUtils.modifiers());
+        Objects.requireNonNull(type);
+        Objects.requireNonNull(name);
         this.type = type;
         this.name = CodeNames.of(name);
     }
 
     public CodeVariableElement(Set<Modifier> modifiers, TypeMirror type, String name) {
         super(modifiers);
+        Objects.requireNonNull(type);
+        Objects.requireNonNull(name);
         this.type = type;
         this.name = CodeNames.of(name);
-    }
-
-    public CodeVariableElement(Set<Modifier> modifiers, TypeMirror type, String name, String init) {
-        this(modifiers, type, name);
-        if (init != null) {
-            this.init = new CodeTree(null, CodeTreeKind.STRING, null, init);
-        }
     }
 
     public CodeTreeBuilder createInitBuilder() {
@@ -87,6 +85,23 @@ public final class CodeVariableElement extends CodeElement<Element> implements V
         builder.setEnclosingElement(this);
         init = builder.getTree();
         return builder;
+    }
+
+    @Override
+    public boolean equals(Object obj) {
+        if (obj instanceof CodeVariableElement) {
+            CodeVariableElement other = (CodeVariableElement) obj;
+            return Objects.equals(name, other.name) && //
+                            ElementUtils.typeEquals(type, other.type) && //
+                            Objects.equals(constantValue, other.constantValue) && //
+                            Objects.equals(init, other.init) && super.equals(obj);
+        }
+        return false;
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(name, ElementUtils.getTypeSimpleId(type), constantValue, init, super.hashCode());
     }
 
     public void setInit(CodeTree init) {

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,201 +24,195 @@
  */
 package com.oracle.svm.core.thread;
 
+import static com.oracle.svm.core.Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_CODE;
+
 import org.graalvm.nativeimage.CurrentIsolate;
 import org.graalvm.nativeimage.ImageSingletons;
 import org.graalvm.nativeimage.IsolateThread;
-import org.graalvm.word.WordFactory;
 
 import com.oracle.svm.core.SubstrateOptions;
-import com.oracle.svm.core.SubstrateUtil.Thunk;
-import com.oracle.svm.core.annotate.RestrictHeapAccess;
+import com.oracle.svm.core.Uninterruptible;
+import com.oracle.svm.core.heap.RestrictHeapAccess;
+import com.oracle.svm.core.heap.VMOperationInfo;
+import com.oracle.svm.core.jfr.JfrTicks;
+import com.oracle.svm.core.jfr.events.ExecuteVMOperationEvent;
 import com.oracle.svm.core.log.Log;
-import com.oracle.svm.core.stack.StackOverflowCheck;
-import com.oracle.svm.core.thread.Safepoint.SafepointException;
+import com.oracle.svm.core.thread.VMOperationControl.OpInProgress;
 import com.oracle.svm.core.util.VMError;
 
-/** The abstract base class of all VM operations. */
-public abstract class VMOperation extends VMOperationControl.AllocationFreeStack.Element<VMOperation> {
+/**
+ * Only one thread at a time can execute {@linkplain VMOperation}s (see
+ * {@linkplain VMOperationControl}). While executing a VM operation, it is guaranteed that the
+ * yellow zone is enabled and that recurring callbacks are paused. This is necessary to avoid
+ * unexpected exceptions while executing critical code.
+ *
+ * No Java synchronization is allowed within a VMOperation. See
+ * {@link VMOperationControl#guaranteeOkayToBlock} for examples of how using synchronization within
+ * a VMOperation can cause a deadlock.
+ */
+public abstract class VMOperation {
+    private final VMOperationInfo info;
 
-    /** An identifier for the VMOperation. */
-    private final String name;
-
-    /** A VMOperation either blocks the caller or it does not. */
-    public enum CallerEffect {
-        DOES_NOT_BLOCK_CALLER,
-        BLOCKS_CALLER
+    protected VMOperation(VMOperationInfo info) {
+        assert info.getVMOperationClass() == this.getClass();
+        this.info = info;
     }
 
-    private final CallerEffect callerEffect;
-
-    /** A VMOperation either causes a safepoint or it does not. */
-    public enum SystemEffect {
-        DOES_NOT_CAUSE_SAFEPOINT,
-        CAUSES_SAFEPOINT
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public final int getId() {
+        return info.getId();
     }
 
-    private final SystemEffect systemEffect;
-
-    /**
-     * The VMThread of the thread that queued this VMOperation. Useful if the operation needs to
-     * update thread-local state in the queuing thread.
-     */
-    private IsolateThread queuingVMThread;
-
-    /**
-     * The thread that is currently executing this VMOperation, or NULL if the operation is
-     * currently not being executed.
-     */
-    private IsolateThread executingVMThread;
-
-    /** Constructor for sub-classes. */
-    protected VMOperation(String name, CallerEffect callerEffect, SystemEffect systemEffect) {
-        super();
-        this.name = name;
-        this.callerEffect = callerEffect;
-        this.systemEffect = systemEffect;
-        /*
-         * TODO: Currently I am running VMOperations on the thread of the caller, so all
-         * VMOperations block the caller.
-         */
-        assert callerEffect == CallerEffect.BLOCKS_CALLER : "Only blocking calls are implemented";
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public final String getName() {
+        return info.getName();
     }
 
-    /** Public interface: Queue the operation for execution. */
-    public final void enqueue() {
-        try {
-            StackOverflowCheck.singleton().makeYellowZoneAvailable();
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public boolean isGC() {
+        return false;
+    }
 
-            if (!SubstrateOptions.MultiThreaded.getValue()) {
-                // If I am single-threaded, I can just execute the operation.
-                execute();
-            } else {
-                // If I am multi-threaded, then I have to bring the system to a safepoint, etc.
-                setQueuingVMThread(CurrentIsolate.getCurrentThread());
-                VMOperationControl.enqueue(this);
-                setQueuingVMThread(WordFactory.nullPointer());
-            }
-        } catch (SafepointException se) {
-            /* This exception is intended to be thrown from safepoint checks, at one's own risk */
-            throw rethrow(se.inner);
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public final boolean getCausesSafepoint() {
+        return info.getCausesSafepoint();
+    }
 
-        } finally {
-            StackOverflowCheck.singleton().protectYellowZone();
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public final boolean isBlocking() {
+        return info.isBlocking();
+    }
+
+    protected final void execute(NativeVMOperationData data) {
+        assert VMOperationControl.mayExecuteVmOperations();
+        assert !isFinished(data);
+
+        final Log trace = SubstrateOptions.TraceVMOperations.getValue() ? Log.log() : Log.noopLog();
+        if (!hasWork(data)) {
+            /*
+             * The caller already does some filtering but it can still happen that we reach this
+             * code even though no work needs to be done.
+             */
+            trace.string("[Skipping operation ").string(getName()).string("]");
+            return;
         }
-    }
 
-    @SuppressWarnings({"unchecked"})
-    static <E extends Throwable> RuntimeException rethrow(Throwable ex) throws E {
-        throw (E) ex;
-    }
+        VMOperationControl control = ImageSingletons.lookup(VMOperationControl.class);
+        VMOperation prevOperation = control.getInProgress().getOperation();
+        IsolateThread prevQueuingThread = control.getInProgress().getQueuingThread();
+        IsolateThread prevExecutingThread = control.getInProgress().getExecutingThread();
+        IsolateThread requestingThread = getQueuingThread(data);
 
-    /** Convenience method for thunks that can be run by allocating a VMOperation. */
-    public static void enqueueBlockingSafepoint(String name, Thunk thunk) {
-        ThunkOperation vmOperation = new ThunkOperation(name, CallerEffect.BLOCKS_CALLER, SystemEffect.CAUSES_SAFEPOINT, thunk);
-        vmOperation.enqueue();
-    }
-
-    /** Convenience method for thunks that can be run by allocating a VMOperation. */
-    public static void enqueueBlockingNoSafepoint(String name, Thunk thunk) {
-        ThunkOperation vmOperation = new ThunkOperation(name, CallerEffect.BLOCKS_CALLER, SystemEffect.DOES_NOT_CAUSE_SAFEPOINT, thunk);
-        vmOperation.enqueue();
-    }
-
-    /** What it means to execute an operation. */
-    protected final void execute() {
+        control.setInProgress(this, requestingThread, CurrentIsolate.getCurrentThread(), true);
+        long startTicks = JfrTicks.elapsedTicks();
         try {
-            operateUnderIndicator();
+            trace.string("[Executing operation ").string(getName());
+            operate(data);
+            trace.string("]");
         } catch (Throwable t) {
-            Log.log().string("[VMOperation.execute caught: ").string(t.getClass().getName()).string("]").newline();
+            trace.string("[VMOperation.execute caught: ").string(t.getClass().getName()).string("]").newline();
             throw VMError.shouldNotReachHere(t);
-        }
-    }
-
-    /*
-     * TODO: This method should be annotated with {@link MustNotSynchronize}, but too many methods
-     * would have to be white-listed to make that practical.
-     */
-    private void operateUnderIndicator() {
-        final VMOperationControl control = ImageSingletons.lookup(VMOperationControl.class);
-        final VMOperation previousInProgress = control.getInProgress();
-        try {
-            executingVMThread = CurrentIsolate.getCurrentThread();
-            control.setInProgress(this);
-            operate();
         } finally {
-            control.setInProgress(previousInProgress);
-            executingVMThread = WordFactory.nullPointer();
+            ExecuteVMOperationEvent.emit(this, getQueuingThreadId(data), startTicks);
+            control.setInProgress(prevOperation, prevQueuingThread, prevExecutingThread, false);
         }
     }
 
+    /**
+     * Returns true if the current thread is in the middle of executing a VM operation. Note that
+     * this includes VM operations that do not need a safepoint.
+     */
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     public static boolean isInProgress() {
-        VMOperation cur = ImageSingletons.lookup(VMOperationControl.class).getInProgress();
-        return cur != null && cur.executingVMThread == CurrentIsolate.getCurrentThread();
+        OpInProgress inProgress = VMOperationControl.get().getInProgress();
+        return isInProgress(inProgress);
     }
 
-    /** Check that there is a VMOperation in progress. */
-    public static void guaranteeInProgress(String message) {
-        if (!isInProgress()) {
-            throw VMError.shouldNotReachHere(message);
-        }
+    /**
+     * Returns true if the current thread is in the middle of executing a VM operation that needs a
+     * safepoint.
+     */
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public static boolean isInProgressAtSafepoint() {
+        OpInProgress inProgress = VMOperationControl.get().getInProgress();
+        return isInProgress(inProgress) && inProgress.operation.getCausesSafepoint();
     }
 
-    /** Check that there is not a VMOperation in progress. */
+    /**
+     * Returns true if the current thread is in the middle of executing a VM operation. Note that
+     * this includes VM operations that do not need a safepoint.
+     */
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    static boolean isInProgress(OpInProgress inProgress) {
+        return inProgress.getExecutingThread() == CurrentIsolate.getCurrentThread();
+    }
+
+    /** Returns true if the current thread is in the middle of performing a garbage collection. */
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public static boolean isGCInProgress() {
+        VMOperation op = VMOperationControl.get().getInProgress().getOperation();
+        return op != null && op.isGC();
+    }
+
+    /**
+     * Throws a fatal error if the current thread is in the middle of executing a VM operation. Note
+     * that this includes VM operations that do not need a safepoint.
+     */
     public static void guaranteeNotInProgress(String message) {
         if (isInProgress()) {
             throw VMError.shouldNotReachHere(message);
         }
     }
 
-    /*
-     * Methods for sub-classes to override
+    /**
+     * Verifies that the current thread is in the middle of executing a VM operation that needs a
+     * safepoint.
      */
-
-    /** Do whatever it is that this VM operation does. */
-    @RestrictHeapAccess(access = RestrictHeapAccess.Access.UNRESTRICTED, overridesCallers = true, reason = "Whitelisted because some operations may allocate.")
-    protected abstract void operate();
-
-    /*
-     * Field access methods.
-     */
-
-    protected final String getName() {
-        return name;
-    }
-
-    final boolean getBlocksCaller() {
-        return callerEffect == CallerEffect.BLOCKS_CALLER;
-    }
-
-    final boolean getCausesSafepoint() {
-        return systemEffect == SystemEffect.CAUSES_SAFEPOINT;
-    }
-
-    protected final IsolateThread getQueuingVMThread() {
-        return queuingVMThread;
-    }
-
-    private void setQueuingVMThread(IsolateThread vmThread) {
-        queuingVMThread = vmThread;
-    }
-
-    final IsolateThread getExecutingVMThread() {
-        return executingVMThread;
-    }
-
-    /** A VMOperation that executes a thunk. */
-    public static class ThunkOperation extends VMOperation {
-
-        private Thunk thunk;
-
-        ThunkOperation(String name, CallerEffect callerEffect, SystemEffect systemEffect, Thunk thunk) {
-            super(name, callerEffect, systemEffect);
-            this.thunk = thunk;
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public static void guaranteeInProgressAtSafepoint(String message) {
+        if (!isInProgressAtSafepoint()) {
+            throw VMError.shouldNotReachHere(message);
         }
+    }
 
-        @Override
-        public void operate() {
-            thunk.invoke();
+    /** Verifies that the current thread is in the middle of performing a garbage collection. */
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
+    public static void guaranteeGCInProgress(String message) {
+        if (!isGCInProgress()) {
+            throw VMError.shouldNotReachHere(message);
+        }
+    }
+
+    /**
+     * Used to determine if a VM operation must be executed or if it can be skipped. Regardless of
+     * the {@linkplain SystemEffect} that was specified for the VM operation, this method might be
+     * called before or after a safepoint was initiated.
+     */
+    protected boolean hasWork(@SuppressWarnings("unused") NativeVMOperationData data) {
+        return true;
+    }
+
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    protected abstract void markAsQueued(NativeVMOperationData data);
+
+    protected abstract void markAsFinished(NativeVMOperationData data);
+
+    protected abstract IsolateThread getQueuingThread(NativeVMOperationData data);
+
+    protected abstract long getQueuingThreadId(NativeVMOperationData data);
+
+    protected abstract boolean isFinished(NativeVMOperationData data);
+
+    @RestrictHeapAccess(access = RestrictHeapAccess.Access.UNRESTRICTED, reason = "Whitelisted because some operations may allocate.")
+    protected abstract void operate(NativeVMOperationData data);
+
+    public enum SystemEffect {
+        NONE,
+        SAFEPOINT;
+
+        @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+        public static boolean getCausesSafepoint(SystemEffect value) {
+            return value == SAFEPOINT;
         }
     }
 }

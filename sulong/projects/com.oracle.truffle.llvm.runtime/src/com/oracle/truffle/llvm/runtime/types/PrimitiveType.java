@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates.
+ * Copyright (c) 2017, 2023, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -30,7 +30,12 @@
 package com.oracle.truffle.llvm.runtime.types;
 
 import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
+import com.oracle.truffle.llvm.runtime.CommonNodeFactory;
+import com.oracle.truffle.llvm.runtime.GetStackSpaceFactory;
+import com.oracle.truffle.llvm.runtime.NodeFactory;
 import com.oracle.truffle.llvm.runtime.datalayout.DataLayout;
+import com.oracle.truffle.llvm.runtime.except.LLVMParserException;
+import com.oracle.truffle.llvm.runtime.nodes.api.LLVMExpressionNode;
 import com.oracle.truffle.llvm.runtime.types.visitors.TypeVisitor;
 
 public final class PrimitiveType extends Type {
@@ -121,7 +126,7 @@ public final class PrimitiveType extends Type {
     }
 
     @Override
-    public int getBitSize() {
+    public long getBitSize() {
         return kind.sizeInBits;
     }
 
@@ -150,14 +155,13 @@ public final class PrimitiveType extends Type {
     }
 
     @Override
-    public int getSize(DataLayout targetDataLayout) {
-        return targetDataLayout.getSize(this);
-    }
-
-    @Override
-    public Type shallowCopy() {
-        final PrimitiveType copy = new PrimitiveType(kind, constant);
-        return copy;
+    public long getSize(DataLayout targetDataLayout) {
+        try {
+            return targetDataLayout.getSize(this);
+        } catch (TypeOverflowException e) {
+            // should not reach here
+            throw new AssertionError(e);
+        }
     }
 
     @Override
@@ -202,5 +206,31 @@ public final class PrimitiveType extends Type {
             return false;
         }
         return true;
+    }
+
+    @Override
+    public LLVMExpressionNode createNullConstant(NodeFactory nodeFactory, DataLayout dataLayout, GetStackSpaceFactory stackFactory) {
+        switch (getPrimitiveKind()) {
+            case I1:
+                return CommonNodeFactory.createSimpleConstantNoArray(false, this);
+            case I8:
+                return CommonNodeFactory.createSimpleConstantNoArray((byte) 0, this);
+            case I16:
+                return CommonNodeFactory.createSimpleConstantNoArray((short) 0, this);
+            case I32:
+                return CommonNodeFactory.createSimpleConstantNoArray(0, this);
+            case I64:
+                return CommonNodeFactory.createSimpleConstantNoArray(0L, this);
+            case FLOAT:
+                return CommonNodeFactory.createSimpleConstantNoArray(0.0f, this);
+            case DOUBLE:
+                return CommonNodeFactory.createSimpleConstantNoArray(0.0d, this);
+            case X86_FP80:
+                return CommonNodeFactory.createSimpleConstantNoArray(null, this);
+            case F128:
+                return CommonNodeFactory.createSimpleConstantNoArray(null, this);
+            default:
+                throw new LLVMParserException("Unsupported Type for Zero Constant: " + this);
+        }
     }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -42,49 +42,75 @@ package com.oracle.truffle.api.source;
 
 import java.io.File;
 import java.io.IOException;
+import java.lang.ref.WeakReference;
+import java.net.URI;
 import java.net.URL;
-import java.util.Collection;
+import java.nio.charset.Charset;
+import java.util.Map;
+import java.util.Set;
+import java.util.function.Function;
 
 import com.oracle.truffle.api.TruffleFile;
 import com.oracle.truffle.api.impl.Accessor;
 import com.oracle.truffle.api.source.Source.SourceBuilder;
-import java.nio.file.Path;
 
 final class SourceAccessor extends Accessor {
 
     static final SourceAccessor ACCESSOR = new SourceAccessor();
 
-    protected SourceAccessor() {
+    static final LanguageSupport LANGUAGE = ACCESSOR.languageSupport();
+    static final EngineSupport ENGINE = ACCESSOR.engineSupport();
+
+    private SourceAccessor() {
     }
 
-    @Override
-    protected SourceSupport sourceSupport() {
-        return new SourceSupportImpl();
+    public static void load() {
     }
 
-    @Override
-    protected LanguageSupport languageSupport() {
-        return super.languageSupport();
+    static String detectMimeType(TruffleFile file, Set<String> validMimeTypes) {
+        return ACCESSOR.languageSupport().detectMimeType(file, validMimeTypes);
     }
 
-    @Override
-    protected EngineSupport engineSupport() {
-        return super.engineSupport();
+    static Charset detectEncoding(TruffleFile file, String mimeType) {
+        return ACCESSOR.languageSupport().detectEncoding(file, mimeType);
     }
 
-    static Collection<ClassLoader> allLoaders() {
-        return ACCESSOR.loaders();
+    static TruffleFile getTruffleFile(URI uri, Object fileSystemContext) {
+        return ACCESSOR.languageSupport().getTruffleFile(uri, fileSystemContext);
     }
 
-    static Path getPath(TruffleFile file) {
-        return ACCESSOR.languageSupport().getPath(file);
+    static TruffleFile getTruffleFile(String path, Object fileSystemContext) {
+        return ACCESSOR.languageSupport().getTruffleFile(path, fileSystemContext);
+    }
+
+    static boolean isSocketIOAllowed(Object fileSystemContext) {
+        return ACCESSOR.languageSupport().isSocketIOAllowed(fileSystemContext);
+    }
+
+    static void onSourceCreated(Source source) {
+        ACCESSOR.engineSupport().onSourceCreated(source);
+    }
+
+    static String getReinitializedPath(TruffleFile truffleFile) {
+        return ACCESSOR.engineSupport().getReinitializedPath(truffleFile);
+    }
+
+    static URI getReinitializedURI(TruffleFile truffleFile) {
+        return ACCESSOR.engineSupport().getReinitializedURI(truffleFile);
     }
 
     static final class SourceSupportImpl extends Accessor.SourceSupport {
 
         @Override
         public Source copySource(Source source) {
-            return source.copy();
+            Source copy = source.copy();
+            copy.cachedPolyglotSource = source.cachedPolyglotSource;
+            return copy;
+        }
+
+        @Override
+        public Map<String, String> getSourceOptions(Source source) {
+            return source.getOptions();
         }
 
         @Override
@@ -93,23 +119,26 @@ final class SourceAccessor extends Accessor {
         }
 
         @Override
-        public org.graalvm.polyglot.Source getPolyglotSource(Source source) {
-            return source.polyglotSource;
+        public Object getOrCreatePolyglotSource(Source source,
+                        Function<Source, Object> createSource) {
+            WeakReference<Object> ref = source.cachedPolyglotSource;
+            Object polyglotSource;
+            if (ref == null) {
+                polyglotSource = null;
+            } else {
+                polyglotSource = ref.get();
+            }
+            if (polyglotSource == null) {
+                polyglotSource = createSource.apply(source);
+                source.cachedPolyglotSource = new WeakReference<>(polyglotSource);
+            }
+            assert polyglotSource != null;
+            return polyglotSource;
         }
 
         @Override
-        public void setPolyglotSource(Source source, org.graalvm.polyglot.Source polyglotSource) {
-            source.polyglotSource = polyglotSource;
-        }
-
-        @Override
-        public String findMimeType(File file) throws IOException {
-            return Source.findMimeType(file.toPath(), null);
-        }
-
-        @Override
-        public String findMimeType(URL url) throws IOException {
-            return Source.findMimeType(url);
+        public String findMimeType(URL url, Object fileSystemContext) throws IOException {
+            return Source.findMimeType(url, url.openConnection(), null, fileSystemContext);
         }
 
         @Override
@@ -118,9 +147,42 @@ final class SourceAccessor extends Accessor {
         }
 
         @Override
-        public boolean isLegacySource(Source source) {
-            return source.isLegacy();
+        public void setFileSystemContext(SourceBuilder builder, Object fileSystemContext) {
+            builder.fileSystemContext(fileSystemContext);
         }
 
+        @Override
+        public void setEmbedderSource(SourceBuilder builder, boolean enabled) {
+            builder.embedderSource(enabled);
+        }
+
+        @Override
+        public void setURL(SourceBuilder builder, URL url) {
+            builder.url(url);
+        }
+
+        @Override
+        public void setPath(SourceBuilder builder, String path) {
+            builder.path(path);
+        }
+
+        @Override
+        public void invalidateAfterPreinitialiation(Source source) {
+            ((SourceImpl) source).key.invalidateAfterPreinitialiation();
+        }
+
+        @Override
+        public void mergeLoadedSources(Source[] sources) {
+            for (Source s : sources) {
+                if (s instanceof SourceImpl) {
+                    Source.SOURCES.add(((SourceImpl) s));
+                }
+            }
+        }
+
+        @Override
+        public URI getOriginalURI(Source source) {
+            return source.getOriginalURI();
+        }
     }
 }

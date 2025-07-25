@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -48,6 +48,7 @@ import org.junit.Test;
 import com.oracle.truffle.api.Assumption;
 import com.oracle.truffle.api.Truffle;
 import com.oracle.truffle.api.dsl.Cached;
+import com.oracle.truffle.api.dsl.Cached.Exclusive;
 import com.oracle.truffle.api.dsl.Fallback;
 import com.oracle.truffle.api.dsl.Specialization;
 import com.oracle.truffle.api.dsl.test.CachedReachableFallbackTestFactory.CacheDuplicatesNodeGen;
@@ -59,19 +60,17 @@ import com.oracle.truffle.api.nodes.Node;
 import com.oracle.truffle.api.nodes.NodeUtil;
 import com.oracle.truffle.api.nodes.NodeVisitor;
 
+@SuppressWarnings({"truffle-inlining", "truffle-neverdefault", "truffle-sharing"})
 public class CachedReachableFallbackTest {
 
-    static final String CACHED_GUARD_FALLBACK_ERROR = "Some guards for the following specializations could not be negated for the @Fallback specialization: [s1]. " +
-                    "Guards cannot be negated for the @Fallback when they bind @Cached parameters and the specialization may consist of multiple instances. " +
-                    "To fix this limit the number of instances to '1' or introduce a more generic specialization declared between this specialization and the fallback. " +
-                    "Alternatively the use of @Fallback can be avoided by declaring a @Specialization with manually specified negated guards.";
+    static final String CACHED_GUARD_FALLBACK_ERROR = "Some guards for the following specializations could not be negated for the @Fallback specialization: [s1].%";
 
     @SuppressWarnings("unused")
     abstract static class ValidWithGenericNode extends Node {
 
         abstract Object execute(Object other);
 
-        @Specialization(guards = {"guardNode.execute(obj)"})
+        @Specialization(guards = {"guardNode.execute(obj)"}, limit = "3")
         protected Object s1(int obj,
                         @Cached("createGuard()") GuardNode guardNode) {
             return "s1";
@@ -190,7 +189,7 @@ public class CachedReachableFallbackTest {
     }
 
     @SuppressWarnings("unused")
-    abstract static class CacheDuplicatesNode extends Node {
+    abstract static class CacheDuplicatesNode extends SlowPathListenerNode {
 
         abstract Object execute(Object other);
 
@@ -218,6 +217,7 @@ public class CachedReachableFallbackTest {
         Assert.assertEquals("fallback", node.execute(41));
         Assert.assertEquals(42, node.execute(42));
         Assert.assertEquals("fallback", node.execute(41));
+        Assert.assertEquals(2, node.specializeCount);
 
         // test fallback with string
         node = CacheDuplicatesNodeGen.create();
@@ -225,6 +225,7 @@ public class CachedReachableFallbackTest {
         Assert.assertEquals(41, node.execute(41));
         Assert.assertEquals("fallback", node.execute(42));
         Assert.assertEquals(41, node.execute(41));
+        Assert.assertEquals(2, node.specializeCount);
     }
 
     private static void assertAdopted(Node node) {
@@ -239,10 +240,10 @@ public class CachedReachableFallbackTest {
 
         @Specialization(guards = {"guardNode1.execute(obj)", "guardNode2.execute(obj)", "guardNode3.execute(obj)"}, limit = "1")
         protected Object s1(int obj,
-                        @Cached("createGuard()") GuardNode guardNode1,
-                        @Cached("createGuard()") GuardNode guardNode2,
-                        @Cached("createGuard()") GuardNode guardNode3,
-                        @Cached("createGuard()") GuardNode unboundGuard) {
+                        @Exclusive @Cached("createGuard()") GuardNode guardNode1,
+                        @Exclusive @Cached("createGuard()") GuardNode guardNode2,
+                        @Exclusive @Cached("createGuard()") GuardNode guardNode3,
+                        @Exclusive @Cached("createGuard()") GuardNode unboundGuard) {
             assertAdopted(guardNode1);
             assertAdopted(guardNode2);
             assertAdopted(guardNode3);
@@ -252,17 +253,17 @@ public class CachedReachableFallbackTest {
 
         @Specialization
         protected Object s2(double obj,
-                        @Cached("createGuard()") GuardNode unboundGuard) {
+                        @Exclusive @Cached("createGuard()") GuardNode unboundGuard) {
             assertAdopted(unboundGuard);
             return "s2";
         }
 
         @Specialization
         protected Object s3(float obj,
-                        @Cached("createGuard()") GuardNode unboundGuard1,
-                        @Cached("createGuard()") GuardNode unboundGuard2,
-                        @Cached("createGuard()") GuardNode unboundGuard3,
-                        @Cached("createGuard()") GuardNode unboundGuard4) {
+                        @Exclusive @Cached("createGuard()") GuardNode unboundGuard1,
+                        @Exclusive @Cached("createGuard()") GuardNode unboundGuard2,
+                        @Exclusive @Cached("createGuard()") GuardNode unboundGuard3,
+                        @Exclusive @Cached("createGuard()") GuardNode unboundGuard4) {
             assertAdopted(unboundGuard1);
             assertAdopted(unboundGuard2);
             assertAdopted(unboundGuard3);
@@ -303,9 +304,10 @@ public class CachedReachableFallbackTest {
 
         abstract Object execute(Object other);
 
+        @SuppressWarnings("truffle-assumption")
         @Specialization(guards = {"guardNode1.execute(obj)", "notTwo(obj)"}, rewriteOn = RuntimeException.class, assumptions = "createAssumption()", limit = "1")
         protected Object s1(int obj,
-                        @Cached("create(1)") NotGuardNode guardNode1) {
+                        @Cached(value = "create(1)") NotGuardNode guardNode1) {
             assertAdopted(guardNode1);
             if (obj == 3) {
                 throw new RuntimeException();

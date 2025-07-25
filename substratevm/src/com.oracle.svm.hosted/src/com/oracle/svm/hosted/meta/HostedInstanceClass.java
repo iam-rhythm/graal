@@ -24,10 +24,6 @@
  */
 package com.oracle.svm.hosted.meta;
 
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
-
 import com.oracle.graal.pointsto.meta.AnalysisType;
 
 import jdk.vm.ci.meta.JavaKind;
@@ -35,17 +31,17 @@ import jdk.vm.ci.meta.ResolvedJavaField;
 
 public class HostedInstanceClass extends HostedClass {
 
-    protected HostedField[] instanceFields;
+    protected HostedField[] instanceFieldsWithoutSuper;
+    protected HostedField[] instanceFieldsWithSuper;
+    protected int firstInstanceFieldOffset;
+    protected int afterFieldsOffset;
     protected int instanceSize;
     protected boolean monitorFieldNeeded = false;
-    protected int monitorFieldOffset = 0;
-    protected boolean waitNotifyConditionFieldNeeded = false;
-    protected int waitNotifyConditionFieldOffset = 0;
-    protected boolean hashCodeFieldNeeded = false;
-    protected int hashCodeFieldOffset = 0;
+    protected int monitorFieldOffset = -1;
+    protected int identityHashOffset = -1;
 
-    public HostedInstanceClass(HostedUniverse universe, AnalysisType wrapped, JavaKind kind, JavaKind storageKind, HostedClass superClass, HostedInterface[] interfaces, boolean isCloneable) {
-        super(universe, wrapped, kind, storageKind, superClass, interfaces, isCloneable);
+    public HostedInstanceClass(HostedUniverse universe, AnalysisType wrapped, JavaKind kind, JavaKind storageKind, HostedClass superClass, HostedInterface[] interfaces) {
+        super(universe, wrapped, kind, storageKind, superClass, interfaces);
     }
 
     @Override
@@ -77,29 +73,35 @@ public class HostedInstanceClass extends HostedClass {
 
     @Override
     public HostedField[] getInstanceFields(boolean includeSuperclasses) {
-        assert instanceFields != null;
-
-        if (includeSuperclasses && getSuperclass() != null) {
-            List<HostedField> fields = new ArrayList<>();
-            fields.addAll(Arrays.asList(getSuperclass().getInstanceFields(true)));
-            fields.addAll(Arrays.asList(instanceFields));
-            return fields.toArray(new HostedField[fields.size()]);
-        }
-        return instanceFields;
+        return includeSuperclasses ? instanceFieldsWithSuper : instanceFieldsWithoutSuper;
     }
 
     @Override
     public ResolvedJavaField findInstanceFieldWithOffset(long offset, JavaKind expectedKind) {
         assert offset >= 0;
-        for (HostedField field : instanceFields) {
+        for (HostedField field : instanceFieldsWithSuper) {
             if (field.getLocation() == offset && (expectedKind == null || field.getStorageKind() == expectedKind)) {
                 return field;
             }
         }
-        if (getSuperclass() != null) {
-            return getSuperclass().findInstanceFieldWithOffset(offset, expectedKind);
-        }
         return null;
+    }
+
+    public int getFirstInstanceFieldOffset() {
+        /*
+         * Each object has at least a header, so the firstInstanceFieldOffset should always be
+         * positive.
+         */
+        assert firstInstanceFieldOffset > 0 : "Invalid offset " + firstInstanceFieldOffset + " class: " + getName();
+        return firstInstanceFieldOffset;
+    }
+
+    public int getAfterFieldsOffset() {
+        /*
+         * Each object has at least a header, so the afterFieldsOffset should always be positive.
+         */
+        assert afterFieldsOffset > 0 : "Invalid offset " + afterFieldsOffset + " class: " + getName();
+        return afterFieldsOffset;
     }
 
     public int getInstanceSize() {
@@ -107,7 +109,7 @@ public class HostedInstanceClass extends HostedClass {
     }
 
     /*
-     * Monitor field.
+     * Synthetic fields.
      */
 
     public boolean needMonitorField() {
@@ -122,29 +124,19 @@ public class HostedInstanceClass extends HostedClass {
         return monitorFieldOffset;
     }
 
-    public void setMonitorFieldOffset(int monitorFieldOffset) {
-        assert this.monitorFieldOffset == 0 : "setting monitor field offset twice";
-        this.monitorFieldOffset = monitorFieldOffset;
+    public void setMonitorFieldOffset(int offset) {
+        assert this.monitorFieldOffset == -1 : "setting monitor field offset twice";
+        assert offset >= 0;
+        this.monitorFieldOffset = offset;
     }
 
-    /*
-     * identityHashCode field.
-     */
-
-    public boolean needHashCodeField() {
-        return hashCodeFieldNeeded;
+    public int getIdentityHashOffset() {
+        return identityHashOffset;
     }
 
-    public void setNeedHashCodeField() {
-        this.hashCodeFieldNeeded = true;
-    }
-
-    public int getHashCodeFieldOffset() {
-        return hashCodeFieldOffset;
-    }
-
-    public void setHashCodeFieldOffset(int hashCodeFieldOffset) {
-        assert this.hashCodeFieldOffset == 0 : "setting hash code field offset twice";
-        this.hashCodeFieldOffset = hashCodeFieldOffset;
+    public void setIdentityHashOffset(int offset) {
+        assert this.identityHashOffset == -1 : "setting identity hashcode field offset more than once";
+        assert offset >= 0;
+        this.identityHashOffset = offset;
     }
 }

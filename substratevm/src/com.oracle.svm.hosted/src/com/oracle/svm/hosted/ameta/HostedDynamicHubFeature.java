@@ -24,16 +24,15 @@
  */
 package com.oracle.svm.hosted.ameta;
 
-import org.graalvm.nativeimage.Feature;
-
 import com.oracle.graal.pointsto.meta.AnalysisMetaAccess;
-import com.oracle.svm.core.annotate.AutomaticFeature;
+import com.oracle.svm.core.feature.AutomaticallyRegisteredFeature;
+import com.oracle.svm.core.feature.InternalFeature;
 import com.oracle.svm.core.hub.DynamicHub;
 import com.oracle.svm.hosted.FeatureImpl.DuringSetupAccessImpl;
 import com.oracle.svm.hosted.SVMHost;
 
-@AutomaticFeature
-public class HostedDynamicHubFeature implements Feature {
+@AutomaticallyRegisteredFeature
+public class HostedDynamicHubFeature implements InternalFeature {
     private AnalysisMetaAccess metaAccess;
     private SVMHost hostVM;
 
@@ -50,12 +49,7 @@ public class HostedDynamicHubFeature implements Feature {
         if (source instanceof Class) {
             Class<?> clazz = (Class<?>) source;
             DynamicHub dynamicHub = hostVM.dynamicHub(metaAccess.lookupJavaType(clazz));
-
-            AnalysisConstantReflectionProvider.registerHub(hostVM, dynamicHub);
             return dynamicHub;
-
-        } else if (source instanceof DynamicHub) {
-            AnalysisConstantReflectionProvider.registerHub(hostVM, (DynamicHub) source);
         }
         return source;
     }

@@ -24,26 +24,26 @@
  */
 package com.oracle.svm.hosted.substitute;
 
-import java.lang.annotation.Annotation;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 
-import org.graalvm.compiler.debug.DebugContext;
-import org.graalvm.compiler.java.FrameStateBuilder;
-import org.graalvm.compiler.nodes.CallTargetNode.InvokeKind;
-import org.graalvm.compiler.nodes.ConstantNode;
-import org.graalvm.compiler.nodes.StructuredGraph;
-import org.graalvm.compiler.nodes.UnwindNode;
-import org.graalvm.compiler.nodes.ValueNode;
-
+import com.oracle.graal.pointsto.meta.AnalysisMethod;
 import com.oracle.graal.pointsto.meta.HostedProviders;
 import com.oracle.svm.core.annotate.Delete;
-import com.oracle.svm.core.meta.SubstrateObjectConstant;
 import com.oracle.svm.core.option.SubstrateOptionsParser;
 import com.oracle.svm.core.util.VMError;
+import com.oracle.svm.hosted.annotation.AnnotationValue;
 import com.oracle.svm.hosted.annotation.CustomSubstitutionMethod;
+import com.oracle.svm.hosted.annotation.SubstrateAnnotationExtractor;
 import com.oracle.svm.hosted.phases.HostedGraphKit;
+import com.oracle.svm.util.ReflectionUtil;
 
+import jdk.graal.compiler.debug.DebugContext;
+import jdk.graal.compiler.nodes.CallTargetNode.InvokeKind;
+import jdk.graal.compiler.nodes.ConstantNode;
+import jdk.graal.compiler.nodes.StructuredGraph;
+import jdk.graal.compiler.nodes.UnwindNode;
+import jdk.graal.compiler.nodes.ValueNode;
 import jdk.vm.ci.meta.ResolvedJavaMethod;
 
 public class DeletedMethod extends CustomSubstitutionMethod {
@@ -52,40 +52,21 @@ public class DeletedMethod extends CustomSubstitutionMethod {
                     "Native method. If you intend to use the Java Native Interface (JNI), specify %1$s+JNI and see also %1$sJNIConfigurationFiles=<path> (use %1$s+PrintFlags for details)",
                     SubstrateOptionsParser.HOSTED_OPTION_PREFIX);
 
-    private final Delete deleteAnnotation;
+    private final String message;
+    private final AnnotationValue[] injectedAnnotations;
 
     public DeletedMethod(ResolvedJavaMethod original, Delete deleteAnnotation) {
         super(original);
-        this.deleteAnnotation = deleteAnnotation;
+        this.message = deleteAnnotation.value();
+        this.injectedAnnotations = SubstrateAnnotationExtractor.prepareInjectedAnnotations(deleteAnnotation);
     }
 
     @Override
-    public Annotation[] getAnnotations() {
-        return AnnotatedField.appendAnnotationTo(original.getAnnotations(), deleteAnnotation);
+    public AnnotationValue[] getInjectedAnnotations() {
+        return injectedAnnotations;
     }
 
-    @Override
-    public Annotation[] getDeclaredAnnotations() {
-        return AnnotatedField.appendAnnotationTo(original.getDeclaredAnnotations(), deleteAnnotation);
-    }
-
-    @Override
-    public <T extends Annotation> T getAnnotation(Class<T> annotationClass) {
-        if (annotationClass.isInstance(deleteAnnotation)) {
-            return annotationClass.cast(deleteAnnotation);
-        }
-        return original.getAnnotation(annotationClass);
-    }
-
-    public static final Method reportErrorMethod;
-
-    static {
-        try {
-            reportErrorMethod = VMError.class.getDeclaredMethod("unsupportedFeature", String.class);
-        } catch (NoSuchMethodException ex) {
-            throw VMError.shouldNotReachHere(ex);
-        }
-    }
+    public static final Method reportErrorMethod = ReflectionUtil.lookupMethod(VMError.class, "unsupportedFeature", String.class);
 
     @Override
     public int getModifiers() {
@@ -97,31 +78,20 @@ public class DeletedMethod extends CustomSubstitutionMethod {
     }
 
     @Override
-    public StructuredGraph buildGraph(DebugContext debug, ResolvedJavaMethod method, HostedProviders providers, Purpose purpose) {
-        return buildGraph(debug, method, providers, deleteAnnotation.value());
+    public StructuredGraph buildGraph(DebugContext debug, AnalysisMethod method, HostedProviders providers, Purpose purpose) {
+        return buildGraph(debug, method, providers, message);
     }
 
-    public static StructuredGraph buildGraph(DebugContext debug, ResolvedJavaMethod method, HostedProviders providers, String message) {
+    public static StructuredGraph buildGraph(DebugContext debug, AnalysisMethod method, HostedProviders providers, String message) {
         HostedGraphKit kit = new HostedGraphKit(debug, providers, method);
-        StructuredGraph graph = kit.getGraph();
-        FrameStateBuilder state = new FrameStateBuilder(null, method, graph);
-        state.initializeForMethodStart(null, true, providers.getGraphBuilderPlugins());
 
-        /*
-         * A random, but unique and consistent, number for every invoke. This is necessary because
-         * we, e.g., look up static analysis results by bci.
-         */
-        int bci = 0;
-        graph.start().setStateAfter(state.create(bci++, graph.start()));
+        kit.getGraph().start().setStateAfter(kit.getFrameState().create(kit.bci(), kit.getGraph().start()));
 
         String msg = AnnotationSubstitutionProcessor.deleteErrorMessage(method, message, false);
-        ValueNode msgNode = ConstantNode.forConstant(SubstrateObjectConstant.forObject(msg), providers.getMetaAccess(), graph);
-        ValueNode exceptionNode = kit.createInvokeWithExceptionAndUnwind(providers.getMetaAccess().lookupJavaMethod(reportErrorMethod), InvokeKind.Static, state, bci++, bci++, msgNode);
-
+        ValueNode msgNode = ConstantNode.forConstant(kit.getConstantReflection().forString(msg), kit.getMetaAccess(), kit.getGraph());
+        ValueNode exceptionNode = kit.createInvokeWithExceptionAndUnwind(kit.getMetaAccess().lookupJavaMethod(reportErrorMethod), InvokeKind.Static, kit.getFrameState(), kit.bci(), msgNode);
         kit.append(new UnwindNode(exceptionNode));
-        kit.mergeUnwinds();
 
-        assert graph.verify();
-        return graph;
+        return kit.finalizeGraph();
     }
 }

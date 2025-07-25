@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2014, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -41,31 +41,43 @@
 package com.oracle.truffle.polyglot;
 
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.PrintStream;
-import java.net.JarURLConnection;
-import java.net.URISyntaxException;
+import java.lang.reflect.Method;
 import java.net.URL;
-import java.net.URLConnection;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
-import java.nio.file.Paths;
+import java.security.CodeSource;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.Enumeration;
+import java.util.Deque;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Properties;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.ServiceLoader;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.function.Supplier;
 
+import org.graalvm.home.HomeFinder;
+import org.graalvm.polyglot.SandboxPolicy;
+
+import com.oracle.truffle.api.CompilerDirectives;
+import com.oracle.truffle.api.CompilerDirectives.CompilationFinal;
+import com.oracle.truffle.api.TruffleFile.FileTypeDetector;
 import com.oracle.truffle.api.TruffleLanguage;
 import com.oracle.truffle.api.TruffleLanguage.ContextPolicy;
 import com.oracle.truffle.api.TruffleLanguage.Registration;
 import com.oracle.truffle.api.TruffleOptions;
-import java.util.WeakHashMap;
+import com.oracle.truffle.api.instrumentation.ProvidedTags;
+import com.oracle.truffle.api.instrumentation.Tag;
+import com.oracle.truffle.api.provider.TruffleLanguageProvider;
+import com.oracle.truffle.polyglot.EngineAccessor.AbstractClassLoaderSupplier;
+import com.oracle.truffle.polyglot.EngineAccessor.StrongClassLoaderSupplier;
 
 /**
  * Ahead-of-time initialization. If the JVM is started with {@link TruffleOptions#AOT}, it populates
@@ -74,12 +86,13 @@ import java.util.WeakHashMap;
 final class LanguageCache implements Comparable<LanguageCache> {
     private static final Map<String, LanguageCache> nativeImageCache = TruffleOptions.AOT ? new HashMap<>() : null;
     private static final Map<String, LanguageCache> nativeImageMimes = TruffleOptions.AOT ? new HashMap<>() : null;
-    private static final Map<ClassLoader, Map<String, LanguageCache>> runtimeCaches = new WeakHashMap<>();
+    private static final Set<String> languagesOverridingPatchContext = TruffleOptions.AOT ? new HashSet<>() : null;
+    private static final Map<Collection<AbstractClassLoaderSupplier>, Map<String, LanguageCache>> runtimeCaches = new HashMap<>();
     private static volatile Map<String, LanguageCache> runtimeMimes;
+    @CompilationFinal private static volatile int maxStaticIndex;
     private final String className;
     private final Set<String> mimeTypes;
     private final Set<String> characterMimeTypes;
-    private final Set<String> byteMimeTypes;
     private final String defaultMimeType;
     private final Set<String> dependentLanguages;
     private final String id;
@@ -88,100 +101,77 @@ final class LanguageCache implements Comparable<LanguageCache> {
     private final String version;
     private final boolean interactive;
     private final boolean internal;
-    private final ClassLoader loader;
-    private final TruffleLanguage<?> globalInstance;
+    private final boolean needsAllEncodings;
     private final Set<String> services;
+    private final ContextPolicy contextPolicy;
+    private final TruffleLanguageProvider provider;
+    private final String website;
+    private final SandboxPolicy sandboxPolicy;
+    private volatile List<FileTypeDetector> fileTypeDetectors;
+    private volatile Set<Class<? extends Tag>> providedTags;
+    private final Map<String, InternalResourceCache> internalResources;
+    private int staticIndex;
+
+    /*
+     * When building a native image, this field is reset to null so that directories from the image
+     * build do not leak into the image heap. The value is lazily recomputed at image run time.
+     */
     private String languageHome;
-    private volatile ContextPolicy policy;
-    private volatile Class<? extends TruffleLanguage<?>> languageClass;
 
-    private LanguageCache(String id, String prefix, Properties info, ClassLoader loader, String url) {
-        this.loader = loader;
-        this.className = info.getProperty(prefix + "className");
-        this.name = info.getProperty(prefix + "name");
-        this.implementationName = info.getProperty(prefix + "implementationName");
-        this.version = info.getProperty(prefix + "version");
-        TreeSet<String> characterMimes = parseList(info, prefix + "characterMimeType");
-        if (characterMimes.isEmpty()) {
-            characterMimes = parseList(info, prefix + "mimeType");
-        }
-        this.characterMimeTypes = characterMimes;
-        this.byteMimeTypes = parseList(info, prefix + "byteMimeType");
-        this.mimeTypes = new TreeSet<>();
-        this.mimeTypes.addAll(characterMimes);
-        this.mimeTypes.addAll(byteMimeTypes);
-
-        String defaultMime = info.getProperty(prefix + "defaultMimeType");
-        if (mimeTypes.size() == 1 && defaultMime == null) {
-            this.defaultMimeType = mimeTypes.iterator().next();
-        } else {
-            this.defaultMimeType = defaultMime;
-        }
-
-        this.dependentLanguages = parseList(info, prefix + "dependentLanguage");
-        this.id = id;
-        this.interactive = Boolean.valueOf(info.getProperty(prefix + "interactive"));
-        this.internal = Boolean.valueOf(info.getProperty(prefix + "internal"));
-        this.languageHome = url;
-
-        Set<String> servicesClassNames = new TreeSet<>();
-        for (int servicesCounter = 0;; servicesCounter++) {
-            String nth = prefix + "service" + servicesCounter;
-            String serviceName = info.getProperty(nth);
-            if (serviceName == null) {
-                break;
-            }
-            servicesClassNames.add(serviceName);
-        }
-        this.services = Collections.unmodifiableSet(servicesClassNames);
-
-        if (TruffleOptions.AOT) {
-            initializeLanguageClass();
-            assert languageClass != null;
-            assert policy != null;
-        }
-        this.globalInstance = null;
-    }
-
-    private static TreeSet<String> parseList(Properties info, String prefix) {
-        TreeSet<String> mimeTypesSet = new TreeSet<>();
-        for (int i = 0;; i++) {
-            String mt = info.getProperty(prefix + "." + i);
-            if (mt == null) {
-                break;
-            }
-            mimeTypesSet.add(mt);
-        }
-        return mimeTypesSet;
-    }
-
-    @SuppressWarnings("unchecked")
-    LanguageCache(String id, String name, String implementationName, String version, boolean interactive, boolean internal,
-                    TruffleLanguage<?> instance, String... services) {
-        this.id = id;
-        this.className = instance.getClass().getName();
-        this.mimeTypes = Collections.emptySet();
-        this.characterMimeTypes = Collections.emptySet();
-        this.byteMimeTypes = Collections.emptySet();
-        this.defaultMimeType = null;
-        this.implementationName = implementationName;
+    private LanguageCache(String id, String name, String implementationName, String version, String className,
+                    String languageHome, Set<String> characterMimeTypes, Set<String> byteMimeTypes, String defaultMimeType,
+                    Set<String> dependentLanguages, boolean interactive, boolean internal, boolean needsAllEncodings, Set<String> services,
+                    ContextPolicy contextPolicy, TruffleLanguageProvider provider, String website, SandboxPolicy sandboxPolicy,
+                    Map<String, InternalResourceCache> internalResources) {
+        assert provider != null : "Provider must be non null";
+        this.className = className;
         this.name = name;
+        this.implementationName = implementationName;
         this.version = version;
+        this.characterMimeTypes = characterMimeTypes;
+        this.mimeTypes = new TreeSet<>();
+        this.mimeTypes.addAll(characterMimeTypes);
+        this.mimeTypes.addAll(byteMimeTypes);
+        this.defaultMimeType = mimeTypes.size() == 1 && defaultMimeType == null ? mimeTypes.iterator().next() : defaultMimeType;
+        this.dependentLanguages = dependentLanguages;
+        this.id = id;
         this.interactive = interactive;
         this.internal = internal;
-        this.dependentLanguages = Collections.emptySet();
-        this.loader = instance.getClass().getClassLoader();
-        this.languageClass = (Class<? extends TruffleLanguage<?>>) instance.getClass();
-        this.languageHome = null;
-        this.policy = ContextPolicy.SHARED;
-        this.globalInstance = instance;
-        if (services.length == 0) {
-            this.services = Collections.emptySet();
-        } else {
-            Set<String> servicesClassNames = new TreeSet<>();
-            Collections.addAll(servicesClassNames, services);
-            this.services = Collections.unmodifiableSet(servicesClassNames);
-        }
+        this.needsAllEncodings = needsAllEncodings;
+        this.languageHome = languageHome;
+        this.services = services;
+        this.contextPolicy = contextPolicy;
+        this.provider = provider;
+        this.website = website;
+        this.sandboxPolicy = sandboxPolicy;
+        this.internalResources = internalResources;
+    }
+
+    /**
+     * Returns the maximum index used by any loaded language. This index updates when new languages
+     * are loaded. Make sure you only read this index when all languages are already loaded.
+     */
+    static int getMaxStaticIndex() {
+        return maxStaticIndex;
+    }
+
+    static LanguageCache createHostLanguageCache(TruffleLanguage<?> languageInstance, String... services) {
+        HostLanguageProvider hostLanguageProvider = new HostLanguageProvider(languageInstance, services);
+        LanguageCache cache = new LanguageCache(
+                        PolyglotEngineImpl.HOST_LANGUAGE_ID,
+                        "Host",
+                        "Host",
+                        System.getProperty("java.version"),
+                        languageInstance.getClass().getName(),
+                        null,
+                        Collections.emptySet(),
+                        Collections.emptySet(),
+                        null,
+                        Collections.emptySet(),
+                        false, false, false, hostLanguageProvider.getServicesClassNames(),
+                        ContextPolicy.SHARED, hostLanguageProvider, "", SandboxPolicy.UNTRUSTED, Map.of());
+        cache.staticIndex = PolyglotEngineImpl.HOST_LANGUAGE_INDEX;
+        return cache;
     }
 
     static Map<String, LanguageCache> languageMimes() {
@@ -202,7 +192,7 @@ final class LanguageCache implements Comparable<LanguageCache> {
 
     private static Map<String, LanguageCache> createMimes() {
         Map<String, LanguageCache> mimes = new LinkedHashMap<>();
-        for (LanguageCache cache : languages(null).values()) {
+        for (LanguageCache cache : languages().values()) {
             for (String mime : cache.getMimeTypes()) {
                 mimes.put(mime, cache);
             }
@@ -210,268 +200,250 @@ final class LanguageCache implements Comparable<LanguageCache> {
         return mimes;
     }
 
-    static Map<String, LanguageCache> languages(ClassLoader additionalLoader) {
+    /**
+     * Returns {@code true} if any registered language has {@link Registration#needsAllEncodings()}
+     * set.
+     * <p>
+     * NOTE: this method is called reflectively by downstream projects.
+     */
+    @SuppressWarnings("unused")
+    public static boolean getNeedsAllEncodings() {
+        for (LanguageCache cache : languages().values()) {
+            if (cache.isNeedsAllEncodings()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static Map<String, LanguageCache> languages() {
+        return loadLanguages(EngineAccessor.locatorOrDefaultLoaders());
+    }
+
+    static Collection<LanguageCache> internalLanguages() {
+        Set<LanguageCache> result = new HashSet<>();
+        for (Map.Entry<String, LanguageCache> e : languages().entrySet()) {
+            if (e.getValue().isInternal()) {
+                result.add(e.getValue());
+            }
+        }
+        return result;
+    }
+
+    static Collection<LanguageCache> computeTransitiveLanguageDependencies(String id) {
+        Map<String, LanguageCache> languagesById = languages();
+        LanguageCache root = languagesById.get(id);
+        if (root == null) {
+            throw new IllegalArgumentException(String.format("A language with id '%s' is not installed. Installed languages are: %s.",
+                            id, String.join(", ", languagesById.keySet())));
+        }
+        Set<LanguageCache> result = new HashSet<>();
+        Deque<LanguageCache> todo = new ArrayDeque<>();
+        todo.add(root);
+        while (!todo.isEmpty()) {
+            LanguageCache current = todo.removeFirst();
+            if (result.add(current)) {
+                current.getDependentLanguages().stream().map(languagesById::get).filter(Objects::nonNull).forEach(todo::add);
+            }
+        }
+        return result;
+    }
+
+    static Map<String, LanguageCache> loadLanguages(List<AbstractClassLoaderSupplier> classLoaders) {
         if (TruffleOptions.AOT) {
             return nativeImageCache;
         }
         synchronized (LanguageCache.class) {
-            Map<String, LanguageCache> cache = runtimeCaches.get(additionalLoader);
+            Map<String, LanguageCache> cache = runtimeCaches.get(classLoaders);
             if (cache == null) {
-                cache = createLanguages(additionalLoader);
-                runtimeCaches.put(additionalLoader, cache);
+                cache = createLanguages(classLoaders);
+                runtimeCaches.put(classLoaders, cache);
             }
             return cache;
         }
     }
 
-    private static Map<String, LanguageCache> createLanguages(ClassLoader additionalLoader) {
+    private static synchronized Map<String, LanguageCache> createLanguages(List<AbstractClassLoaderSupplier> suppliers) {
         List<LanguageCache> caches = new ArrayList<>();
-        for (ClassLoader loader : VMAccessor.allLoaders()) {
-            collectLanguages(loader, caches);
-        }
-        if (additionalLoader != null) {
-            collectLanguages(additionalLoader, caches);
-        }
-        Map<String, LanguageCache> cacheToId = new HashMap<>();
-        for (LanguageCache languageCache : caches) {
-            cacheToId.put(languageCache.getId(), languageCache);
-        }
-        return cacheToId;
-    }
-
-    private static void collectLanguages(ClassLoader loader, List<LanguageCache> list) {
-        if (loader == null) {
-            return;
-        }
-        try {
-            Class<?> truffleLanguageClassAsSeenByLoader = Class.forName(TruffleLanguage.class.getName(), true, loader);
-            if (truffleLanguageClassAsSeenByLoader != TruffleLanguage.class) {
-                return;
-            }
-        } catch (ClassNotFoundException ex) {
-            return;
-        }
-
-        Enumeration<URL> en;
-        try {
-            en = loader.getResources("META-INF/truffle/language");
-        } catch (IOException ex) {
-            throw new IllegalStateException("Cannot read list of Truffle languages", ex);
-        }
-        while (en.hasMoreElements()) {
-            URL u = en.nextElement();
-            Properties p;
-            URLConnection connection;
-            try {
-                p = new Properties();
-                connection = u.openConnection();
-                /* Ensure truffle language jar-files are not getting cached. See GR-12018 */
-                connection.setUseCaches(false);
-                try (InputStream is = connection.getInputStream()) {
-                    p.load(is);
-                }
-            } catch (IOException ex) {
-                PrintStream out = System.err;
-                out.println("Cannot process " + u + " as language definition");
-                ex.printStackTrace();
+        Map<String, Map<String, Supplier<InternalResourceCache>>> optionalResources = InternalResourceCache.loadOptionalInternalResources(suppliers);
+        for (AbstractClassLoaderSupplier supplier : suppliers) {
+            ClassLoader loader = supplier.get();
+            if (loader == null) {
                 continue;
             }
-            for (int cnt = 1;; cnt++) {
-                String prefix = "language" + cnt + ".";
-                String name = p.getProperty(prefix + "name");
-                if (name == null) {
-                    break;
-                }
-                String id = p.getProperty(prefix + "id");
-                if (id == null) {
-                    id = defaultId(name, p.getProperty(prefix + "className"));
-                }
-                String languageHome = System.getProperty(id + ".home");
-                if (languageHome == null && connection instanceof JarURLConnection) {
 
-                    /*
-                     * The previous implementation used a `URL.getPath()`, but OS Windows is
-                     * offended by leading slash and maybe other irrelevant characters. Therefore,
-                     * for JDK 1.7+ a preferred way to go is URL -> URI -> Path.
-                     *
-                     * Also, Paths are more strict than Files and URLs, so we can't create an
-                     * invalid Path from a random string like "/C:/". This leads us to the
-                     * `URISyntaxException` for URL -> URI conversion and
-                     * `java.nio.file.InvalidPathException` for URI -> Path conversion.
-                     *
-                     * For fixing further bugs at this point, please read
-                     * http://tools.ietf.org/html/rfc1738 http://tools.ietf.org/html/rfc2396
-                     * (supersedes rfc1738) http://tools.ietf.org/html/rfc3986 (supersedes rfc2396)
-                     *
-                     * http://url.spec.whatwg.org/ does not contain URI interpretation. When you
-                     * call `URI.toASCIIString()` all reserved and non-ASCII characters are
-                     * percent-quoted.
-                     */
-                    try {
-                        Path path;
-                        path = Paths.get(((JarURLConnection) connection).getJarFileURL().toURI());
-                        Path parent = path.getParent();
-                        if (parent == null) {
-                            languageHome = null;
-                        } else {
-                            languageHome = parent.toString();
-                        }
-                    } catch (URISyntaxException e) {
-                        assert false : "Could not resolve path.";
-                    }
+            for (TruffleLanguageProvider provider : ServiceLoader.load(TruffleLanguageProvider.class, loader)) {
+                if (supplier.accepts(provider.getClass())) {
+                    loadLanguageImpl(provider, caches, optionalResources);
                 }
-                list.add(new LanguageCache(id, prefix, p, loader, languageHome));
             }
         }
+
+        Map<String, LanguageCache> idToCache = new LinkedHashMap<>();
+        for (LanguageCache languageCache : caches) {
+            LanguageCache prev = idToCache.put(languageCache.getId(), languageCache);
+            if (prev != null && (!prev.getClassName().equals(languageCache.getClassName()) || !hasSameCodeSource(prev, languageCache))) {
+                String message = String.format("Duplicate language id %s. First language [%s]. Second language [%s].",
+                                languageCache.getId(),
+                                formatLanguageLocation(prev),
+                                formatLanguageLocation(languageCache));
+                throw new IllegalStateException(message);
+            }
+        }
+        int languageId = PolyglotEngineImpl.HOST_LANGUAGE_INDEX;
+        for (LanguageCache cache : idToCache.values()) {
+            cache.staticIndex = ++languageId;
+        }
+        /*
+         * maxLanguagesCount only needs to grow, otherwise we might access the fast thread local
+         * array out of bounds.
+         */
+        maxStaticIndex = Math.max(maxStaticIndex, languageId);
+        return idToCache;
     }
 
-    private static String defaultId(final String name, final String className) {
-        String resolvedId;
-        if (name.isEmpty()) {
-            int lastIndex = className.lastIndexOf('$');
-            if (lastIndex == -1) {
-                lastIndex = className.lastIndexOf('.');
-            }
-            resolvedId = className.substring(lastIndex + 1, className.length());
-        } else {
-            // TODO remove this hack for single character languages
-            if (name.length() == 1) {
-                resolvedId = name;
+    private static boolean hasSameCodeSource(LanguageCache first, LanguageCache second) {
+        return first.provider.getClass() == second.provider.getClass();
+    }
+
+    @SuppressWarnings("deprecation")
+    private static void loadLanguageImpl(TruffleLanguageProvider provider, List<LanguageCache> into, Map<String, Map<String, Supplier<InternalResourceCache>>> optionalResources) {
+        Class<?> providerClass = provider.getClass();
+        Module providerModule = providerClass.getModule();
+        JDKSupport.exportTransitivelyTo(providerModule);
+        /*
+         * Forward the native access capability to all loaded languages.
+         */
+        JDKSupport.enableNativeAccess(providerModule);
+        Registration reg = providerClass.getAnnotation(Registration.class);
+        if (reg == null) {
+            emitWarning("Warning Truffle language ignored: Provider %s is missing @Registration annotation.", providerClass);
+            return;
+        }
+        String className = EngineAccessor.LANGUAGE_PROVIDER.getLanguageClassName(provider);
+        String name = reg.name();
+        String id = reg.id();
+        if (id == null || id.isEmpty()) {
+            if (name.isEmpty()) {
+                int lastIndex = className.lastIndexOf('$');
+                if (lastIndex == -1) {
+                    lastIndex = className.lastIndexOf('.');
+                }
+                id = className.substring(lastIndex + 1);
             } else {
-                resolvedId = name.toLowerCase();
-            }
-        }
-        return resolvedId;
-    }
-
-    public int compareTo(LanguageCache o) {
-        return id.compareTo(o.id);
-    }
-
-    String getId() {
-        return id;
-    }
-
-    Set<String> getMimeTypes() {
-        return mimeTypes;
-    }
-
-    String getDefaultMimeType() {
-        return defaultMimeType;
-    }
-
-    boolean isCharacterMimeType(String mimeType) {
-        return characterMimeTypes.contains(mimeType);
-    }
-
-    boolean isByteMimeType(String mimeType) {
-        return characterMimeTypes.contains(mimeType);
-    }
-
-    String getName() {
-        return name;
-    }
-
-    String getImplementationName() {
-        return implementationName;
-    }
-
-    Set<String> getDependentLanguages() {
-        return dependentLanguages;
-    }
-
-    String getVersion() {
-        return version;
-    }
-
-    String getClassName() {
-        return className;
-    }
-
-    boolean isInternal() {
-        return internal;
-    }
-
-    boolean isInteractive() {
-        return interactive;
-    }
-
-    String getLanguageHome() {
-        if (languageHome == null) {
-            languageHome = System.getProperty(id + ".home");
-        }
-        return languageHome;
-    }
-
-    TruffleLanguage<?> loadLanguage() {
-        if (globalInstance != null) {
-            return globalInstance;
-        }
-        TruffleLanguage<?> instance;
-        try {
-            instance = getLanguageClass().getDeclaredConstructor().newInstance();
-        } catch (Exception e) {
-            throw new IllegalStateException("Cannot create instance of " + name + " language implementation. Public default constructor expected in " + className + ".", e);
-        }
-        return instance;
-    }
-
-    Class<? extends TruffleLanguage<?>> getLanguageClass() {
-        if (!TruffleOptions.AOT) {
-            initializeLanguageClass();
-        }
-        return this.languageClass;
-    }
-
-    ContextPolicy getPolicy() {
-        initializeLanguageClass();
-        return policy;
-    }
-
-    Collection<String> getServices() {
-        return services;
-    }
-
-    boolean supportsService(Class<?> clazz) {
-        return services.contains(clazz.getName()) || services.contains(clazz.getCanonicalName());
-    }
-
-    @SuppressWarnings("unchecked")
-    private void initializeLanguageClass() {
-        if (languageClass == null) {
-            synchronized (this) {
-                if (languageClass == null) {
-                    try {
-                        Class<?> loadedClass = Class.forName(className, true, loader);
-                        Registration reg = loadedClass.getAnnotation(Registration.class);
-                        if (reg == null) {
-                            policy = ContextPolicy.EXCLUSIVE;
-                        } else {
-                            policy = loadedClass.getAnnotation(Registration.class).contextPolicy();
-                        }
-                        @SuppressWarnings("rawtypes")
-                        Class<? extends TruffleLanguage> loadedLanguageClass = loadedClass.asSubclass(TruffleLanguage.class);
-                        languageClass = (Class<? extends TruffleLanguage<?>>) loadedLanguageClass;
-                    } catch (ClassNotFoundException e) {
-                        throw new IllegalStateException("Cannot load language " + name + ". Language implementation class " + className + " failed to load.", e);
-                    }
+                // TODO GR-38632 remove this hack for single character languages
+                if (name.length() == 1) {
+                    id = name;
+                } else {
+                    id = name.toLowerCase();
                 }
             }
         }
+        /*
+         * We utilize the `HomeFinder#getLanguageHomes()` function because it works for legacy,
+         * standalone, and unchained builds. It's important to note that this code is never
+         * reachable during native image execution, and thus, using it doesn't introduce
+         * `ProcessProperties#getExecutableName` function in the generated native image.
+         */
+        Path languageHomePath = HomeFinder.getInstance().getLanguageHomes().get(id);
+        String languageHome = languageHomePath != null ? languageHomePath.toString() : null;
+        String implementationName = reg.implementationName();
+        String version = reg.version();
+        TreeSet<String> characterMimes = new TreeSet<>();
+        Collections.addAll(characterMimes, reg.characterMimeTypes());
+        TreeSet<String> byteMimeTypes = new TreeSet<>();
+        Collections.addAll(byteMimeTypes, reg.byteMimeTypes());
+        String defaultMime = reg.defaultMimeType();
+        if (defaultMime.isEmpty()) {
+            defaultMime = null;
+        }
+        TreeSet<String> dependentLanguages = new TreeSet<>();
+        Collections.addAll(dependentLanguages, reg.dependentLanguages());
+        boolean interactive = reg.interactive();
+        boolean internal = reg.internal();
+        boolean needsAllEncodings = reg.needsAllEncodings();
+        if (!needsAllEncodings) {
+            if (providerModule.isNamed()) {
+                Optional<Module> jcodingsModule = providerModule.getLayer().findModule("org.graalvm.shadowed.jcodings");
+                needsAllEncodings = jcodingsModule.isPresent() && providerModule.canRead(jcodingsModule.get());
+            } else {
+                // If language is on the class path, assume needsAllEncodings=true.
+                // If jcodings is not actually available, it will be disabled either way.
+                needsAllEncodings = true;
+            }
+        }
+        Set<String> servicesClassNames = new TreeSet<>(EngineAccessor.LANGUAGE_PROVIDER.getServicesClassNames(provider));
+        SandboxPolicy sandboxPolicy = reg.sandbox();
+        Map<String, InternalResourceCache> resources = new HashMap<>();
+        for (String resourceId : EngineAccessor.LANGUAGE_PROVIDER.getInternalResourceIds(provider)) {
+            resources.put(resourceId, new InternalResourceCache(id, resourceId, () -> EngineAccessor.LANGUAGE_PROVIDER.createInternalResource(provider, resourceId)));
+        }
+        for (Map.Entry<String, Supplier<InternalResourceCache>> resourceSupplier : optionalResources.getOrDefault(id, Map.of()).entrySet()) {
+            InternalResourceCache resource = resourceSupplier.getValue().get();
+            InternalResourceCache old = resources.put(resourceSupplier.getKey(), resource);
+            if (old != null) {
+                throw InternalResourceCache.throwDuplicateOptionalResourceException(old, resource);
+            }
+        }
+        for (String optionalResourceId : reg.optionalResources()) {
+            if (!resources.containsKey(optionalResourceId)) {
+                resources.put(optionalResourceId, new InternalResourceCache(id, optionalResourceId, InternalResourceCache.nonExistingResource(id, optionalResourceId)));
+            }
+        }
+        into.add(new LanguageCache(id, name, implementationName, version, className, languageHome,
+                        characterMimes, byteMimeTypes, defaultMime, dependentLanguages, interactive, internal, needsAllEncodings,
+                        servicesClassNames, reg.contextPolicy(), provider, reg.website(), sandboxPolicy, Collections.unmodifiableMap(resources)));
     }
 
-    @Override
-    public String toString() {
-        return "LanguageCache [id=" + id + ", name=" + name + ", implementationName=" + implementationName + ", version=" + version + ", className=" + className + ", services=" + services + "]";
+    private static String formatLanguageLocation(LanguageCache languageCache) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("Language class ").append(languageCache.getClassName());
+
+        CodeSource source = languageCache.provider.getClass().getProtectionDomain().getCodeSource();
+        URL url = source != null ? source.getLocation() : null;
+        if (url != null) {
+            sb.append(", Loaded from " + url);
+        }
+        return sb.toString();
+    }
+
+    private static String getLanguageHomeFromSystemProperty(String languageId) {
+        return toRealStringPath("org.graalvm.language." + languageId + ".home");
+    }
+
+    private static String toRealStringPath(String propertyName) {
+        String path = System.getProperty(propertyName);
+        if (path != null) {
+            try {
+                path = Path.of(path).toRealPath().toString();
+            } catch (NoSuchFileException nsfe) {
+                return path;
+            } catch (IOException ioe) {
+                throw CompilerDirectives.shouldNotReachHere(ioe);
+            }
+        }
+        return path;
+    }
+
+    static boolean overridesPathContext(String languageId) {
+        assert TruffleOptions.AOT : "Only supported in native image";
+        return languagesOverridingPatchContext.contains(languageId);
     }
 
     static void resetNativeImageCacheLanguageHomes() {
-        for (LanguageCache languageCache : languages(null).values()) {
-            languageCache.languageHome = null;
+        synchronized (LanguageCache.class) {
+            if (nativeImageCache != null) {
+                resetNativeImageCacheLanguageHomes(nativeImageCache);
+            }
+            for (Map<String, LanguageCache> caches : runtimeCaches.values()) {
+                resetNativeImageCacheLanguageHomes(caches);
+            }
         }
-        final ClassLoader loader = Thread.currentThread().getContextClassLoader();
-        for (LanguageCache languageCache : languages(loader).values()) {
-            languageCache.languageHome = null;
+    }
+
+    private static void resetNativeImageCacheLanguageHomes(Map<String, LanguageCache> caches) {
+        for (LanguageCache cache : caches.values()) {
+            cache.languageHome = null;
         }
     }
 
@@ -485,8 +457,36 @@ final class LanguageCache implements Comparable<LanguageCache> {
     @SuppressWarnings("unused")
     private static void initializeNativeImageState(ClassLoader imageClassLoader) {
         assert TruffleOptions.AOT : "Only supported during image generation";
-        nativeImageCache.putAll(createLanguages(imageClassLoader));
+        nativeImageCache.putAll(createLanguages(List.of(new StrongClassLoaderSupplier(imageClassLoader))));
         nativeImageMimes.putAll(createMimes());
+        for (LanguageCache languageCache : nativeImageCache.values()) {
+            try {
+                Class<?> clz = Class.forName(languageCache.className, false, imageClassLoader);
+                for (Method m : clz.getDeclaredMethods()) {
+                    if (m.getName().equals("patchContext")) {
+                        languagesOverridingPatchContext.add(languageCache.id);
+                        break;
+                    }
+                }
+            } catch (ReflectiveOperationException roe) {
+                emitWarning("Failed to lookup patchContext method due to ", roe);
+            }
+        }
+    }
+
+    /*
+     * Collect languages included in a native image.
+     *
+     * NOTE: this method is called reflectively by TruffleBaseFeature
+     */
+    @SuppressWarnings("unused")
+    private static Set<String> collectLanguages() {
+        assert TruffleOptions.AOT : "Only supported during image generation";
+        Set<String> toRet = new HashSet<>();
+        for (LanguageCache languageCache : nativeImageCache.values()) {
+            toRet.add(languageCache.id);
+        }
+        return toRet;
     }
 
     /**
@@ -521,19 +521,183 @@ final class LanguageCache implements Comparable<LanguageCache> {
     }
 
     /**
-     * Fetches all active language classes.
-     *
-     * NOTE: this method is called reflectively by downstream projects.
+     * Returns an index that allows to identify this language for the entire host process. This
+     * index can be used and cached statically.
      */
-    @SuppressWarnings("unused")
-    private static Collection<Class<?>> getLanguageClasses() {
-        assert TruffleOptions.AOT : "Only supported during image generation";
-        ArrayList<Class<?>> list = new ArrayList<>();
-        for (LanguageCache cache : nativeImageCache.values()) {
-            assert cache.languageClass != null;
-            list.add(cache.languageClass);
-        }
-        return list;
+    int getStaticIndex() {
+        return staticIndex;
     }
 
+    public int compareTo(LanguageCache o) {
+        return id.compareTo(o.id);
+    }
+
+    String getId() {
+        return id;
+    }
+
+    Set<String> getMimeTypes() {
+        return mimeTypes;
+    }
+
+    String getDefaultMimeType() {
+        return defaultMimeType;
+    }
+
+    boolean isCharacterMimeType(String mimeType) {
+        return characterMimeTypes.contains(mimeType);
+    }
+
+    String getName() {
+        return name;
+    }
+
+    String getImplementationName() {
+        return implementationName;
+    }
+
+    Set<String> getDependentLanguages() {
+        return dependentLanguages;
+    }
+
+    String getVersion() {
+        return version;
+    }
+
+    String getClassName() {
+        return className;
+    }
+
+    boolean isInternal() {
+        return internal;
+    }
+
+    boolean isInteractive() {
+        return interactive;
+    }
+
+    public boolean isNeedsAllEncodings() {
+        return needsAllEncodings;
+    }
+
+    String getLanguageHome() {
+        if (languageHome == null) {
+            /*
+             * In the legacy build, the language home property is set by the GraalVMLocator at
+             * startup. We cannot use the HomeFinder#getLanguageHomes() function because it would
+             * make the ProcessProperties#getExecutableName() reachable.
+             */
+            languageHome = getLanguageHomeFromSystemProperty(id);
+        }
+        return languageHome;
+    }
+
+    TruffleLanguage<?> loadLanguage() {
+        return (TruffleLanguage<?>) EngineAccessor.LANGUAGE_PROVIDER.create(provider);
+    }
+
+    @SuppressWarnings("unchecked")
+    Set<? extends Class<? extends Tag>> getProvidedTags() {
+        Set<Class<? extends Tag>> res = providedTags;
+        if (res == null) {
+            ProvidedTags tags = provider.getClass().getAnnotation(ProvidedTags.class);
+            if (tags == null) {
+                res = Collections.emptySet();
+            } else {
+                res = new HashSet<>();
+                Collections.addAll(res, (Class<? extends Tag>[]) tags.value());
+                res = Collections.unmodifiableSet(res);
+            }
+            providedTags = res;
+        }
+        return res;
+    }
+
+    ContextPolicy getPolicy() {
+        return contextPolicy;
+    }
+
+    Collection<String> getServices() {
+        return services;
+    }
+
+    boolean supportsService(Class<?> clazz) {
+        return services.contains(clazz.getName()) || services.contains(clazz.getCanonicalName());
+    }
+
+    List<? extends FileTypeDetector> getFileTypeDetectors() {
+        List<FileTypeDetector> result = fileTypeDetectors;
+        if (result == null) {
+            result = EngineAccessor.LANGUAGE_PROVIDER.createFileTypeDetectors(provider);
+            fileTypeDetectors = result;
+        }
+        return result;
+    }
+
+    InternalResourceCache getResourceCache(String resourceId) {
+        return internalResources.get(resourceId);
+    }
+
+    Collection<String> getResourceIds() {
+        return internalResources.keySet();
+    }
+
+    Collection<InternalResourceCache> getResources() {
+        return internalResources.values();
+    }
+
+    @Override
+    public String toString() {
+        return "LanguageCache [id=" + id + ", name=" + name + ", implementationName=" + implementationName + ", version=" + version + ", className=" + className + ", services=" + services + "]";
+    }
+
+    String getWebsite() {
+        return website;
+    }
+
+    SandboxPolicy getSandboxPolicy() {
+        return sandboxPolicy;
+    }
+
+    private static void emitWarning(String message, Object... args) {
+        PolyglotEngineImpl.logFallback(String.format(message + "%n", args));
+    }
+
+    private static final class HostLanguageProvider extends TruffleLanguageProvider {
+
+        private final TruffleLanguage<?> languageInstance;
+        private final Set<String> servicesClassNames;
+
+        HostLanguageProvider(TruffleLanguage<?> languageInstance, String... services) {
+            assert languageInstance != null : "LanguageInstance must be non null.";
+            this.languageInstance = languageInstance;
+            if (services.length == 0) {
+                servicesClassNames = Collections.emptySet();
+            } else {
+                Set<String> treeSet = new TreeSet<>();
+                Collections.addAll(treeSet, services);
+                servicesClassNames = Collections.unmodifiableSet(treeSet);
+            }
+        }
+
+        @Override
+        public String getLanguageClassName() {
+            return languageInstance.getClass().getName();
+        }
+
+        @Override
+        public Object create() {
+            return languageInstance;
+        }
+
+        @Override
+        public Set<String> getServicesClassNames() {
+            return servicesClassNames;
+        }
+
+        @Override
+        protected List<TruffleLanguageProvider> createFileTypeDetectors() {
+            return List.of();
+        }
+    }
 }

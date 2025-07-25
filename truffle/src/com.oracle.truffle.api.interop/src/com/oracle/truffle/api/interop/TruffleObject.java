@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2014, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -43,15 +43,10 @@ package com.oracle.truffle.api.interop;
 /**
  * Interface for any entity of a Truffle guest language implementations that can be shared across
  * other language implementations.
- * 
+ *
  * @since 0.8 or earlier
+ * @see InteropLibrary to access truffle objects.
  */
 public interface TruffleObject {
-    /**
-     * Provides the {@code ForeignAccessFactory} instance for this {@code TruffleObject} instance.
-     *
-     * @return the {@code ForeignAccessFactory} instance for this {@code TruffleObject} instance.
-     * @since 0.8 or earlier
-     */
-    ForeignAccess getForeignAccess();
+
 }

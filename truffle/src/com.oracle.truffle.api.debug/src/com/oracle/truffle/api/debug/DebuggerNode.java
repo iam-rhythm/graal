@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2016, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,8 +40,13 @@
  */
 package com.oracle.truffle.api.debug;
 
+import static com.oracle.truffle.api.debug.SetThreadSuspensionEnabledNode.currentThreadId;
+
 import java.util.Set;
 import java.util.concurrent.Callable;
+
+import org.graalvm.collections.EconomicMap;
+import org.graalvm.collections.EconomicSet;
 
 import com.oracle.truffle.api.Assumption;
 import com.oracle.truffle.api.CompilerAsserts;
@@ -49,19 +54,14 @@ import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
 import com.oracle.truffle.api.Truffle;
 import com.oracle.truffle.api.frame.MaterializedFrame;
 import com.oracle.truffle.api.frame.VirtualFrame;
-import com.oracle.truffle.api.instrumentation.EventBinding;
 import com.oracle.truffle.api.instrumentation.EventContext;
 import com.oracle.truffle.api.instrumentation.ExecutionEventNode;
 import com.oracle.truffle.api.nodes.Node;
-import org.graalvm.collections.EconomicMap;
-import org.graalvm.collections.EconomicSet;
 
 /**
  * Base class for all execution event nodes that were inserted by the debugger.
  */
 abstract class DebuggerNode extends ExecutionEventNode implements InsertableNode {
-
-    abstract EventBinding<?> getBinding();
 
     protected final EventContext context;
 
@@ -113,8 +113,8 @@ abstract class DebuggerNode extends ExecutionEventNode implements InsertableNode
         CompilerAsserts.neverPartOfCompilation();
         noDuplicateAssumption.invalidate();
         if (singleThreadSession) {
-            Thread thread = Thread.currentThread();
-            if (cachedThreadId == thread.getId() && cachedSessionDuplicate == null) {
+            long threadId = currentThreadId();
+            if (cachedThreadId == threadId && cachedSessionDuplicate == null) {
                 cachedSessionDuplicate = session;
                 return;
             } else if (cachedThreadId == 0) {
@@ -122,7 +122,7 @@ abstract class DebuggerNode extends ExecutionEventNode implements InsertableNode
                     @Override
                     public Boolean call() {
                         if (cachedThreadId == 0) {
-                            cachedThreadId = thread.getId();
+                            cachedThreadId = threadId;
                             cachedSessionDuplicate = session;
                             return true;
                         }
@@ -167,7 +167,7 @@ abstract class DebuggerNode extends ExecutionEventNode implements InsertableNode
         if (noDuplicateAssumption.isValid()) {
             return false;
         }
-        if (cachedThreadId == Thread.currentThread().getId()) {
+        if (cachedThreadId == currentThreadId()) {
             // optimized version for single thread only
             if (cachedSessionDuplicate == session) {
                 cachedSessionDuplicate = null;

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -46,17 +46,18 @@ import javax.lang.model.type.TypeMirror;
 public final class Parameter {
 
     private final ParameterSpec specification;
-    private TemplateMethod method;
     private String localName;
     private final int specificationVarArgsIndex;
     private final int typeVarArgsIndex;
     private final VariableElement variableElement;
     private final TypeMirror type;
+    private final boolean declared;
 
-    public Parameter(ParameterSpec specification, VariableElement variableElement, int specificationVarArgsIndex, int typeVarArgsIndex) {
+    public Parameter(ParameterSpec specification, VariableElement variableElement,
+                    int specificationVarArgsIndex, int typeVarArgsIndex, boolean declared) {
         this.specification = specification;
         this.variableElement = variableElement;
-        this.type = variableElement.asType();
+        this.type = variableElement != null ? variableElement.asType() : null;
         this.specificationVarArgsIndex = specificationVarArgsIndex;
 
         String valueName = specification.getName() + "Value";
@@ -65,24 +66,35 @@ public final class Parameter {
         }
         this.typeVarArgsIndex = typeVarArgsIndex;
         this.localName = valueName;
+        this.declared = declared;
     }
 
-    public Parameter(Parameter parameter) {
-        this.specification = parameter.specification;
-        this.specificationVarArgsIndex = parameter.specificationVarArgsIndex;
-        this.localName = parameter.localName;
-        this.typeVarArgsIndex = parameter.typeVarArgsIndex;
-        this.variableElement = parameter.variableElement;
-        this.type = parameter.type;
-    }
-
-    public Parameter(Parameter parameter, TypeMirror newType) {
+    Parameter(Parameter parameter, TypeMirror newType) {
         this.specification = parameter.specification;
         this.specificationVarArgsIndex = parameter.specificationVarArgsIndex;
         this.localName = parameter.localName;
         this.typeVarArgsIndex = parameter.typeVarArgsIndex;
         this.variableElement = parameter.variableElement;
         this.type = newType;
+        this.declared = parameter.declared;
+    }
+
+    public Parameter(Parameter parameter, VariableElement newVariable) {
+        this.specification = parameter.specification;
+        this.specificationVarArgsIndex = parameter.specificationVarArgsIndex;
+        this.localName = newVariable.getSimpleName().toString();
+        this.typeVarArgsIndex = parameter.typeVarArgsIndex;
+        this.variableElement = newVariable;
+        this.type = newVariable.asType();
+        this.declared = parameter.declared;
+    }
+
+    /**
+     * Returns <code>true</code> if this parameter was actually declared in the method. Not all
+     * parameters must be declared, e.g. optional parameters.
+     */
+    public boolean isDeclared() {
+        return declared;
     }
 
     public void setLocalName(String localName) {
@@ -105,16 +117,8 @@ public final class Parameter {
         return localName;
     }
 
-    void setMethod(TemplateMethod method) {
-        this.method = method;
-    }
-
     public ParameterSpec getSpecification() {
         return specification;
-    }
-
-    public TemplateMethod getMethod() {
-        return method;
     }
 
     public TypeMirror getType() {
@@ -123,10 +127,6 @@ public final class Parameter {
 
     public boolean isTypeVarArgs() {
         return typeVarArgsIndex >= 0;
-    }
-
-    public Parameter getPreviousParameter() {
-        return method.getPreviousParam(this);
     }
 
     @Override

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,7 +24,7 @@
  */
 package com.oracle.graal.pointsto.typestore;
 
-import com.oracle.graal.pointsto.BigBang;
+import com.oracle.graal.pointsto.PointsToAnalysis;
 import com.oracle.graal.pointsto.flow.ArrayElementsTypeFlow;
 import com.oracle.graal.pointsto.flow.context.object.AnalysisObject;
 
@@ -50,12 +50,8 @@ public class UnifiedArrayElementsTypeStore extends ArrayElementsTypeStore {
         return readWriteFlow;
     }
 
-    public ArrayElementsTypeFlow readWriteFlow() {
-        return readWriteFlow;
-    }
-
     @Override
-    public void init(BigBang bb) {
+    public void init(PointsToAnalysis bb) {
     }
 
     @Override

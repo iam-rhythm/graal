@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2018, Oracle and/or its affiliates.
+ * Copyright (c) 2019, 2022, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -29,33 +29,55 @@
  */
 package com.oracle.truffle.llvm.parser;
 
-import java.util.List;
-
 import com.oracle.truffle.llvm.parser.model.functions.FunctionSymbol;
 import com.oracle.truffle.llvm.parser.model.symbols.globals.GlobalVariable;
+import com.oracle.truffle.llvm.parser.model.target.TargetTriple;
+import com.oracle.truffle.llvm.runtime.datalayout.DataLayout;
+
+import java.util.List;
 
 public final class LLVMParserResult {
 
     private final LLVMParserRuntime runtime;
+    private final List<FunctionSymbol> definedFunctions;
     private final List<FunctionSymbol> externalFunctions;
     private final List<GlobalVariable> definedGlobals;
     private final List<GlobalVariable> externalGlobals;
-    private final List<String> importedSymbols;
+    private final List<GlobalVariable> threadLocalGlobals;
+    private final int threadLocalGlobalObjectCounter;
+    private final DataLayout dataLayout;
+    private final int symbolTableSize;
+    private final TargetTriple targetTriple;
 
     LLVMParserResult(LLVMParserRuntime runtime,
+                    List<FunctionSymbol> definedFunctions,
                     List<FunctionSymbol> externalFunctions,
                     List<GlobalVariable> definedGlobals,
                     List<GlobalVariable> externalGlobals,
-                    List<String> importedSymbols) {
+                    List<GlobalVariable> threadLocalGlobals,
+                    int threadLocalGlobalObjectCounter,
+                    DataLayout dataLayout,
+                    TargetTriple targetTriple,
+                    int totalSize) {
         this.runtime = runtime;
+        this.definedFunctions = definedFunctions;
         this.externalFunctions = externalFunctions;
+        this.threadLocalGlobals = threadLocalGlobals;
+        this.threadLocalGlobalObjectCounter = threadLocalGlobalObjectCounter;
         this.definedGlobals = definedGlobals;
         this.externalGlobals = externalGlobals;
-        this.importedSymbols = importedSymbols;
+        this.dataLayout = dataLayout;
+        this.targetTriple = targetTriple;
+        assert totalSize >= definedFunctions.size() + externalFunctions.size() + definedGlobals.size() + externalGlobals.size() + threadLocalGlobals.size();
+        this.symbolTableSize = totalSize;
     }
 
     public LLVMParserRuntime getRuntime() {
         return runtime;
+    }
+
+    public List<FunctionSymbol> getDefinedFunctions() {
+        return definedFunctions;
     }
 
     public List<FunctionSymbol> getExternalFunctions() {
@@ -70,7 +92,28 @@ public final class LLVMParserResult {
         return externalGlobals;
     }
 
-    public List<String> getImportedSymbols() {
-        return importedSymbols;
+    public List<GlobalVariable> getThreadLocalGlobals() {
+        return threadLocalGlobals;
+    }
+
+    public int getThreadLocalGlobalObjectCounter() {
+        return threadLocalGlobalObjectCounter;
+    }
+
+    public DataLayout getDataLayout() {
+        return dataLayout;
+    }
+
+    @Override
+    public String toString() {
+        return "LLVMParserResult[" + runtime.getLibraryName() + "]";
+    }
+
+    public int getSymbolTableSize() {
+        return symbolTableSize;
+    }
+
+    public TargetTriple getTargetTriple() {
+        return targetTriple;
     }
 }

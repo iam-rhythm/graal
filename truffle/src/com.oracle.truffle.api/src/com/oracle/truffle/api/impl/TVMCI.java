@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,21 +40,11 @@
  */
 package com.oracle.truffle.api.impl;
 
-import java.util.Objects;
-import java.util.function.Supplier;
-
-import org.graalvm.options.OptionDescriptors;
-import org.graalvm.options.OptionValues;
+import java.io.Closeable;
 
 import com.oracle.truffle.api.CallTarget;
-import com.oracle.truffle.api.RootCallTarget;
-import com.oracle.truffle.api.frame.Frame;
-import com.oracle.truffle.api.frame.FrameDescriptor;
-import com.oracle.truffle.api.impl.Accessor.EngineSupport;
-import com.oracle.truffle.api.impl.Accessor.InstrumentSupport;
-import com.oracle.truffle.api.nodes.Node;
+import com.oracle.truffle.api.impl.Accessor.RuntimeSupport;
 import com.oracle.truffle.api.nodes.RootNode;
-import java.io.Closeable;
 
 /**
  * An interface between Truffle API and hosting virtual machine. Not interesting for regular Truffle
@@ -82,7 +72,7 @@ public abstract class TVMCI {
          * @param testName the name of the unit test
          * @return a context object
          *
-         * @since 1.0
+         * @since 19.0
          */
         protected abstract C createTestContext(String testName);
 
@@ -120,137 +110,15 @@ public abstract class TVMCI {
 
     private boolean checkCaller() {
         final String packageName = getClass().getPackage().getName();
-        assert packageName.equals("org.graalvm.compiler.truffle.runtime") ||
+        assert packageName.equals("com.oracle.truffle.runtime") ||
                         packageName.equals("org.graalvm.graal.truffle") ||
                         packageName.equals("com.oracle.graal.truffle") ||
                         packageName.equals("com.oracle.truffle.api.impl") : //
-        TVMCI.class.getName() + " subclass is not in trusted package: " + getClass().getName();
+                        TVMCI.class.getName() + " subclass is not in trusted package: " + getClass().getName();
         return true;
     }
 
-    /**
-     * Reports the execution count of a loop.
-     *
-     * @param source the Node which invoked the loop.
-     * @param iterations the number iterations to report to the runtime system
-     * @since 0.12
-     */
-    protected abstract void onLoopCount(Node source, int iterations);
-
-    /**
-     * Reports when a new root node is loaded into the system.
-     *
-     * @since 0.15
-     */
-    protected void onLoad(RootNode rootNode) {
-        InstrumentSupport support = Accessor.instrumentAccess();
-        if (support != null) {
-            support.onLoad(rootNode);
-        }
-    }
-
-    protected void setCallTarget(RootNode root, RootCallTarget callTarget) {
-        Accessor.nodesAccess().setCallTarget(root, callTarget);
-    }
-
-    /**
-     * Makes sure the <code>rootNode</code> is initialized.
-     *
-     * @param rootNode
-     * @since 0.12
-     */
-    protected void onFirstExecution(RootNode rootNode) {
-        final Accessor.InstrumentSupport accessor = Accessor.instrumentAccess();
-        if (accessor != null) {
-            accessor.onFirstExecution(rootNode);
-        }
-    }
-
-    /**
-     * Accessor for non-public state in {@link FrameDescriptor}.
-     *
-     * @since 0.14
-     */
-    protected void markFrameMaterializeCalled(FrameDescriptor descriptor) {
-        Accessor.framesAccess().markMaterializeCalled(descriptor);
-    }
-
-    /**
-     * Accessor for non-public state in {@link FrameDescriptor}.
-     *
-     * @since 0.14
-     */
-    protected boolean getFrameMaterializeCalled(FrameDescriptor descriptor) {
-        return Accessor.framesAccess().getMaterializeCalled(descriptor);
-    }
-
-    /**
-     * Accessor for non-public API in {@link RootNode}.
-     *
-     * @since 0.24
-     */
-    protected boolean isCloneUninitializedSupported(RootNode root) {
-        return Accessor.nodesAccess().isCloneUninitializedSupported(root);
-    }
-
-    protected void onThrowable(Node callNode, RootCallTarget root, Throwable e, Frame frame) {
-        final Accessor.LanguageSupport language = Accessor.languageAccess();
-        if (language != null) {
-            language.onThrowable(callNode, root, e, frame);
-        }
-    }
-
-    /**
-     * Accessor for non-public API in {@link RootNode}.
-     *
-     * @since 0.24
-     */
-    protected RootNode cloneUninitialized(RootNode root) {
-        return Accessor.nodesAccess().cloneUninitialized(root);
-    }
-
-    protected int adoptChildrenAndCount(RootNode root) {
-        return Accessor.nodesAccess().adoptChildrenAndCount(root);
-    }
-
-    /**
-     * Returns the compiler options specified available from the runtime.
-     *
-     * @since 0.27
-     */
-    protected OptionDescriptors getCompilerOptionDescriptors() {
-        return OptionDescriptors.EMPTY;
-    }
-
-    /**
-     * Invoked when a call target is invoked to find out its option values.
-     * {@link OptionValues#getDescriptors()} must match the value returned by
-     * {@link #getCompilerOptionDescriptors()}.
-     *
-     * @since 0.27
-     */
-    protected OptionValues getCompilerOptionValues(RootNode rootNode) {
-        EngineSupport engine = Accessor.engineAccess();
-        return engine != null ? engine.getCompilerOptionValues(rootNode) : null;
-    }
-
-    /**
-     * Returns <code>true</code> if the java stack frame is a representing a guest language call.
-     * Needs to return <code>true</code> only once per java stack frame per guest language call.
-     *
-     * @since 0.27
-     */
-    protected boolean isGuestCallStackFrame(@SuppressWarnings("unused") StackTraceElement e) {
-        return false;
-    }
-
-    @SuppressWarnings("unused")
-    protected void initializeProfile(CallTarget target, Class<?>[] argumentTypes) {
-    }
-
-    protected Object callProfiled(CallTarget target, Object... args) {
-        return target.call(args);
-    }
+    protected abstract RuntimeSupport createRuntimeSupport(Object permission);
 
     /**
      * Accessor for {@link TVMCI#Test} class.
@@ -284,34 +152,4 @@ public abstract class TVMCI {
         }
     }
 
-    private static volatile Object fallbackEngineData;
-
-    protected <T> T getOrCreateRuntimeData(RootNode rootNode, Supplier<T> constructor) {
-        Objects.requireNonNull(constructor);
-        final Accessor.Nodes nodesAccess = Accessor.nodesAccess();
-        final EngineSupport engineAccess = Accessor.engineAccess();
-        if (rootNode != null && nodesAccess != null && engineAccess != null) {
-            final Object sourceVM = nodesAccess.getSourceVM(rootNode);
-            if (sourceVM != null) {
-                final T runtimeData = engineAccess.getOrCreateRuntimeData(sourceVM, constructor);
-                if (runtimeData != null) {
-                    return runtimeData;
-                }
-            }
-
-        }
-        return getOrCreateFallbackEngineData(constructor);
-    }
-
-    @SuppressWarnings("unchecked")
-    private static <T> T getOrCreateFallbackEngineData(Supplier<T> constructor) {
-        if (fallbackEngineData == null) {
-            fallbackEngineData = constructor.get();
-        }
-        return (T) fallbackEngineData;
-    }
-
-    @SuppressWarnings("unused")
-    protected void reportPolymorphicSpecialize(Node node) {
-    }
 }

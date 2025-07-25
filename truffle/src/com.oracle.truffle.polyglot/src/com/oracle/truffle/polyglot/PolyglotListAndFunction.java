@@ -43,16 +43,14 @@ package com.oracle.truffle.polyglot;
 import java.lang.reflect.Type;
 import java.util.function.Function;
 
-import com.oracle.truffle.api.interop.TruffleObject;
-
 class PolyglotListAndFunction<T> extends PolyglotList<T> implements Function<Object, Object> {
 
-    PolyglotListAndFunction(Class<T> elementClass, Type elementType, TruffleObject array, PolyglotLanguageContext languageContext) {
+    PolyglotListAndFunction(Class<T> elementClass, Type elementType, Object array, PolyglotLanguageContext languageContext) {
         super(elementClass, elementType, array, languageContext);
     }
 
     public Object apply(Object t) {
-        return cache.apply.call(languageContext, guestObject, t);
+        return cache.apply.call(null, languageContext, guestObject, t);
     }
 
 }

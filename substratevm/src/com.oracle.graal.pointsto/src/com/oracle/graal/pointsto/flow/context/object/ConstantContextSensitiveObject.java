@@ -24,14 +24,18 @@
  */
 package com.oracle.graal.pointsto.flow.context.object;
 
-import com.oracle.graal.pointsto.BigBang;
+import java.util.ArrayList;
+import java.util.List;
+
+import com.oracle.graal.pointsto.PointsToAnalysis;
+import com.oracle.graal.pointsto.heap.ImageHeapRelocatableConstant;
 import com.oracle.graal.pointsto.meta.AnalysisType;
 
 import jdk.vm.ci.meta.JavaConstant;
 
 /**
- * A context sensitive analysis object that represents a constant. The context for this analysis
- * object is the constant it wraps.
+ * A context-sensitive analysis object that represents a constant. The implicit context for this
+ * analysis object is the constant that it wraps.
  */
 public class ConstantContextSensitiveObject extends ContextSensitiveAnalysisObject {
 
@@ -42,20 +46,43 @@ public class ConstantContextSensitiveObject extends ContextSensitiveAnalysisObje
     private final JavaConstant constant;
 
     /**
+     * Has this object been merged into the per-type unique constant object
+     * AnalysisType.uniqueConstant.
+     * 
+     * The volatile flag is necessary to ensure that fields discovered while the merging operation
+     * is in progress also get properly merged. Consider this situation:
+     *
+     * Thread 1: marks {@code constantObject} as merged by calling
+     * {@code constantObject.setMergedWithUniqueConstantObject()} which sets
+     * {@code constantObject.mergedWithUniqueConstant} to {@code true}.
+     *
+     * Thread 2: calls {@code constantObject.getInstanceFieldFlow(AnalysisField field)} with a newly
+     * discovered field triggering the creation of a new {@code fieldTypeStore}. The new field type
+     * flows need to be merged with the type's unique constant. However, without the
+     * {@code volatile} flag it is possible that Thread 2 sees the old, {@code false}, value of
+     * {@code constantObject.mergedWithUniqueConstant}, thus the new field type flows never get
+     * merged.
+     */
+    private volatile boolean mergedWithUniqueConstant;
+
+    /**
      * Constructor used for the merged constant object, i.e., after the number of individual
      * constant objects for a type has reached the maximum number of recorded constants threshold.
      */
-    public ConstantContextSensitiveObject(BigBang bb, AnalysisType type) {
+    public ConstantContextSensitiveObject(PointsToAnalysis bb, AnalysisType type) {
         this(bb, type, null);
     }
 
-    public ConstantContextSensitiveObject(BigBang bb, AnalysisType type, JavaConstant constant) {
+    public ConstantContextSensitiveObject(PointsToAnalysis bb, AnalysisType type, JavaConstant constant) {
         super(bb.getUniverse(), type, AnalysisObjectKind.ConstantContextSensitive);
-        assert bb.trackConcreteAnalysisObjects(type);
+        assert bb.trackConcreteAnalysisObjects(type) : type;
+        assert !(constant instanceof ImageHeapRelocatableConstant) : "relocatable constants have an unknown state and should not be represented by a constant type state: " + constant;
         this.constant = constant;
+        bb.profileConstantObject(type);
     }
 
-    public JavaConstant getConstant() {
+    @Override
+    public JavaConstant asConstant() {
         return constant;
     }
 
@@ -65,10 +92,14 @@ public class ConstantContextSensitiveObject extends ContextSensitiveAnalysisObje
         return constant == null;
     }
 
+    public void setMergedWithUniqueConstantObject() {
+        this.mergedWithUniqueConstant = true;
+    }
+
     /** The object has been in contact with an context insensitive object in an union operation. */
     @Override
-    public void noteMerge(BigBang bb) {
-        assert bb.analysisPolicy().isMergingEnabled();
+    public void noteMerge(PointsToAnalysis bb) {
+        assert bb.analysisPolicy().isMergingEnabled() : "policy mismatch";
 
         if (!merged) {
             if (!isEmptyObjectArrayConstant(bb)) {
@@ -83,12 +114,24 @@ public class ConstantContextSensitiveObject extends ContextSensitiveAnalysisObje
     }
 
     @Override
-    public boolean isEmptyObjectArrayConstant(BigBang bb) {
+    protected List<AnalysisObject> getAllObjectsMergedWith() {
+        List<AnalysisObject> result = new ArrayList<>();
+        if (merged) {
+            result.add(type().getContextInsensitiveAnalysisObject());
+        }
+        if (mergedWithUniqueConstant) {
+            result.add(type().getUniqueConstantObject());
+        }
+        return result;
+    }
+
+    @Override
+    public boolean isEmptyObjectArrayConstant(PointsToAnalysis bb) {
         if (this.isMergedConstantObject()) {
             return false;
         }
 
-        return AnalysisObject.isEmptyObjectArrayConstant(bb, getConstant());
+        return AnalysisObject.isEmptyObjectArrayConstant(bb, asConstant());
     }
 
     @Override
@@ -98,7 +141,7 @@ public class ConstantContextSensitiveObject extends ContextSensitiveAnalysisObje
         if (constant == null) {
             result.append("MERGED CONSTANT");
         } else {
-            // result.append(constant);
+            result.append(constant);
         }
         return result.toString();
     }

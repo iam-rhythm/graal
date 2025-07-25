@@ -27,12 +27,10 @@ package com.oracle.svm.graal.meta;
 import org.graalvm.nativeimage.Platform;
 import org.graalvm.nativeimage.Platforms;
 
-import com.oracle.svm.core.util.Replaced;
-
 import jdk.vm.ci.meta.ResolvedJavaType;
 import jdk.vm.ci.meta.Signature;
 
-public class SubstrateSignature implements Signature, Replaced {
+public class SubstrateSignature implements Signature {
 
     private Object parameterTypes;
     private SubstrateType returnType;
@@ -42,6 +40,7 @@ public class SubstrateSignature implements Signature, Replaced {
         /* Types are initialized later with an explicit call to setTypes. */
     }
 
+    @SuppressWarnings("this-escape")
     public SubstrateSignature(SubstrateType[] parameterTypes, SubstrateType returnType) {
         setTypes(parameterTypes, returnType);
     }

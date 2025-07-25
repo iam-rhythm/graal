@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,7 +40,6 @@
  */
 
 #if !defined(_WIN32)
-#define _GNU_SOURCE
 #include <dlfcn.h>
 #endif
 
@@ -55,10 +54,8 @@
 #define ERRNO_LOCATION ___errno
 #endif
 
-
 #define STRINGIFY_IMPL(x) #x
 #define STRINGIFY(x) STRINGIFY_IMPL(x)
-
 
 void initialize_intrinsics(struct __TruffleContextInternal *context) {
 #ifdef ERRNO_LOCATION
@@ -74,9 +71,9 @@ void initialize_intrinsics(struct __TruffleContextInternal *context) {
 }
 
 static int *__errno_mirror_location() {
-    return &errnoMirror;
+    // cachedTruffleEnv is set in executeHelper() by the errno_location downcall
+    return cachedTruffleEnv->nfiErrnoAddress;
 }
-
 
 void *check_intrinsify(struct __TruffleContextInternal *context, void *orig) {
     if (orig == NULL) {
@@ -87,7 +84,7 @@ void *check_intrinsify(struct __TruffleContextInternal *context, void *orig) {
 #if !defined(_WIN32)
         || orig == context->__pthreads_errno_location
 #endif
-        ) {
+    ) {
         return __errno_mirror_location;
     }
 

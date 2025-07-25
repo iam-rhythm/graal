@@ -24,26 +24,23 @@
  */
 package com.oracle.svm.core.c.function;
 
-import java.util.Arrays;
 import java.util.function.Function;
 
 import org.graalvm.nativeimage.CurrentIsolate;
 import org.graalvm.nativeimage.Isolate;
 import org.graalvm.nativeimage.IsolateThread;
+import org.graalvm.nativeimage.c.CHeader;
 import org.graalvm.nativeimage.c.function.CEntryPoint;
 import org.graalvm.nativeimage.c.struct.CPointerTo;
-import org.graalvm.nativeimage.c.type.WordPointer;
-import org.graalvm.word.Pointer;
 import org.graalvm.word.PointerBase;
-import org.graalvm.word.WordFactory;
 
 import com.oracle.svm.core.SubstrateOptions;
-import com.oracle.svm.core.annotate.RestrictHeapAccess;
-import com.oracle.svm.core.annotate.Uninterruptible;
-import com.oracle.svm.core.c.CHeader;
+import com.oracle.svm.core.Uninterruptible;
 import com.oracle.svm.core.c.function.CEntryPointOptions.NoEpilogue;
 import com.oracle.svm.core.c.function.CEntryPointOptions.NoPrologue;
 import com.oracle.svm.core.thread.VMThreads;
+
+import jdk.graal.compiler.word.Word;
 
 @CHeader(value = GraalIsolateHeader.class)
 public final class CEntryPointNativeFunctions {
@@ -81,16 +78,17 @@ public final class CEntryPointNativeFunctions {
     @CEntryPointOptions(prologue = NoPrologue.class, epilogue = NoEpilogue.class, nameTransformation = NameTransformation.class)
     public static int createIsolate(CEntryPointCreateIsolateParameters params, IsolatePointer isolate, IsolateThreadPointer thread) {
         int result = CEntryPointActions.enterCreateIsolate(params);
-        if (result == 0) {
-            if (isolate.isNonNull()) {
-                isolate.write(CurrentIsolate.getIsolate());
-            }
-            if (thread.isNonNull()) {
-                thread.write(CurrentIsolate.getCurrentThread());
-            }
-            result = CEntryPointActions.leave();
+        if (result != 0) {
+            return result;
         }
-        return result;
+
+        if (isolate.isNonNull()) {
+            isolate.write(CurrentIsolate.getIsolate());
+        }
+        if (thread.isNonNull()) {
+            thread.write(CurrentIsolate.getCurrentThread());
+        }
+        return CEntryPointActions.leave();
     }
 
     @Uninterruptible(reason = UNINTERRUPTIBLE_REASON)
@@ -102,12 +100,13 @@ public final class CEntryPointNativeFunctions {
                     "the thread's isolate thread structure."})
     @CEntryPointOptions(prologue = NoPrologue.class, epilogue = NoEpilogue.class, nameTransformation = NameTransformation.class)
     public static int attachThread(Isolate isolate, IsolateThreadPointer thread) {
-        int result = CEntryPointActions.enterAttachThread(isolate);
-        if (result == 0) {
-            thread.write(CurrentIsolate.getCurrentThread());
-            result = CEntryPointActions.leave();
+        int result = CEntryPointActions.enterAttachThread(isolate, false, true);
+        if (result != 0) {
+            return result;
         }
-        return result;
+
+        thread.write(CurrentIsolate.getCurrentThread());
+        return CEntryPointActions.leave();
     }
 
     @Uninterruptible(reason = UNINTERRUPTIBLE_REASON)
@@ -117,14 +116,13 @@ public final class CEntryPointNativeFunctions {
                     "attached to the passed isolate or if another error occurs, returns NULL."})
     @CEntryPointOptions(prologue = NoPrologue.class, epilogue = NoEpilogue.class, nameTransformation = NameTransformation.class)
     public static IsolateThread getCurrentThread(Isolate isolate) {
-        int result = CEntryPointActions.enterIsolate(isolate);
-        if (result != 0) {
-            return WordFactory.nullPointer();
+        int status = CEntryPointActions.enterByIsolate(isolate);
+        if (status != 0) {
+            return Word.nullPointer();
         }
+
         IsolateThread thread = CurrentIsolate.getCurrentThread();
-        if (CEntryPointActions.leave() != 0) {
-            thread = WordFactory.nullPointer();
-        }
+        CEntryPointActions.leave();
         return thread;
     }
 
@@ -137,15 +135,11 @@ public final class CEntryPointNativeFunctions {
         return getIsolateOf(thread);
     }
 
-    @Uninterruptible(reason = "Called from uninterruptible code.")
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     private static Isolate getIsolateOf(IsolateThread thread) {
-        Isolate isolate = WordFactory.nullPointer();
-        if (thread.isNull()) {
-            // proceed to return null
-        } else if (SubstrateOptions.MultiThreaded.getValue()) {
+        Isolate isolate = Word.nullPointer();
+        if (thread.isNonNull()) {
             isolate = VMThreads.IsolateTL.get(thread);
-        } else if (SubstrateOptions.SpawnIsolates.getValue() || thread.equal(CEntryPointSetup.SINGLE_THREAD_SENTINEL)) {
-            isolate = (Isolate) ((Pointer) thread).subtract(CEntryPointSetup.SINGLE_ISOLATE_TO_SINGLE_THREAD_ADDEND);
         }
         return isolate;
     }
@@ -160,87 +154,67 @@ public final class CEntryPointNativeFunctions {
     public static int detachThread(IsolateThread thread) {
         int result = CEntryPointActions.enter(thread);
         if (result != 0) {
-            CEntryPointActions.leave();
             return result;
         }
-        result = CEntryPointActions.leaveDetachThread();
-        return result;
+        return CEntryPointActions.leaveDetachThread();
     }
 
-    @Uninterruptible(reason = UNINTERRUPTIBLE_REASON, calleeMustBe = false)
-    @CEntryPoint(name = "detach_threads", documentation = {
-                    "Using the context of the isolate thread from the first argument, detaches the",
-                    "threads in an array pointed to by the second argument, with the length of the",
-                    "array given in the third argument. All of the passed threads must be in the",
-                    "same isolate, including the first argument. None of the threads to detach may",
-                    "execute Java code at the time of the call or later without reattaching first,",
-                    "or their behavior will be entirely undefined. The current thread may be part of",
-                    "the array, however, using detach_thread() should be preferred for detaching only",
-                    "the current thread.",
-                    "Returns 0 on success, or a non-zero value on failure."})
-    @CEntryPointOptions(prologue = NoPrologue.class, epilogue = NoEpilogue.class, nameTransformation = NameTransformation.class)
-    public static int detachThreads(IsolateThread thread, IsolateThread array, int length) {
-        int result = CEntryPointActions.enter(thread);
-        if (result != 0) {
-            CEntryPointActions.leave();
-            return result;
-        }
-        boolean detachCurrent = false;
-        if (SubstrateOptions.MultiThreaded.getValue()) {
-            try {
-                detachCurrent = detachThreadsInJava(array, length);
-            } catch (Throwable t) {
-                result = CEntryPointErrors.UNCAUGHT_EXCEPTION;
-            }
-        }
-        int leaveResult;
-        if (result == 0 && detachCurrent) {
-            leaveResult = CEntryPointActions.leaveDetachThread();
-        } else {
-            leaveResult = CEntryPointActions.leave();
-        }
-        return (result != 0) ? result : leaveResult;
-    }
-
-    @RestrictHeapAccess(access = RestrictHeapAccess.Access.UNRESTRICTED, overridesCallers = true, reason = "Safe context.")
-    private static boolean detachThreadsInJava(IsolateThread array, int length) {
-        IsolateThread current = CurrentIsolate.getCurrentThread();
-        Isolate currentIsolate = getIsolateOf(current);
-        boolean containsCurrent = false;
-        IsolateThread[] jarray = new IsolateThread[length];
-        int count = 0;
-        for (int i = 0; i < length; i++) {
-            IsolateThread thread = ((WordPointer) array).read(count);
-            if (thread.equal(current)) {
-                containsCurrent = true;
-            } else if (getIsolateOf(thread).notEqual(currentIsolate)) {
-                throw new IllegalArgumentException("Thread is not attached to this isolate");
-            } else {
-                jarray[count] = thread;
-                count++;
-            }
-        }
-        if (count > 0) {
-            jarray = Arrays.copyOf(jarray, count);
-            VMThreads.detachThreads(jarray);
-        }
-        return containsCurrent;
-    }
+    static final String THREAD_TERMINATION_NOTE = """
+                    If this call blocks indefinitely, this means there are still Java threads running
+                    which do not terminate after receiving the Thread.interrupt() event.
+                    To prevent indefinite blocking, these threads should be cooperatively shut down
+                    within Java before invoking this call.
+                    To diagnose such issues, use the option '-R:TearDownWarningSeconds=<secs>' to detect
+                    the threads that are still running.
+                    This will print the stack traces of all threads that block tear-down.
+                    """;
 
     @Uninterruptible(reason = UNINTERRUPTIBLE_REASON)
-    @CEntryPoint(name = "tear_down_isolate", documentation = {
-                    "Tears down the passed isolate, waiting for any attached threads to detach from",
-                    "it, then discards the isolate's objects, threads, and any other state or context",
-                    "that is associated with it.",
-                    "Returns 0 on success, or a non-zero value on failure."})
+    @CEntryPoint(name = "tear_down_isolate", documentation = {"""
+                    Tears down the isolate of the passed (and still attached) isolate thread,
+                    waiting for any attached threads to detach from it, then discards its objects,
+                    threads, and any other state or context that is associated with it.
+                    Returns 0 on success, or a non-zero value on failure.
+                    """,
+                    THREAD_TERMINATION_NOTE,
+    })
     @CEntryPointOptions(prologue = NoPrologue.class, epilogue = NoEpilogue.class, nameTransformation = NameTransformation.class)
     public static int tearDownIsolate(IsolateThread isolateThread) {
         int result = CEntryPointActions.enter(isolateThread);
         if (result != 0) {
-            CEntryPointActions.leave();
             return result;
         }
         return CEntryPointActions.leaveTearDownIsolate();
+    }
+
+    @Uninterruptible(reason = UNINTERRUPTIBLE_REASON)
+    @CEntryPoint(name = "detach_all_threads_and_tear_down_isolate", documentation = {"""
+                    In the isolate of the passed isolate thread, detach all those threads that were
+                    externally started (not within Java, which includes the "main thread") and were
+                    attached to the isolate afterwards. Afterwards, all threads that were started
+                    within Java undergo a regular shutdown process, followed by the tear-down of the
+                    entire isolate, which detaches the current thread and discards the objects,
+                    threads, and any other state or context associated with the isolate.
+                    None of the manually attached threads targeted by this function may be executing
+                    Java code at the time when this function is called or at any point in the future
+                    or this will cause entirely undefined (and likely fatal) behavior.
+                    Returns 0 on success, or a non-zero value on (non-fatal) failure.
+                    """,
+                    THREAD_TERMINATION_NOTE,
+    })
+    @CEntryPointOptions(prologue = NoPrologue.class, epilogue = NoEpilogue.class, nameTransformation = NameTransformation.class)
+    public static int detachAllThreadsAndTearDownIsolate(IsolateThread isolateThread) {
+        int result = CEntryPointActions.enter(isolateThread);
+        if (result != 0) {
+            return result;
+        }
+        detachAllThreadsAndTearDownIsolate0();
+        return CEntryPointActions.leaveTearDownIsolate();
+    }
+
+    @Uninterruptible(reason = UNINTERRUPTIBLE_REASON, calleeMustBe = false)
+    private static void detachAllThreadsAndTearDownIsolate0() {
+        VMThreads.detachAllThreadsExceptCurrentWithoutCleanupForTearDown();
     }
 
     private CEntryPointNativeFunctions() {

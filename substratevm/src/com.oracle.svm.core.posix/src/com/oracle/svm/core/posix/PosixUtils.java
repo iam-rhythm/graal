@@ -24,63 +24,63 @@
  */
 package com.oracle.svm.core.posix;
 
-import static com.oracle.svm.core.posix.headers.Errno.errno;
-import static com.oracle.svm.core.posix.headers.Fcntl.O_WRONLY;
-import static com.oracle.svm.core.posix.headers.Fcntl.open;
-import static com.oracle.svm.core.posix.headers.Unistd.close;
-import static com.oracle.svm.core.posix.headers.Unistd.dup2;
-import static com.oracle.svm.core.posix.headers.Unistd.read;
-import static com.oracle.svm.core.posix.headers.Unistd.write;
+import static com.oracle.svm.core.Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_CODE;
+import static com.oracle.svm.core.posix.headers.Unistd._SC_GETPW_R_SIZE_MAX;
 
 import java.io.FileDescriptor;
-import java.io.FileNotFoundException;
-import java.io.IOException;
-import java.io.SyncFailedException;
-import java.util.ArrayList;
-import java.util.List;
 
-import com.oracle.svm.core.posix.headers.Dlfcn;
-import com.oracle.svm.core.posix.headers.Errno;
-import com.oracle.svm.core.posix.headers.Fcntl;
-import com.oracle.svm.core.posix.headers.LibC;
-import com.oracle.svm.core.posix.headers.Locale;
-import com.oracle.svm.core.posix.headers.Unistd;
-import com.oracle.svm.core.posix.headers.Wait;
-import org.graalvm.compiler.core.common.SuppressFBWarnings;
-import org.graalvm.nativeimage.PinnedObject;
 import org.graalvm.nativeimage.Platform;
-import org.graalvm.nativeimage.Platforms;
-import org.graalvm.nativeimage.StackValue;
+import org.graalvm.nativeimage.c.struct.SizeOf;
 import org.graalvm.nativeimage.c.type.CCharPointer;
 import org.graalvm.nativeimage.c.type.CIntPointer;
 import org.graalvm.nativeimage.c.type.CTypeConversion;
 import org.graalvm.nativeimage.c.type.CTypeConversion.CCharPointerHolder;
+import org.graalvm.word.Pointer;
 import org.graalvm.word.PointerBase;
 import org.graalvm.word.SignedWord;
 import org.graalvm.word.UnsignedWord;
-import org.graalvm.word.WordFactory;
 
+import com.oracle.svm.core.SubstrateUtil;
+import com.oracle.svm.core.Uninterruptible;
 import com.oracle.svm.core.annotate.Alias;
-import com.oracle.svm.core.annotate.Substitute;
 import com.oracle.svm.core.annotate.TargetClass;
-import com.oracle.svm.core.annotate.TargetElement;
-import com.oracle.svm.core.annotate.Uninterruptible;
-import com.oracle.svm.core.jdk.JDK9OrLater;
+import com.oracle.svm.core.c.libc.GLibC;
+import com.oracle.svm.core.c.libc.LibCBase;
+import com.oracle.svm.core.c.locale.LocaleSupport;
+import com.oracle.svm.core.graal.stackvalue.UnsafeStackValue;
+import com.oracle.svm.core.headers.LibC;
+import com.oracle.svm.core.hub.DynamicHub;
+import com.oracle.svm.core.hub.LayoutEncoding;
+import com.oracle.svm.core.memory.NullableNativeMemory;
+import com.oracle.svm.core.nmt.NmtCategory;
+import com.oracle.svm.core.posix.headers.Dlfcn;
+import com.oracle.svm.core.posix.headers.Errno;
+import com.oracle.svm.core.posix.headers.Locale;
+import com.oracle.svm.core.posix.headers.Pwd;
+import com.oracle.svm.core.posix.headers.Pwd.passwd;
+import com.oracle.svm.core.posix.headers.Pwd.passwdPointer;
+import com.oracle.svm.core.posix.headers.Time;
+import com.oracle.svm.core.posix.headers.Unistd;
+import com.oracle.svm.core.posix.headers.Wait;
+import com.oracle.svm.core.posix.headers.darwin.DarwinTime;
+import com.oracle.svm.core.posix.headers.linux.LinuxTime;
 import com.oracle.svm.core.snippets.KnownIntrinsics;
+import com.oracle.svm.core.util.BasedOnJDKFile;
 import com.oracle.svm.core.util.VMError;
 
-@Platforms({Platform.LINUX_AND_JNI.class, Platform.DARWIN_AND_JNI.class})
-public class PosixUtils {
+import jdk.graal.compiler.word.Word;
 
+public class PosixUtils {
+    /** This method is unsafe and should not be used, see {@link LocaleSupport}. */
     static String setLocale(String category, String locale) {
         int intCategory = getCategory(category);
-
         return setLocale(intCategory, locale);
     }
 
-    public static String setLocale(int category, String locale) {
+    /** This method is unsafe and should not be used, see {@link LocaleSupport}. */
+    private static String setLocale(int category, String locale) {
         if (locale == null) {
-            CCharPointer cstrResult = Locale.setlocale(category, WordFactory.nullPointer());
+            CCharPointer cstrResult = Locale.setlocale(category, Word.nullPointer());
             return CTypeConversion.toJavaString(cstrResult);
         }
         try (CCharPointerHolder localePin = CTypeConversion.toCString(locale)) {
@@ -107,7 +107,8 @@ public class PosixUtils {
             case "LC_MESSAGES":
                 return Locale.LC_MESSAGES();
         }
-        if (Platform.includedIn(Platform.LINUX.class)) {
+
+        if (Platform.includedIn(Platform.LINUX.class) && LibCBase.targetLibCIs(GLibC.class)) {
             switch (category) {
                 case "LC_PAPER":
                     return Locale.LC_PAPER();
@@ -123,96 +124,27 @@ public class PosixUtils {
                     return Locale.LC_IDENTIFICATION();
             }
         }
-        throw VMError.shouldNotReachHere("Unknown locale category: " + category);
-    }
-
-    static String removeTrailingSlashes(String path) {
-        int p = path.length() - 1;
-        while (p > 0 && path.charAt(p) == '/') {
-            --p;
-        }
-        return p > 0 ? path.substring(0, p + 1) : path;
+        throw new IllegalArgumentException("Unknown locale category: " + category);
     }
 
     @TargetClass(java.io.FileDescriptor.class)
     private static final class Target_java_io_FileDescriptor {
 
         @Alias int fd;
-
-        /* jdk/src/solaris/native/java/io/FileDescriptor_md.c */
-        // 53 JNIEXPORT void JNICALL
-        // 54 Java_java_io_FileDescriptor_sync(JNIEnv *env, jobject this) {
-        @Substitute
-        public /* native */ void sync() throws SyncFailedException {
-            // 55 FD fd = THIS_FD(this);
-            // 56 if (IO_Sync(fd) == -1) {
-            if (Unistd.fsync(fd) == -1) {
-                // 57 JNU_ThrowByName(env, "java/io/SyncFailedException", "sync failed");
-                throw new SyncFailedException("sync failed");
-            }
-        }
-
-        @Substitute //
-        @TargetElement(onlyWith = JDK9OrLater.class) //
-        @SuppressWarnings({"unused"})
-        /* { Do not re-format commented out C code.  @formatter:off */
-        /* open-jdk11/src/java.base/unix/native/libjava/FileDescriptor_md.c */
-        // 72  JNIEXPORT jboolean JNICALL
-        // 73  Java_java_io_FileDescriptor_getAppend(JNIEnv *env, jclass fdClass, jint fd) {
-        private static /* native */ boolean getAppend(int fd) {
-            // 74      int flags = fcntl(fd, F_GETFL);
-            int flags = Fcntl.fcntl(fd, Fcntl.F_GETFL());
-            // 75      return ((flags & O_APPEND) == 0) ? JNI_FALSE : JNI_TRUE;
-            return ((flags & Fcntl.O_APPEND()) == 0) ? false : true;
-        }
-        /* } Do not re-format commented out C code. @formatter:on */
-
-        @Substitute //
-        @TargetElement(onlyWith = JDK9OrLater.class) //
-        @SuppressWarnings({"unused", "static-method"})
-        /* { Do not re-format commented out C code.  @formatter:off */
-        /* open-jdk11/src/java.base/unix/native/libjava/FileDescriptor_md.c */
-        // 78  // instance method close0 for FileDescriptor
-        // 79  JNIEXPORT void JNICALL
-        // 80  Java_java_io_FileDescriptor_close0(JNIEnv *env, jobject this) {
-        private /* native */ void close0() throws IOException {
-            // 81      fileDescriptorClose(env, this);
-            PosixUtils.fileClose(Util_java_io_FileDescriptor.fromTarget(this));
-        }
-    }
-
-    static final class Util_java_io_FileDescriptor {
-
-        /** Cast from Target class to Java class. */
-        @SuppressFBWarnings(value = "BC", justification = "Cast from @TargetClass")
-        static java.io.FileDescriptor fromTarget(Target_java_io_FileDescriptor tjifd) {
-            return java.io.FileDescriptor.class.cast(tjifd);
-        }
-
-        /** Cast from Java class to Target class. */
-        @SuppressFBWarnings(value = "BC", justification = "Cast to @TargetClass")
-        static Target_java_io_FileDescriptor toTarget(java.io.FileDescriptor jifd) {
-            return Target_java_io_FileDescriptor.class.cast(jifd);
-        }
-
     }
 
     public static int getFD(FileDescriptor descriptor) {
-        return Util_java_io_FileDescriptor.toTarget(descriptor).fd;
+        return SubstrateUtil.cast(descriptor, Target_java_io_FileDescriptor.class).fd;
     }
 
-    static void setFD(FileDescriptor descriptor, int fd) {
-        Util_java_io_FileDescriptor.toTarget(descriptor).fd = fd;
+    public static void setFD(FileDescriptor descriptor, int fd) {
+        SubstrateUtil.cast(descriptor, Target_java_io_FileDescriptor.class).fd = fd;
     }
 
     /** Return the error string for the last error, or a default message. */
     public static String lastErrorString(String defaultMsg) {
-        int errno = Errno.errno();
+        int errno = LibC.errno();
         return errorString(errno, defaultMsg);
-    }
-
-    public static IOException newIOExceptionWithLastError(String defaultMsg) {
-        return new IOException(PosixUtils.lastErrorString(defaultMsg));
     }
 
     /** Return the error string for the given error number, or a default message. */
@@ -224,60 +156,27 @@ public class PosixUtils {
         return result.length() != 0 ? result : defaultMsg;
     }
 
-    static void fileOpen(String path, FileDescriptor fd, int flags) throws FileNotFoundException {
-        try (CCharPointerHolder pathPin = CTypeConversion.toCString(removeTrailingSlashes(path))) {
-            CCharPointer pathPtr = pathPin.get();
-            int handle = open(pathPtr, flags, 0666);
-            if (handle >= 0) {
-                setFD(fd, handle);
-            } else {
-                throw new FileNotFoundException(path);
-            }
-        }
-    }
-
-    static void fileClose(FileDescriptor fd) throws IOException {
-        int handle = getFD(fd);
-        if (handle == -1) {
-            return;
-        }
-        setFD(fd, -1);
-
-        // Do not close file descriptors 0, 1, 2. Instead, redirect to /dev/null.
-        if (handle >= 0 && handle <= 2) {
-            int devnull;
-
-            try (CCharPointerHolder pathPin = CTypeConversion.toCString("/dev/null")) {
-                CCharPointer pathPtr = pathPin.get();
-                devnull = open(pathPtr, O_WRONLY(), 0);
-            }
-            if (devnull < 0) {
-                setFD(fd, handle);
-                throw PosixUtils.newIOExceptionWithLastError("open /dev/null failed");
-            } else {
-                dup2(devnull, handle);
-                close(devnull);
-            }
-        } else if (close(handle) == -1) {
-            throw PosixUtils.newIOExceptionWithLastError("close failed");
-        }
-    }
-
     public static int getpid() {
         return Unistd.getpid();
     }
 
+    @TargetClass(className = "java.lang.ProcessImpl")
+    private static final class Target_java_lang_ProcessImpl {
+        @Alias int pid;
+    }
+
     public static int getpid(Process process) {
-        Target_java_lang_UNIXProcess instance = KnownIntrinsics.unsafeCast(process, Target_java_lang_UNIXProcess.class);
+        Target_java_lang_ProcessImpl instance = SubstrateUtil.cast(process, Target_java_lang_ProcessImpl.class);
         return instance.pid;
     }
 
     public static int waitForProcessExit(int ppid) {
-        CIntPointer statusptr = StackValue.get(CIntPointer.class);
+        CIntPointer statusptr = UnsafeStackValue.get(CIntPointer.class);
         while (Wait.waitpid(ppid, statusptr, 0) < 0) {
-            if (Errno.errno() == Errno.ECHILD()) {
+            int errno = LibC.errno();
+            if (errno == Errno.ECHILD()) {
                 return 0;
-            } else if (Errno.errno() == Errno.EINTR()) {
+            } else if (errno == Errno.EINTR()) {
                 break;
             } else {
                 return -1;
@@ -294,184 +193,68 @@ public class PosixUtils {
         return status;
     }
 
-    static int readSingle(FileDescriptor fd) throws IOException {
-        CCharPointer retPtr = StackValue.get(CCharPointer.class);
-        int handle = PosixUtils.getFDHandle(fd);
-        SignedWord nread = read(handle, retPtr, WordFactory.unsigned(1));
-        if (nread.equal(0)) {
-            // EOF
-            return -1;
-        } else if (nread.equal(-1)) {
-            throw PosixUtils.newIOExceptionWithLastError("Read error");
-        }
-        return retPtr.read() & 0xFF;
-    }
-
-    static int readBytes(byte[] b, int off, int len, FileDescriptor fd) throws IOException {
-        if (b == null) {
-            throw new NullPointerException();
-        } else if (PosixUtils.outOfBounds(off, len, b)) {
-            throw new IndexOutOfBoundsException();
-        }
-        if (len == 0) {
-            return 0;
-        }
-
-        SignedWord nread;
-        CCharPointer buf = LibC.malloc(WordFactory.unsigned(len));
-        try {
-            if (buf.equal(WordFactory.zero())) {
-                throw new OutOfMemoryError();
-            }
-
-            int handle = getFDHandle(fd);
-            nread = read(handle, buf, WordFactory.unsigned(len));
-            if (nread.greaterThan(0)) {
-                /*
-                 * We do not read directly into the (pinned) result array because read can block,
-                 * and that could lead to object pinned for an unexpectedly long time.
-                 */
-                try (PinnedObject pin = PinnedObject.create(b)) {
-                    LibC.memcpy(pin.addressOfArrayElement(off), buf, (UnsignedWord) nread);
-                }
-            } else if (nread.equal(-1)) {
-                throw PosixUtils.newIOExceptionWithLastError("Read error");
-            } else {
-                // EOF
-                nread = WordFactory.signed(-1);
-            }
-        } finally {
-            LibC.free(buf);
-        }
-
-        return (int) nread.rawValue();
-    }
-
-    @SuppressWarnings("unused")
-    static void writeSingle(FileDescriptor fd, int b, boolean append) throws IOException {
-        SignedWord n;
-        int handle = getFD(fd);
-        if (handle == -1) {
-            throw new IOException("Stream Closed");
-        }
-
-        CCharPointer bufPtr = StackValue.get(CCharPointer.class);
-        bufPtr.write((byte) b);
-        // the append parameter is disregarded
-        n = write(handle, bufPtr, WordFactory.unsigned(1));
-
-        if (n.equal(-1)) {
-            throw PosixUtils.newIOExceptionWithLastError("Write error");
-        }
-    }
-
-    @SuppressWarnings("unused")
-    static void writeBytes(FileDescriptor descriptor, byte[] bytes, int off, int len, boolean append) throws IOException {
-        if (bytes == null) {
-            throw new NullPointerException();
-        } else if (PosixUtils.outOfBounds(off, len, bytes)) {
-            throw new IndexOutOfBoundsException();
-        }
-        if (len == 0) {
-            return;
-        }
-
-        try (PinnedObject bytesPin = PinnedObject.create(bytes)) {
-            CCharPointer curBuf = bytesPin.addressOfArrayElement(off);
-            UnsignedWord curLen = WordFactory.unsigned(len);
-            while (curLen.notEqual(0)) {
-                int fd = getFD(descriptor);
-                if (fd == -1) {
-                    throw new IOException("Stream Closed");
-                }
-
-                SignedWord n = write(fd, curBuf, curLen);
-
-                if (n.equal(-1)) {
-                    throw PosixUtils.newIOExceptionWithLastError("Write error");
-                }
-                curBuf = curBuf.addressOf(n);
-                curLen = curLen.subtract((UnsignedWord) n);
-            }
-        }
-    }
-
     /**
      * Low-level output of bytes already in native memory. This method is allocation free, so that
      * it can be used, e.g., in low-level logging routines.
      */
-    public static boolean writeBytes(FileDescriptor descriptor, CCharPointer bytes, UnsignedWord length) {
-        CCharPointer curBuf = bytes;
-        UnsignedWord curLen = length;
-        while (curLen.notEqual(0)) {
+    public static boolean write(FileDescriptor descriptor, CCharPointer data, UnsignedWord size) {
+        CCharPointer position = data;
+        UnsignedWord remaining = size;
+        while (remaining.notEqual(0)) {
             int fd = getFD(descriptor);
             if (fd == -1) {
                 return false;
             }
 
-            SignedWord n = Unistd.write(fd, curBuf, curLen);
-
-            if (n.equal(-1)) {
+            SignedWord writtenBytes = Unistd.write(fd, position, remaining);
+            if (writtenBytes.equal(-1)) {
+                if (LibC.errno() == Errno.EINTR()) {
+                    // Retry the write if it was interrupted before any bytes were written.
+                    continue;
+                }
                 return false;
             }
-            curBuf = curBuf.addressOf(n);
-            curLen = curLen.subtract((UnsignedWord) n);
+            position = position.addressOf(writtenBytes);
+            remaining = remaining.subtract((UnsignedWord) writtenBytes);
         }
         return true;
     }
 
-    static boolean flush(FileDescriptor descriptor) {
+    @Uninterruptible(reason = "Array must not move.")
+    public static boolean writeUninterruptibly(int fd, byte[] data) {
+        DynamicHub hub = KnownIntrinsics.readHub(data);
+        UnsignedWord baseOffset = LayoutEncoding.getArrayBaseOffset(hub.getLayoutEncoding());
+        Pointer dataPtr = Word.objectToUntrackedPointer(data).add(baseOffset);
+        return writeUninterruptibly(fd, dataPtr, Word.unsigned(data.length));
+    }
+
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
+    public static boolean writeUninterruptibly(int fd, Pointer data, UnsignedWord size) {
+        Pointer position = data;
+        UnsignedWord remaining = size;
+        while (remaining.notEqual(0)) {
+            SignedWord writtenBytes = Unistd.NoTransitions.write(fd, position, remaining);
+            if (writtenBytes.equal(-1)) {
+                if (LibC.errno() == Errno.EINTR()) {
+                    // Retry the write if it was interrupted before any bytes were written.
+                    continue;
+                }
+                return false;
+            }
+            position = position.add((UnsignedWord) writtenBytes);
+            remaining = remaining.subtract((UnsignedWord) writtenBytes);
+        }
+        return true;
+    }
+
+    public static boolean flush(FileDescriptor descriptor) {
         int fd = getFD(descriptor);
         return Unistd.fsync(fd) == 0;
     }
 
-    static int getFDHandle(FileDescriptor fd) throws IOException {
-        int handle = getFD(fd);
-        if (handle == -1) {
-            throw new IOException("Stream Closed");
-        }
-        return handle;
-    }
-
-    static boolean outOfBounds(int off, int len, byte[] array) {
-        return off < 0 || len < 0 || array.length - off < len;
-    }
-
-    /**
-     * From a given path, remove all {@code .} and {@code dir/..}.
-     */
-    static String collapse(String path) {
-        boolean absolute = path.charAt(0) == '/';
-        String wpath = absolute ? path.substring(1) : path;
-
-        // split the path and remove unnecessary elements
-        List<String> parts = new ArrayList<>();
-        int pos = 0;
-        int next;
-        do {
-            next = wpath.indexOf('/', pos);
-            String part = next != -1 ? wpath.substring(pos, next) : wpath.substring(pos);
-            if (part.length() > 0) {
-                if (part.equals(".")) {
-                    // ignore
-                } else if (part.equals("..")) {
-                    // omit this .. and the preceding part
-                    parts.remove(parts.size() - 1);
-                } else {
-                    parts.add(part);
-                }
-            }
-            pos = next + 1;
-        } while (next != -1);
-
-        // reassemble the path
-        StringBuilder rpath = new StringBuilder(absolute ? "/" : "");
-        for (String part : parts) {
-            rpath.append(part).append('/');
-        }
-        rpath.deleteCharAt(rpath.length() - 1);
-
-        return rpath.toString();
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
+    public static boolean flushUninterruptibly(int fd) {
+        return Unistd.NoTransitions.fsync(fd) == 0;
     }
 
     public static PointerBase dlopen(String file, int mode) {
@@ -479,6 +262,10 @@ public class PosixUtils {
             CCharPointer pathPtr = pathPin.get();
             return Dlfcn.dlopen(pathPtr, mode);
         }
+    }
+
+    public static boolean dlclose(PointerBase handle) {
+        return Dlfcn.dlclose(handle) == 0;
     }
 
     public static <T extends PointerBase> T dlsym(PointerBase handle, String name) {
@@ -492,35 +279,97 @@ public class PosixUtils {
         return CTypeConversion.toJavaString(Dlfcn.dlerror());
     }
 
-    @Uninterruptible(reason = "Called from uninterruptible code.")
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     public static void checkStatusIs0(int status, String message) {
         VMError.guarantee(status == 0, message);
     }
 
-    @Uninterruptible(reason = "Called from uninterruptible code.")
-    public static boolean readEntirely(int fd, CCharPointer buffer, int bufferLen) {
-        int bufferOffset = 0;
-        for (;;) {
-            int readBytes = readBytes(fd, buffer, bufferLen - 1, bufferOffset);
-            if (readBytes < 0) { // NOTE: also when file does not fit in buffer
-                return false;
-            }
-            bufferOffset += readBytes;
-            if (readBytes == 0) { // EOF, terminate string
-                buffer.write(bufferOffset, (byte) 0);
-                return true;
-            }
-        }
-    }
-
-    @Uninterruptible(reason = "Called from uninterruptible code.")
-    public static int readBytes(int fd, CCharPointer buffer, int bufferLen, int readOffset) {
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
+    public static int readUninterruptibly(int fd, Pointer buffer, int bufferLen, int bufferOffset) {
         int readBytes = -1;
-        if (readOffset < bufferLen) {
+        if (bufferOffset < bufferLen) {
             do {
-                readBytes = (int) Unistd.NoTransitions.read(fd, buffer.addressOf(readOffset), WordFactory.unsigned(bufferLen - readOffset)).rawValue();
-            } while (readBytes == -1 && errno() == Errno.EINTR());
+                readBytes = (int) Unistd.NoTransitions.read(fd, buffer.add(bufferOffset), Word.unsigned(bufferLen - bufferOffset)).rawValue();
+            } while (readBytes == -1 && LibC.errno() == Errno.EINTR());
         }
         return readBytes;
+    }
+
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
+    public static int readUninterruptibly(int fd, Pointer buffer, int bufferSize) {
+        VMError.guarantee(bufferSize >= 0);
+        long readBytes = readUninterruptibly(fd, buffer, Word.unsigned(bufferSize));
+        assert (int) readBytes == readBytes;
+        return (int) readBytes;
+    }
+
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
+    public static long readUninterruptibly(int fd, Pointer buffer, UnsignedWord bufferSize) {
+        SignedWord readBytes;
+        do {
+            readBytes = Unistd.NoTransitions.read(fd, buffer, bufferSize);
+        } while (readBytes.equal(-1) && LibC.errno() == Errno.EINTR());
+
+        return readBytes.rawValue();
+    }
+
+    // Checkstyle: stop
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public static int clock_gettime(int clock_id, Time.timespec ts) {
+        if (Platform.includedIn(Platform.DARWIN.class)) {
+            return DarwinTime.NoTransitions.clock_gettime(clock_id, ts);
+        } else {
+            assert Platform.includedIn(Platform.LINUX.class);
+            return LinuxTime.NoTransitions.clock_gettime(clock_id, ts);
+        }
+    }
+    // Checkstyle: resume
+
+    public static String getUserName(int uid) {
+        return getUserNameOrDir(uid, true);
+    }
+
+    public static String getUserDir(int uid) {
+        return getUserNameOrDir(uid, false);
+    }
+
+    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-24+13/src/hotspot/os/posix/perfMemory_posix.cpp#L436-L486")
+    private static String getUserNameOrDir(int uid, boolean name) {
+        /* Determine max. pwBuf size. */
+        long bufSize = Unistd.sysconf(_SC_GETPW_R_SIZE_MAX());
+        if (bufSize == -1) {
+            bufSize = 1024;
+        }
+
+        /* Does not use StackValue because it is not safe to use in virtual threads. */
+        UnsignedWord allocSize = Word.unsigned(SizeOf.get(passwdPointer.class) + SizeOf.get(passwd.class) + bufSize);
+        Pointer alloc = NullableNativeMemory.malloc(allocSize, NmtCategory.Internal);
+        if (alloc.isNull()) {
+            return null;
+        }
+
+        try {
+            passwdPointer p = (passwdPointer) alloc;
+            passwd pwent = (passwd) ((Pointer) p).add(SizeOf.get(passwdPointer.class));
+            CCharPointer pwBuf = (CCharPointer) ((Pointer) pwent).add(SizeOf.get(passwd.class));
+            int code = Pwd.getpwuid_r(uid, pwent, pwBuf, Word.unsigned(bufSize), p);
+            if (code != 0) {
+                return null;
+            }
+
+            passwd result = p.read();
+            if (result.isNull()) {
+                return null;
+            }
+
+            CCharPointer pwName = name ? result.pw_name() : result.pw_dir();
+            if (pwName.isNull() || pwName.read() == '\0') {
+                return null;
+            }
+
+            return CTypeConversion.toJavaString(pwName);
+        } finally {
+            NullableNativeMemory.free(alloc);
+        }
     }
 }

@@ -27,11 +27,7 @@ package com.oracle.graal.pointsto.flow;
 /**
  * Keeps track of all synchronized types.
  */
-public class AllSynchronizedTypeFlow extends TypeFlow<Object> {
-
-    public AllSynchronizedTypeFlow() {
-        super();
-    }
+public class AllSynchronizedTypeFlow extends TypeFlow<Object> implements GlobalFlow {
 
     @Override
     public String toString() {

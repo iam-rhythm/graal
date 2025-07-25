@@ -24,53 +24,48 @@
  */
 package com.oracle.svm.core.heap;
 
+import static com.oracle.svm.core.Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_CODE;
+
 import org.graalvm.word.Pointer;
 
-import com.oracle.svm.core.annotate.RestrictHeapAccess;
+import com.oracle.svm.core.Uninterruptible;
+import com.oracle.svm.core.util.VMError;
 
 /**
- * Visit an object reference. The visitObjectReference method takes a Pointer as a parameter, but
- * that Pointer is *not* a pointer to an Object, but a Pointer to an object reference.
+ * Visitor for object references in Java heap objects, Java stack frames, or off-heap data
+ * structures.
  */
 public interface ObjectReferenceVisitor {
+    /**
+     * Visits a sequence of object references. Implementors of this method must loop over the
+     * references, which involves some boilerplate code. This code duplication is intentional as it
+     * reduces the number of virtual dispatches.
+     *
+     * @param firstObjRef Address where the first object reference is stored.
+     * @param compressed true if the references are regular Java references (like an instance
+     *            field), false if they are absolute word-sized pointers (like an uncompressed
+     *            pointer on the stack).
+     * @param referenceSize size in bytes of one reference
+     * @param holderObject The object containing the reference, or {@code null} if the reference is
+     *            not part of a Java object (e.g., the reference is on the stack or in a data
+     *            structure that is located in native memory).
+     * @param count The number of object references.
+     */
+    @RestrictHeapAccess(access = RestrictHeapAccess.Access.UNRESTRICTED, reason = "Some implementations allocate.")
+    void visitObjectReferences(Pointer firstObjRef, boolean compressed, int referenceSize, Object holderObject, int count);
 
     /**
-     * Called before any Object references are visited.
+     * Visits a derived reference. Derived references can only be on the stack or in a
+     * {@link StoredContinuation}.
      *
-     * @return true if visiting should continue, false if visiting should stop.
+     * @param baseObjRef Address where the base reference is stored.
+     * @param derivedObjRef Address where the derived reference is stored.
+     * @param holderObject The object containing the reference, or {@code null} if the reference is
+     *            not part of a Java object (e.g., the reference is on the stack or in a data
+     *            structure that is located in native memory).
      */
-    default boolean prologue() {
-        return true;
-    }
-
-    /**
-     * Visit an Object reference.
-     *
-     * To get the corresponding Object reference.readObject can be used.
-     *
-     * @param objRef The Object reference to be visited.
-     * @param compressed True if the reference is in compressed form, false otherwise.
-     * @return True if visiting should continue, false if visiting should stop.
-     */
-    @RestrictHeapAccess(access = RestrictHeapAccess.Access.UNRESTRICTED, overridesCallers = true, reason = "Some implementations allocate.")
-    boolean visitObjectReference(Pointer objRef, boolean compressed);
-
-    /** Like visitObjectReference(Pointer), but always inlined for performance. */
-    @RestrictHeapAccess(access = RestrictHeapAccess.Access.UNRESTRICTED, overridesCallers = true, reason = "Some implementations allocate.")
-    default boolean visitObjectReferenceInline(Pointer objRef, boolean compressed) {
-        return visitObjectReference(objRef, compressed);
-    }
-
-    @RestrictHeapAccess(access = RestrictHeapAccess.Access.UNRESTRICTED, overridesCallers = true, reason = "Some implementations allocate.")
-    default boolean visitObjectReferenceInline(Pointer objRef, @SuppressWarnings("unused") int innerOffset, boolean compressed) {
-        return visitObjectReference(objRef, compressed);
-    }
-
-    /**
-     * Called after all Object references have been visited. If visiting terminates because a
-     * visitor returned false, this method might not be called.
-     */
-    default boolean epilogue() {
-        return true;
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
+    default void visitDerivedReference(@SuppressWarnings("unused") Pointer baseObjRef, @SuppressWarnings("unused") Pointer derivedObjRef, @SuppressWarnings("unused") Object holderObject) {
+        throw VMError.shouldNotReachHere("Derived references are not supported by this visitor.");
     }
 }

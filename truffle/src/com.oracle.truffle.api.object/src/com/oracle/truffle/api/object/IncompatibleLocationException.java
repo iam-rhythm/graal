@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -47,14 +47,15 @@ import com.oracle.truffle.api.nodes.SlowPathException;
  *
  * @since 0.8 or earlier
  */
+@Deprecated(since = "22.2")
 public final class IncompatibleLocationException extends SlowPathException {
     private static final long serialVersionUID = -7734865392357341789L;
+    private static final IncompatibleLocationException INSTANCE = new IncompatibleLocationException();
 
-    /**
-     * Default constructor.
-     *
-     * @since 0.8 or earlier
-     */
-    public IncompatibleLocationException() {
+    private IncompatibleLocationException() {
+    }
+
+    static IncompatibleLocationException instance() {
+        return INSTANCE;
     }
 }

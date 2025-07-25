@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -44,11 +44,13 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
+import org.junit.BeforeClass;
 import org.junit.Test;
 
 import com.oracle.truffle.api.frame.VirtualFrame;
 import com.oracle.truffle.api.nodes.Node;
 import com.oracle.truffle.api.nodes.RootNode;
+import com.oracle.truffle.tck.tests.TruffleTestAssumptions;
 
 /**
  * Tests optional method for ensuring that a node replacement is type safe. Ordinary node
@@ -56,13 +58,18 @@ import com.oracle.truffle.api.nodes.RootNode;
  */
 public class SafeReplaceTest {
 
+    @BeforeClass
+    public static void runWithWeakEncapsulationOnly() {
+        TruffleTestAssumptions.assumeWeakEncapsulation();
+    }
+
     @Test
     public void testCorrectReplacement() {
         TestRootNode root = new TestRootNode();
         final TestNode oldChild = new TestNode();
         final TestNode newChild = new TestNode();
         root.child = oldChild;
-        assertTrue(oldChild.isSafelyReplaceableBy(newChild));  // No parent node
+        assertFalse(oldChild.isSafelyReplaceableBy(newChild));  // No parent node
         root.adoptChildren();
         assertTrue(oldChild.isSafelyReplaceableBy(newChild));   // Now adopted by parent
         // new node
@@ -81,12 +88,12 @@ public class SafeReplaceTest {
         root.adoptChildren();
         final TestNode newChild = new TestNode();
         final TestNode strayChild = new TestNode();
-        assertTrue(strayChild.isSafelyReplaceableBy(newChild)); // Stray not a child of parent
+        assertFalse(strayChild.isSafelyReplaceableBy(newChild)); // Stray not a child of parent
         final WrongTestNode wrongTypeNewChild = new WrongTestNode();
         assertFalse(oldChild.isSafelyReplaceableBy(wrongTypeNewChild));
     }
 
-    private static class TestNode extends Node {
+    private static final class TestNode extends Node {
 
         private int executed;
 
@@ -114,7 +121,7 @@ public class SafeReplaceTest {
         }
     }
 
-    private static class WrongTestNode extends Node {
+    private static final class WrongTestNode extends Node {
     }
 
 }

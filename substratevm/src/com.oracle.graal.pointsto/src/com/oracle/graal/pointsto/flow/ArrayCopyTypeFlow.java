@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,39 +24,39 @@
  */
 package com.oracle.graal.pointsto.flow;
 
-import org.graalvm.compiler.nodes.ValueNode;
-import com.oracle.graal.pointsto.BigBang;
-import com.oracle.graal.pointsto.api.PointstoOptions;
-import com.oracle.graal.pointsto.flow.context.object.AnalysisObject;
+import com.oracle.graal.pointsto.PointsToAnalysis;
 import com.oracle.graal.pointsto.meta.AnalysisType;
 import com.oracle.graal.pointsto.typestate.TypeState;
-import org.graalvm.compiler.replacements.nodes.BasicArrayCopyNode;
+import com.oracle.graal.pointsto.util.AnalysisError;
+
+import jdk.graal.compiler.replacements.nodes.BasicArrayCopyNode;
+import jdk.vm.ci.code.BytecodePosition;
 
 /**
- * Models the flow transfer of an {@link BasicArrayCopyNode} which intrinsifies calls to
+ * Models the flow transfer of an {@link BasicArrayCopyNode} node which intrinsifies calls to
  * System.arraycopy(). This flow registers itself as an observer for both the source and the
  * destination. When either the source or the destination elements change the element flows from
  * source are passed to destination.
  */
-public class ArrayCopyTypeFlow extends TypeFlow<ValueNode> {
+public class ArrayCopyTypeFlow extends TypeFlow<BytecodePosition> {
 
     TypeFlow<?> srcArrayFlow;
     TypeFlow<?> dstArrayFlow;
 
-    public ArrayCopyTypeFlow(ValueNode source, AnalysisType declaredType, TypeFlow<?> srcArrayFlow, TypeFlow<?> dstArrayFlow) {
-        super(source, declaredType);
+    public ArrayCopyTypeFlow(BytecodePosition location, AnalysisType declaredType, TypeFlow<?> srcArrayFlow, TypeFlow<?> dstArrayFlow) {
+        super(location, declaredType);
         this.srcArrayFlow = srcArrayFlow;
         this.dstArrayFlow = dstArrayFlow;
     }
 
-    public ArrayCopyTypeFlow(BigBang bb, ArrayCopyTypeFlow original, MethodFlowsGraph methodFlows) {
+    public ArrayCopyTypeFlow(PointsToAnalysis bb, ArrayCopyTypeFlow original, MethodFlowsGraph methodFlows) {
         super(original, methodFlows);
         this.srcArrayFlow = methodFlows.lookupCloneOf(bb, original.srcArrayFlow);
         this.dstArrayFlow = methodFlows.lookupCloneOf(bb, original.dstArrayFlow);
     }
 
     @Override
-    public TypeFlow<ValueNode> copy(BigBang bb, MethodFlowsGraph methodFlows) {
+    public TypeFlow<BytecodePosition> copy(PointsToAnalysis bb, MethodFlowsGraph methodFlows) {
         return new ArrayCopyTypeFlow(bb, this, methodFlows);
     }
 
@@ -64,9 +64,11 @@ public class ArrayCopyTypeFlow extends TypeFlow<ValueNode> {
     private TypeState lastDst;
 
     @Override
-    public void onObservedUpdate(BigBang bb) {
-        assert this.isClone();
-
+    public void onObservedUpdate(PointsToAnalysis bb) {
+        if (bb.analysisPolicy().aliasArrayTypeFlows()) {
+            /* All arrays are aliased, no need to model the array copy operation. */
+            return;
+        }
         /*
          * Both the source and the destination register this flow as an observer and notify it when
          * either of them is updated. When either the source or the destination elements change the
@@ -81,7 +83,7 @@ public class ArrayCopyTypeFlow extends TypeFlow<ValueNode> {
          * applications. So we optimize it as much as possible: We compute the delta of added source
          * and destination types, to avoid re-processing the same elements over and over.
          */
-        if (lastSrc == null || lastDst == null || PointstoOptions.AllocationSiteSensitiveHeap.getValue(bb.getOptions())) {
+        if (lastSrc == null || lastDst == null || bb.analysisPolicy().allocationSiteSensitiveHeap()) {
             /*
              * No previous state available, process the full type states. We also need to do that
              * when using the allocation site context, because TypeState.forSubtraction does not
@@ -120,62 +122,13 @@ public class ArrayCopyTypeFlow extends TypeFlow<ValueNode> {
         lastDst = dstArrayState;
     }
 
-    private static void processStates(BigBang bb, TypeState srcArrayState, TypeState dstArrayState) {
-        /*
-         * The source and destination array can have reference types which, although must be
-         * compatible, can be different.
-         */
-        for (AnalysisObject srcArrayObject : srcArrayState.objects()) {
-            if (!srcArrayObject.type().isArray()) {
-                /*
-                 * Ignore non-array type. Sometimes the analysis cannot filter out non-array types
-                 * flowing into array copy, however this will fail at runtime.
-                 */
-                continue;
-            }
-            assert srcArrayObject.type().isArray();
+    private static void processStates(PointsToAnalysis bb, TypeState srcArrayState, TypeState dstArrayState) {
+        bb.analysisPolicy().processArrayCopyStates(bb, srcArrayState, dstArrayState);
+    }
 
-            if (srcArrayObject.isPrimitiveArray() || srcArrayObject.isEmptyObjectArrayConstant(bb)) {
-                /* Nothing to read from a primitive array or an empty array constant. */
-                continue;
-            }
-
-            ArrayElementsTypeFlow srcArrayElementsFlow = srcArrayObject.getArrayElementsFlow(bb, false);
-
-            for (AnalysisObject dstArrayObject : dstArrayState.objects()) {
-                if (!dstArrayObject.type().isArray()) {
-                    /* Ignore non-array type. */
-                    continue;
-                }
-
-                assert dstArrayObject.type().isArray();
-
-                if (dstArrayObject.isPrimitiveArray() || dstArrayObject.isEmptyObjectArrayConstant(bb)) {
-                    /* Cannot write to a primitive array or an empty array constant. */
-                    continue;
-                }
-
-                /*
-                 * As far as the ArrayCopyTypeFlow is concerned the source and destination types can
-                 * be compatible or not, where compatibility is defined as: the component of the
-                 * source array can be converted to the component type of the destination array by
-                 * assignment conversion. System.arraycopy() semantics doesn't check the
-                 * compatibility of the source and destination arrays, it instead relies on runtime
-                 * checks of the compatibility of the copied objects and the destination array. For
-                 * example System.arraycopy() can copy from an Object[] to SomeOtherObject[]. In
-                 * this case a check dstArrayObject.type().isAssignableFrom(srcArrayObject.type()
-                 * would fail but it is actually a valid use. That's why ArrayElementsTypeFlow will
-                 * test each individual copied object for compatibility with the defined type of the
-                 * destination array and filter out those not assignable. From System.arraycopy()
-                 * javadoc: "...if any actual component of the source array from position srcPos
-                 * through srcPos+length-1 cannot be converted to the component type of the
-                 * destination array by assignment conversion, an ArrayStoreException is thrown."
-                 */
-
-                ArrayElementsTypeFlow dstArrayElementsFlow = dstArrayObject.getArrayElementsFlow(bb, true);
-                srcArrayElementsFlow.addUse(bb, dstArrayElementsFlow);
-            }
-        }
+    @Override
+    public boolean addState(PointsToAnalysis bb, TypeState add) {
+        throw AnalysisError.shouldNotReachHere("Adding state to an ArrayCopyTypeFlow.");
     }
 
     public TypeFlow<?> source() {
@@ -188,8 +141,6 @@ public class ArrayCopyTypeFlow extends TypeFlow<ValueNode> {
 
     @Override
     public String toString() {
-        StringBuilder str = new StringBuilder();
-        str.append("ArrayCopyTypeFlow<").append(getState()).append(">");
-        return str.toString();
+        return "ArrayCopyTypeFlow<" + getStateDescription() + ">";
     }
 }

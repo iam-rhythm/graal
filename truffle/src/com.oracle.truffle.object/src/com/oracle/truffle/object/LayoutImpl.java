@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2025, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,108 +40,53 @@
  */
 package com.oracle.truffle.object;
 
-import java.util.EnumSet;
+import java.lang.invoke.MethodHandles;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 
-import com.oracle.truffle.api.object.DynamicObject;
-import com.oracle.truffle.api.object.Layout;
-import com.oracle.truffle.api.object.Location;
-import com.oracle.truffle.api.object.ObjectType;
-import com.oracle.truffle.api.object.Shape;
-import com.oracle.truffle.api.object.Shape.Allocator;
+import org.graalvm.nativeimage.ImageInfo;
+import org.graalvm.nativeimage.Platform;
+import org.graalvm.nativeimage.Platforms;
 
-/** @since 0.17 or earlier */
-public abstract class LayoutImpl extends Layout {
-    private static final int INT_TO_DOUBLE_FLAG = 1;
-    private static final int INT_TO_LONG_FLAG = 2;
+/**
+ * Legacy class for compatibility with JDK 21 native image builds.
+ */
+@Platforms(Platform.HOSTED_ONLY.class)
+abstract class LayoutImpl {
 
-    /** @since 0.17 or earlier */
-    protected final LayoutStrategy strategy;
-    /** @since 0.17 or earlier */
-    protected final Class<? extends DynamicObject> clazz;
-    private final int allowedImplicitCasts;
+    private static final Method initializeDynamicObjectLayout;
+    private static final Method resetNativeImageState;
 
-    /** @since 0.17 or earlier */
-    protected LayoutImpl(EnumSet<ImplicitCast> allowedImplicitCasts, Class<? extends DynamicObjectImpl> clazz, LayoutStrategy strategy) {
-        this.strategy = strategy;
-        this.clazz = clazz;
-
-        this.allowedImplicitCasts = (allowedImplicitCasts.contains(ImplicitCast.IntToDouble) ? INT_TO_DOUBLE_FLAG : 0) | (allowedImplicitCasts.contains(ImplicitCast.IntToLong) ? INT_TO_LONG_FLAG : 0);
-    }
-
-    /** @since 0.17 or earlier */
-    @Override
-    public abstract DynamicObject newInstance(Shape shape);
-
-    /** @since 0.17 or earlier */
-    @Override
-    public Class<? extends DynamicObject> getType() {
-        return clazz;
-    }
-
-    /** @since 0.17 or earlier */
-    @Override
-    public final Shape createShape(ObjectType objectType, Object sharedData) {
-        return createShape(objectType, sharedData, 0);
-    }
-
-    /** @since 0.17 or earlier */
-    @Override
-    public final Shape createShape(ObjectType objectType) {
-        return createShape(objectType, null);
-    }
-
-    /** @since 0.17 or earlier */
-    public boolean isAllowedIntToDouble() {
-        return (allowedImplicitCasts & INT_TO_DOUBLE_FLAG) != 0;
-    }
-
-    /** @since 0.17 or earlier */
-    public boolean isAllowedIntToLong() {
-        return (allowedImplicitCasts & INT_TO_LONG_FLAG) != 0;
-    }
-
-    /** @since 0.17 or earlier */
-    protected abstract boolean hasObjectExtensionArray();
-
-    /** @since 0.17 or earlier */
-    protected abstract boolean hasPrimitiveExtensionArray();
-
-    /** @since 0.17 or earlier */
-    protected abstract int getObjectFieldCount();
-
-    /** @since 0.17 or earlier */
-    protected abstract int getPrimitiveFieldCount();
-
-    /** @since 0.17 or earlier */
-    protected abstract Location getObjectArrayLocation();
-
-    /** @since 0.17 or earlier */
-    protected abstract Location getPrimitiveArrayLocation();
-
-    /** @since 0.17 or earlier */
-    @Deprecated
-    protected int objectFieldIndex(@SuppressWarnings("unused") Location location) {
-        throw new UnsupportedOperationException();
-    }
-
-    /** @since 0.17 or earlier */
-    @Override
-    public abstract Allocator createAllocator();
-
-    /** @since 0.17 or earlier */
-    public LayoutStrategy getStrategy() {
-        return strategy;
-    }
-
-    @Override
-    public String toString() {
-        return "Layout[" + clazz.getName() + "]";
-    }
-
-    static final class CoreAccess extends Access {
-        private CoreAccess() {
+    static {
+        try {
+            Class<?> layoutImplClass = Class.forName("com.oracle.truffle.api.object.LayoutImpl");
+            initializeDynamicObjectLayout = layoutImplClass.getDeclaredMethod("initializeDynamicObjectLayout", Class.class, MethodHandles.Lookup.class);
+            initializeDynamicObjectLayout.setAccessible(true);
+            resetNativeImageState = layoutImplClass.getDeclaredMethod("resetNativeImageState");
+            resetNativeImageState.setAccessible(true);
+        } catch (NoSuchMethodException | ClassNotFoundException e) {
+            throw new ExceptionInInitializerError(e);
         }
     }
 
-    static final CoreAccess ACCESS = new CoreAccess();
+    /**
+     * Preinitializes DynamicObject layouts for native image generation.
+     *
+     * @implNote this method is called reflectively by JDK 21 native image (TruffleBaseFeature).
+     */
+    static void initializeDynamicObjectLayout(Class<?> dynamicObjectClass) throws InvocationTargetException, IllegalAccessException {
+        assert ImageInfo.inImageBuildtimeCode() : "Only supported during image generation";
+        initializeDynamicObjectLayout.invoke(null, dynamicObjectClass, null);
+    }
+
+    /**
+     * Resets the state for native image generation.
+     *
+     * @implNote this method is called reflectively by JDK 21 native image (TruffleBaseFeature).
+     */
+    static void resetNativeImageState() throws InvocationTargetException, IllegalAccessException {
+        assert ImageInfo.inImageBuildtimeCode() : "Only supported during image generation";
+        resetNativeImageState.invoke(null);
+    }
+
 }

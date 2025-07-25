@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -40,6 +40,7 @@ public class ELFProgbitsSection extends ELFUserDefinedSection implements Progbit
      * See the comment in ObjectFile.Element about the divide between Elements and their -Impls.
      */
 
+    @SuppressWarnings("this-escape")
     public ELFProgbitsSection(ELFObjectFile owner, String name, int alignment, ProgbitsSectionImpl impl, EnumSet<ELFSectionFlag> flags) {
         super(owner, name, alignment, ELFObjectFile.SectionType.PROGBITS, impl != null ? impl : new BasicProgbitsSectionImpl(new byte[0]), flags);
         // this *is* necessary because the newProgbitsSection helper doesn't see the impl
@@ -48,6 +49,7 @@ public class ELFProgbitsSection extends ELFUserDefinedSection implements Progbit
         }
     }
 
+    @SuppressWarnings("this-escape")
     public ELFProgbitsSection(ELFObjectFile owner, String name, int alignment, EnumSet<ELFSectionFlag> flags, int shtIndex, InputDisassembler in, int size) {
         super(owner, name, alignment, ELFObjectFile.SectionType.PROGBITS, new BasicProgbitsSectionImpl(in.readBlob(size)), flags, shtIndex);
         // this *is* necessary because the newProgbitsSection helper doesn't see the impl
@@ -69,7 +71,7 @@ public class ELFProgbitsSection extends ELFUserDefinedSection implements Progbit
     }
 
     @Override
-    public ObjectFile.RelocationRecord markRelocationSite(int offset, int length, ObjectFile.RelocationKind k, String symbolName, boolean useImplicitAddend, Long explicitAddend) {
-        return markRelocationSite(offset, length, ByteBuffer.wrap(getContent()).order(getOwner().getByteOrder()), k, symbolName, useImplicitAddend, explicitAddend);
+    public void markRelocationSite(int offset, ObjectFile.RelocationKind k, String symbolName, long addend) {
+        markRelocationSite(offset, ByteBuffer.wrap(getContent()).order(getOwner().getByteOrder()), k, symbolName, addend);
     }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,21 +40,20 @@
  */
 package com.oracle.truffle.tck.tests;
 
-import java.io.IOException;
 import java.util.AbstractMap;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.LinkedHashSet;
+import java.util.Comparator;
 import java.util.Objects;
+import java.util.TreeSet;
 import org.graalvm.polyglot.Value;
+import org.junit.BeforeClass;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
-import org.graalvm.polyglot.Engine;
 import org.graalvm.polyglot.PolyglotException;
 import org.graalvm.polyglot.tck.Snippet;
 import org.junit.AfterClass;
 import org.junit.Assume;
-import org.junit.Before;
 import org.junit.Test;
 
 @RunWith(Parameterized.class)
@@ -66,27 +65,29 @@ public class ScriptTest {
     @Parameterized.Parameters(name = "{0}")
     public static Collection<TestRun> createScriptTests() {
         context = new TestContext(ScriptTest.class);
-        final Collection<TestRun> res = new LinkedHashSet<>();
+        final Collection<TestRun> res = new TreeSet<>(Comparator.comparing(TestRun::toString));
         for (String lang : TestUtil.getRequiredLanguages(context)) {
             for (Snippet script : context.getScripts(null, lang)) {
                 res.add(new TestRun(new AbstractMap.SimpleImmutableEntry<>(lang, script), Collections.emptyList()));
             }
         }
+        if (res.isEmpty()) {
+            // BeforeClass and AfterClass annotated methods are not called when there are no tests
+            // to run. But we need to free TestContext.
+            afterClass();
+        }
         return res;
     }
 
-    @AfterClass
-    public static void afterClass() throws IOException {
-        context.close();
-        context = null;
+    @BeforeClass
+    public static void setUpClass() {
+        TestUtil.assertNoCurrentContext();
     }
 
-    @Before
-    public void setUp() {
-        // JUnit mixes test executions from different classes. There are still tests using the
-        // deprecated PolyglotEngine. For tests executed by Parametrized runner
-        // creating Context as a test parameter we need to ensure that correct SPI is used.
-        Engine.create().close();
+    @AfterClass
+    public static void afterClass() {
+        context.close();
+        context = null;
     }
 
     public ScriptTest(final TestRun testRun) {
@@ -99,12 +100,18 @@ public class ScriptTest {
         Assume.assumeThat(testRun, TEST_RESULT_MATCHER);
         boolean success = false;
         try {
+            Value result = null;
             try {
-                final Value result = testRun.getSnippet().getExecutableValue().execute(testRun.getActualParameters().toArray());
-                TestUtil.validateResult(testRun, result, null);
+                result = testRun.getSnippet().getExecutableValue().execute(testRun.getActualParameters().toArray());
+            } catch (IllegalArgumentException e) {
+                TestUtil.validateResult(testRun, context.getContext().asValue(e).as(PolyglotException.class));
                 success = true;
-            } catch (PolyglotException pe) {
-                TestUtil.validateResult(testRun, null, pe);
+            } catch (PolyglotException e) {
+                TestUtil.validateResult(testRun, e);
+                success = true;
+            }
+            if (result != null) {
+                TestUtil.validateResult(testRun, result, true);
                 success = true;
             }
         } finally {

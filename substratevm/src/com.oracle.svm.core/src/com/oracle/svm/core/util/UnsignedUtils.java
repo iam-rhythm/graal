@@ -24,10 +24,10 @@
  */
 package com.oracle.svm.core.util;
 
+import jdk.graal.compiler.word.Word;
 import org.graalvm.word.UnsignedWord;
-import org.graalvm.word.WordFactory;
 
-import com.oracle.svm.core.annotate.Uninterruptible;
+import com.oracle.svm.core.Uninterruptible;
 
 /**
  * Utility methods on Unsigned values.
@@ -35,7 +35,7 @@ import com.oracle.svm.core.annotate.Uninterruptible;
 public final class UnsignedUtils {
 
     /** The UnsignedWord of the greatest magnitude. */
-    public static final UnsignedWord MAX_VALUE = WordFactory.unsigned(0xffffffffffffffffL);
+    public static final UnsignedWord MAX_VALUE = Word.unsigned(0xffffffffffffffffL);
 
     private UnsignedUtils() {
         // This is a class of static methods, so no need for any instances.
@@ -48,7 +48,7 @@ public final class UnsignedUtils {
      * @param multiple The multiple to which that Unsigned should be decreased.
      * @return That Unsigned, but rounded down.
      */
-    @Uninterruptible(reason = "Used in uninterruptible code.", mayBeInlined = true)
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     public static UnsignedWord roundDown(UnsignedWord that, UnsignedWord multiple) {
         return that.unsignedDivide(multiple).multiply(multiple);
     }
@@ -60,7 +60,7 @@ public final class UnsignedUtils {
      * @param multiple The multiple to which that Unsigned should be increased.
      * @return That Unsigned, but rounded up.
      */
-    @Uninterruptible(reason = "Used in uninterruptible code.", mayBeInlined = true)
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     public static UnsignedWord roundUp(UnsignedWord that, UnsignedWord multiple) {
         return UnsignedUtils.roundDown(that.add(multiple.subtract(1)), multiple);
     }
@@ -72,9 +72,9 @@ public final class UnsignedUtils {
      * @param multiple The multiple against which the Unsigned should be verified.
      * @return true if that Unsigned is a multiple, false otherwise.
      */
-    @Uninterruptible(reason = "Used in uninterruptible code.", mayBeInlined = true)
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     public static boolean isAMultiple(UnsignedWord that, UnsignedWord multiple) {
-        return that.equal(UnsignedUtils.roundDown(that, multiple));
+        return that.unsignedRemainder(multiple).equal(0);
     }
 
     /**
@@ -84,7 +84,7 @@ public final class UnsignedUtils {
      * @param y Another Unsigned.
      * @return The whichever Unsigned is smaller.
      */
-    @Uninterruptible(reason = "Used in uninterruptible code.", mayBeInlined = true)
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     public static UnsignedWord min(UnsignedWord x, UnsignedWord y) {
         return (x.belowOrEqual(y)) ? x : y;
     }
@@ -96,7 +96,58 @@ public final class UnsignedUtils {
      * @param y Another Unsigned.
      * @return The whichever Unsigned is larger.
      */
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     public static UnsignedWord max(UnsignedWord x, UnsignedWord y) {
         return (x.aboveOrEqual(y)) ? x : y;
+    }
+
+    /**
+     * Converts an {@link UnsignedWord} to a positive signed {@code int}, asserting that it can be
+     * correctly represented.
+     */
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public static int safeToInt(UnsignedWord w) {
+        long l = w.rawValue();
+        assert l >= 0 && l == (int) l;
+        return (int) l;
+    }
+
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public static UnsignedWord clamp(UnsignedWord value, UnsignedWord min, UnsignedWord max) {
+        assert min.belowOrEqual(max);
+        return min(max(value, min), max);
+    }
+
+    public static double toDouble(UnsignedWord u) {
+        long l = u.rawValue();
+        if (l >= 0) {
+            return l;
+        }
+        /*
+         * The shift does not lose precision because the double's mantissa has fewer bits than long
+         * anyway. The bitwise and of the LSB rounds to nearest as required by JLS 5.1.2.
+         */
+        return ((l >>> 1) | (l & 1)) * 2.0;
+    }
+
+    public static UnsignedWord fromDouble(double d) { // follows JLS 5.1.3
+        long l = (long) d;
+        if (Double.isNaN(d) || l <= 0) { // includes -inf
+            return Word.zero();
+        }
+        if (l < Long.MAX_VALUE) {
+            return Word.unsigned(l);
+        }
+        /*
+         * This division does not lose precision with these large numbers because the double's
+         * mantissa has fewer bits than long does. For the same reason, it also doesn't matter that
+         * we could not distinguish UnsignedUtils.MAX_VALUE - 1 from +inf or "too large to fit" --
+         * it simply does not have an exact representation as a double.
+         */
+        l = (long) (d / 2.0);
+        if (l == Long.MAX_VALUE) { // too large or +inf
+            return UnsignedUtils.MAX_VALUE;
+        }
+        return Word.unsigned(l).shiftLeft(1);
     }
 }

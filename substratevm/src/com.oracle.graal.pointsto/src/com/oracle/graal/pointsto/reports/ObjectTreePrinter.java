@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2016, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -29,7 +29,7 @@ import static com.oracle.graal.pointsto.reports.ReportUtils.CONNECTING_INDENT;
 import static com.oracle.graal.pointsto.reports.ReportUtils.EMPTY_INDENT;
 import static com.oracle.graal.pointsto.reports.ReportUtils.LAST_CHILD;
 import static com.oracle.graal.pointsto.reports.ReportUtils.fieldComparator;
-import static com.oracle.graal.pointsto.reports.ReportUtils.methodComparator;
+import static com.oracle.graal.pointsto.reports.ReportUtils.reasonComparator;
 
 import java.io.PrintWriter;
 import java.util.ArrayDeque;
@@ -41,13 +41,15 @@ import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
 
-import org.graalvm.compiler.options.OptionValues;
-
 import com.oracle.graal.pointsto.BigBang;
 import com.oracle.graal.pointsto.ObjectScanner;
+import com.oracle.graal.pointsto.ObjectScanningObserver;
 import com.oracle.graal.pointsto.meta.AnalysisField;
+import com.oracle.graal.pointsto.meta.AnalysisMethod;
 import com.oracle.graal.pointsto.meta.AnalysisType;
 
+import jdk.graal.compiler.options.OptionValues;
+import jdk.vm.ci.code.BytecodePosition;
 import jdk.vm.ci.common.JVMCIError;
 import jdk.vm.ci.meta.JavaConstant;
 import jdk.vm.ci.meta.JavaKind;
@@ -56,15 +58,17 @@ import jdk.vm.ci.meta.ResolvedJavaMethod;
 
 public final class ObjectTreePrinter extends ObjectScanner {
 
-    public static void print(BigBang bigbang, String path, String reportName) {
-        ReportUtils.report("object tree", path + "/reports", "object_tree_" + reportName, "txt",
-                        writer -> ObjectTreePrinter.doPrint(writer, bigbang));
+    public static void print(BigBang bb, String reportsPath, String reportName) {
+        ReportUtils.report("object tree", reportsPath, "object_tree_" + reportName, "txt",
+                        writer -> ObjectTreePrinter.doPrint(writer, bb));
     }
 
-    private static void doPrint(PrintWriter out, BigBang bigbang) {
-        ObjectTreePrinter printer = new ObjectTreePrinter(bigbang);
-        printer.scanBootImageHeapRoots(fieldComparator, methodComparator);
-        printer.printTypeHierarchy(out);
+    private static void doPrint(PrintWriter out, BigBang bb) {
+        /* Use linked hash map for predictable iteration order. */
+        Map<JavaConstant, ObjectNodeBase> constantToNode = new LinkedHashMap<>();
+        ObjectTreePrinter printer = new ObjectTreePrinter(bb, constantToNode);
+        printer.scanBootImageHeapRoots(fieldComparator, reasonComparator);
+        printer.printTypeHierarchy(out, constantToNode);
     }
 
     static class RootSource {
@@ -75,15 +79,16 @@ public final class ObjectTreePrinter extends ObjectScanner {
         }
 
         String format() {
-            if (source instanceof ResolvedJavaField) {
-                ResolvedJavaField field = (ResolvedJavaField) source;
-                return field.format("%H.%n:%T");
-            } else if (source instanceof ResolvedJavaMethod) {
-                ResolvedJavaMethod method = (ResolvedJavaMethod) source;
-                return method.format("%H.%n(%p)");
-            } else {
-                throw JVMCIError.shouldNotReachHere("unknown source: " + source);
-            }
+            return format(source);
+        }
+
+        private static String format(Object srcObj) {
+            return switch (srcObj) {
+                case AnalysisField field -> ReportUtils.loaderName(field.getDeclaringClass()) + ':' + field.format("%H.%n:%T");
+                case AnalysisMethod method -> ReportUtils.loaderName(method.getDeclaringClass()) + ':' + method.format("%H.%n(%p)");
+                case BytecodePosition bcp -> "%s [bci: %d]".formatted(format(bcp.getMethod()), bcp.getBCI());
+                default -> throw JVMCIError.shouldNotReachHere("unknown srcObj");
+            };
         }
     }
 
@@ -165,7 +170,7 @@ public final class ObjectTreePrinter extends ObjectScanner {
         }
 
         void addField(AnalysisField field, ObjectNodeBase typeNode) {
-            assert !fields.containsKey(field);
+            assert !fields.containsKey(field) : field;
             fields.put(field, new FieldNode(field, typeNode));
         }
     }
@@ -197,7 +202,7 @@ public final class ObjectTreePrinter extends ObjectScanner {
         }
 
         void addElement(Integer index, ObjectNodeBase object) {
-            assert !elements.containsKey(index);
+            assert !elements.containsKey(index) : elements;
             elements.put(index, new ElementNode(index, object));
         }
     }
@@ -235,10 +240,10 @@ public final class ObjectTreePrinter extends ObjectScanner {
         }
     }
 
-    static class SimpleMatcher {
+    public static final class SimpleMatcher {
         private final String[] patterns;
 
-        SimpleMatcher(String[] patterns) {
+        public SimpleMatcher(String[] patterns) {
             this.patterns = patterns;
         }
 
@@ -277,7 +282,6 @@ public final class ObjectTreePrinter extends ObjectScanner {
                     "com.ibm.icu.util.ULocale.nameCache*",
                     "com.oracle.svm.core.option.RuntimeOptionsSupportImpl.set(String, Object)"};
 
-    private final Map<JavaConstant, ObjectNodeBase> constantToNode;
     private final SimpleMatcher suppressTypeMatcher;
     private final SimpleMatcher expandTypeMatcher;
     private final SimpleMatcher defaultSuppressTypeMatcher;
@@ -285,13 +289,10 @@ public final class ObjectTreePrinter extends ObjectScanner {
     private final SimpleMatcher expandRootMatcher;
     private final SimpleMatcher defaultSuppressRootMatcher;
 
-    private ObjectTreePrinter(BigBang bigbang) {
-        super(bigbang);
+    private ObjectTreePrinter(BigBang bb, Map<JavaConstant, ObjectNodeBase> constantToNode) {
+        super(bb, null, new ReusableSet(), new ScanningObserver(bb, constantToNode));
 
-        /* Use linked hash map for predictable iteration order. */
-        this.constantToNode = new LinkedHashMap<>();
-
-        OptionValues options = bigbang.getOptions();
+        OptionValues options = bb.getOptions();
 
         this.suppressTypeMatcher = new SimpleMatcher(AnalysisReportsOptions.ImageObjectTreeSuppressTypes.getValue(options).trim().split(","));
         this.expandTypeMatcher = new SimpleMatcher(AnalysisReportsOptions.ImageObjectTreeExpandTypes.getValue(options).trim().split(","));
@@ -302,86 +303,105 @@ public final class ObjectTreePrinter extends ObjectScanner {
         this.defaultSuppressRootMatcher = new SimpleMatcher(suppressRootsDefault);
     }
 
-    @Override
-    public void forRelocatedPointerFieldValue(JavaConstant receiver, AnalysisField field, JavaConstant fieldValue) {
-    }
+    private static final class ScanningObserver implements ObjectScanningObserver {
 
-    @Override
-    public void forNullFieldValue(JavaConstant receiver, AnalysisField field) {
-        if (receiver == null) {
-            // static field
-            return;
+        private final BigBang bb;
+        private final Map<JavaConstant, ObjectNodeBase> constantToNode;
+
+        private ScanningObserver(BigBang bb, Map<JavaConstant, ObjectNodeBase> constantToNode) {
+            this.bb = bb;
+            this.constantToNode = constantToNode;
         }
 
-        assert constantToNode.containsKey(receiver);
-
-        ObjectNode receiverNode = (ObjectNode) constantToNode.get(receiver);
-        receiverNode.addField(field, ObjectNodeBase.forNull());
-    }
-
-    @Override
-    public void forNonNullFieldValue(JavaConstant receiver, AnalysisField field, JavaConstant fieldValue) {
-
-        if (receiver == null) {
-            // static field
-            return;
+        @Override
+        public boolean forRelocatedPointerFieldValue(JavaConstant receiver, AnalysisField field, JavaConstant fieldValue, ScanReason reason) {
+            return false;
         }
 
-        assert constantToNode.containsKey(receiver);
-        assert constantToNode.containsKey(fieldValue);
+        @Override
+        public boolean forNullFieldValue(JavaConstant receiver, AnalysisField field, ScanReason reason) {
+            if (receiver == null) {
+                // static field
+                return false;
+            }
 
-        ObjectNode receiverNode = (ObjectNode) constantToNode.get(receiver);
-        ObjectNodeBase valueNode = constantToNode.get(fieldValue);
-        receiverNode.addField(field, valueNode);
-    }
+            assert constantToNode.containsKey(receiver) : receiver;
 
-    @Override
-    public void forNullArrayElement(JavaConstant array, AnalysisType arrayType, int index) {
-        assert constantToNode.containsKey(array);
+            ObjectNode receiverNode = (ObjectNode) constantToNode.get(receiver);
+            receiverNode.addField(field, ObjectNodeBase.forNull());
+            return true;
+        }
 
-        ArrayObjectNode arrayNode = (ArrayObjectNode) constantToNode.get(array);
-        arrayNode.addElement(index, ObjectNodeBase.forNull());
-    }
+        @Override
+        public boolean forNonNullFieldValue(JavaConstant receiver, AnalysisField field, JavaConstant fieldValue, ScanReason reason) {
 
-    @Override
-    public void forNonNullArrayElement(JavaConstant array, AnalysisType arrayType, JavaConstant elementConstant, AnalysisType elementType, int index) {
-        assert constantToNode.containsKey(array);
-        assert constantToNode.containsKey(elementConstant);
+            if (receiver == null) {
+                // static field
+                return false;
+            }
 
-        ArrayObjectNode arrayNode = (ArrayObjectNode) constantToNode.get(array);
-        ObjectNodeBase valueNode = constantToNode.get(elementConstant);
-        arrayNode.addElement(index, valueNode);
-    }
+            if (constantToNode.containsKey(receiver) && constantToNode.containsKey(fieldValue)) {
+                ObjectNode receiverNode = (ObjectNode) constantToNode.get(receiver);
+                ObjectNodeBase valueNode = constantToNode.get(fieldValue);
+                receiverNode.addField(field, valueNode);
+            }
+            return true;
+        }
 
-    @Override
-    protected void forScannedConstant(JavaConstant scannedValue, Object reason) {
-        JVMCIError.guarantee(scannedValue != null, "scannedValue is null");
-        constantToNode.computeIfAbsent(scannedValue, c -> {
-            ObjectNodeBase node;
-            if (reason instanceof ResolvedJavaField) {
-                ResolvedJavaField field = (ResolvedJavaField) reason;
-                if (field.isStatic()) {
-                    node = ObjectNodeBase.fromConstant(bb, scannedValue, new RootSource(field));
+        @Override
+        public boolean forNullArrayElement(JavaConstant array, AnalysisType arrayType, int index, ScanReason reason) {
+            assert constantToNode.containsKey(array) : array;
+
+            ArrayObjectNode arrayNode = (ArrayObjectNode) constantToNode.get(array);
+            arrayNode.addElement(index, ObjectNodeBase.forNull());
+            return true;
+        }
+
+        @Override
+        public boolean forNonNullArrayElement(JavaConstant array, AnalysisType arrayType, JavaConstant elementConstant, AnalysisType elementType, int index, ScanReason reason) {
+            if (constantToNode.containsKey(array) && constantToNode.containsKey(elementConstant)) {
+                ArrayObjectNode arrayNode = (ArrayObjectNode) constantToNode.get(array);
+                ObjectNodeBase valueNode = constantToNode.get(elementConstant);
+                arrayNode.addElement(index, valueNode);
+                return true;
+            }
+            return false;
+        }
+
+        @Override
+        public void forScannedConstant(JavaConstant scannedValue, ScanReason reason) {
+            JVMCIError.guarantee(scannedValue != null, "scannedValue is null");
+            constantToNode.computeIfAbsent(scannedValue, c -> {
+                ObjectNodeBase node;
+                if (reason instanceof FieldScan) {
+                    ResolvedJavaField field = ((FieldScan) reason).getField();
+                    if (field.isStatic()) {
+                        node = ObjectNodeBase.fromConstant(bb, scannedValue, new RootSource(field));
+                    } else {
+                        node = ObjectNodeBase.fromConstant(bb, scannedValue);
+                    }
+                } else if (reason instanceof EmbeddedRootScan embeddedRootScan) {
+                    ResolvedJavaMethod method = embeddedRootScan.getMethod();
+                    if (method != null) {
+                        node = ObjectNodeBase.fromConstant(bb, scannedValue, new RootSource(method));
+                    } else {
+                        node = ObjectNodeBase.fromConstant(bb, scannedValue, new RootSource(embeddedRootScan.getReason()));
+                    }
                 } else {
                     node = ObjectNodeBase.fromConstant(bb, scannedValue);
                 }
-            } else if (reason instanceof ResolvedJavaMethod) {
-                ResolvedJavaMethod method = (ResolvedJavaMethod) reason;
-                node = ObjectNodeBase.fromConstant(bb, scannedValue, new RootSource(method));
-            } else {
-                node = ObjectNodeBase.fromConstant(bb, scannedValue);
-            }
 
-            return node;
-        });
-    }
-
-    private static AnalysisType constantType(BigBang bb, JavaConstant scannedValue) {
-        return bb.getMetaAccess().lookupJavaType(constantAsObject(bb, scannedValue).getClass());
+                return node;
+            });
+        }
     }
 
     static String constantAsString(BigBang bb, JavaConstant constant) {
         Object object = constantAsObject(bb, constant);
+        String loaderPrefix = "";
+        if (object != null) {
+            loaderPrefix = ReportUtils.loaderName(object.getClass().getClassLoader()) + ':';
+        }
         if (object instanceof String) {
             String str = (String) object;
             str = escape(str);
@@ -389,14 +409,10 @@ public final class ObjectTreePrinter extends ObjectScanner {
                 str = str.substring(0, 10);
                 str = str + "...";
             }
-            return "\"" + str + "\"";
+            return loaderPrefix + "\"" + str + "\"";
         } else {
-            return escape(JavaKind.Object.format(object));
+            return loaderPrefix + escape(JavaKind.Object.format(object));
         }
-    }
-
-    private static Object constantAsObject(BigBang bb, JavaConstant constant) {
-        return bb.getSnippetReflectionProvider().asObject(Object.class, constant);
     }
 
     private static String escape(String str) {
@@ -420,7 +436,7 @@ public final class ObjectTreePrinter extends ObjectScanner {
     }
 
     private boolean suppressType(AnalysisType type) {
-        AnalysisType elementalType = (AnalysisType) type.getElementalType();
+        AnalysisType elementalType = type.getElementalType();
         String elementalTypeName = elementalType.toJavaName(true);
 
         if (expandTypeMatcher.matches(elementalTypeName)) {
@@ -455,7 +471,7 @@ public final class ObjectTreePrinter extends ObjectScanner {
         return false;
     }
 
-    private void printTypeHierarchy(PrintWriter out) {
+    private void printTypeHierarchy(PrintWriter out, Map<JavaConstant, ObjectNodeBase> constantToNode) {
         out.println("Heap roots");
         Iterator<ObjectNodeBase> iterator = constantToNode.values().stream().filter(n -> n.isRoot()).iterator();
         while (iterator.hasNext()) {

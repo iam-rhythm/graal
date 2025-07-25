@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -52,17 +52,17 @@ import com.oracle.truffle.api.source.Source;
  */
 public final class LanguageInfo {
 
+    private final Object languageCache;
     private final String id;
     private final String name;
     private final String version;
     private final Set<String> mimeTypes;
-    private final Object engineObject;
     private final String defaultMimeType;
     private final boolean internal;
     private final boolean interactive;
 
-    LanguageInfo(Object engineObject, String id, String name, String version, String defaultMimeType, Set<String> mimeTypes, boolean internal, boolean interactive) {
-        this.engineObject = engineObject;
+    LanguageInfo(Object languageCache, String id, String name, String version, String defaultMimeType, Set<String> mimeTypes, boolean internal, boolean interactive) {
+        this.languageCache = languageCache;
         this.id = id;
         this.name = name;
         this.version = version;
@@ -109,7 +109,7 @@ public final class LanguageInfo {
      * will be interpreted as {@link Source#hasCharacters() character based} sources. This set is
      * equivalent to the set provided by {@link Registration#defaultMimeType()}.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public String getDefaultMimeType() {
         return defaultMimeType;
@@ -125,10 +125,6 @@ public final class LanguageInfo {
         return mimeTypes;
     }
 
-    Object getEngineObject() {
-        return engineObject;
-    }
-
     /**
      * @return {@code true} if the language is {@link Registration#internal() internal},
      *         {@code false} otherwise
@@ -141,9 +137,13 @@ public final class LanguageInfo {
     /**
      * @return {@code true} if the language is {@link Registration#interactive() interactive},
      *         {@code false} otherwise
-     * @since 1.0
+     * @since 19.0
      */
     public boolean isInteractive() {
         return interactive;
+    }
+
+    Object getLanguageCache() {
+        return languageCache;
     }
 }

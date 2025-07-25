@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2018, Oracle and/or its affiliates.
+ * Copyright (c) 2016, 2020, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -29,30 +29,44 @@
  */
 package com.oracle.truffle.llvm.runtime;
 
-import com.oracle.truffle.api.nodes.ControlFlowException;
+import com.oracle.truffle.api.exception.AbstractTruffleException;
+import com.oracle.truffle.api.interop.ExceptionType;
+import com.oracle.truffle.api.interop.InteropLibrary;
+import com.oracle.truffle.api.library.ExportLibrary;
+import com.oracle.truffle.api.library.ExportMessage;
+import com.oracle.truffle.api.nodes.Node;
 
 /**
  * Used when exit or abort are called.
  */
-public final class LLVMExitException extends ControlFlowException {
+@ExportLibrary(InteropLibrary.class)
+public final class LLVMExitException extends AbstractTruffleException {
     private static final long serialVersionUID = 1L;
     private static final int UNIX_SIGABORT = 134;
 
     private final int returnCode;
 
-    public static LLVMExitException abort() {
-        return new LLVMExitException(UNIX_SIGABORT);
+    public static LLVMExitException abort(Node location) {
+        return new LLVMExitException(UNIX_SIGABORT, location);
     }
 
-    public static LLVMExitException exit(int returnCode) {
-        return new LLVMExitException(returnCode);
+    public static LLVMExitException exit(int returnCode, Node location) {
+        return new LLVMExitException(returnCode, location);
     }
 
-    private LLVMExitException(int returnCode) {
+    private LLVMExitException(int returnCode, Node location) {
+        super(location);
         this.returnCode = returnCode;
     }
 
-    public int getReturnCode() {
+    @ExportMessage
+    @SuppressWarnings("static-method")
+    ExceptionType getExceptionType() {
+        return ExceptionType.EXIT;
+    }
+
+    @ExportMessage
+    public int getExceptionExitStatus() {
         return returnCode;
     }
 }

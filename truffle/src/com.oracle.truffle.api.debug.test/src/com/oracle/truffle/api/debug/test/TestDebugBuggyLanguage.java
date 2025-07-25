@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,13 +40,14 @@
  */
 package com.oracle.truffle.api.debug.test;
 
+import java.util.Objects;
+import java.util.function.BiFunction;
+
 import com.oracle.truffle.api.CallTarget;
 import com.oracle.truffle.api.CompilerDirectives;
-import com.oracle.truffle.api.Truffle;
-import com.oracle.truffle.api.TruffleException;
 import com.oracle.truffle.api.TruffleLanguage;
-import com.oracle.truffle.api.frame.FrameSlot;
-import com.oracle.truffle.api.frame.FrameSlotKind;
+import com.oracle.truffle.api.exception.AbstractTruffleException;
+import com.oracle.truffle.api.frame.Frame;
 import com.oracle.truffle.api.frame.MaterializedFrame;
 import com.oracle.truffle.api.frame.VirtualFrame;
 import com.oracle.truffle.api.instrumentation.GenerateWrapper;
@@ -54,12 +55,14 @@ import com.oracle.truffle.api.instrumentation.InstrumentableNode;
 import com.oracle.truffle.api.instrumentation.ProbeNode;
 import com.oracle.truffle.api.instrumentation.StandardTags;
 import com.oracle.truffle.api.instrumentation.Tag;
-import com.oracle.truffle.api.interop.ArityException;
-import com.oracle.truffle.api.interop.KeyInfo;
+import com.oracle.truffle.api.interop.InteropLibrary;
+import com.oracle.truffle.api.interop.InvalidArrayIndexException;
+import com.oracle.truffle.api.interop.NodeLibrary;
 import com.oracle.truffle.api.interop.TruffleObject;
 import com.oracle.truffle.api.interop.UnknownIdentifierException;
 import com.oracle.truffle.api.interop.UnsupportedMessageException;
-import com.oracle.truffle.api.interop.UnsupportedTypeException;
+import com.oracle.truffle.api.library.ExportLibrary;
+import com.oracle.truffle.api.library.ExportMessage;
 import com.oracle.truffle.api.nodes.Node;
 import com.oracle.truffle.api.nodes.RootNode;
 import com.oracle.truffle.api.source.SourceSection;
@@ -73,9 +76,9 @@ import com.oracle.truffle.api.test.polyglot.ProxyLanguage;
  * and <code>o</code> is an object containing an <code>A</code> property.
  * <p>
  * To trigger an exception, evaluate a Source containing number <code>1</code> for an
- * {@link IllegalStateException}, number <code>2</code> for a {@link TruffleException}, or number
- * <code>3</code> for an {@link AssertionError}. The number is available in <code>a</code> local
- * variable and <code>o.A</code> property, so that it can be passed to the
+ * {@link IllegalStateException}, number <code>2</code> for a {@link AbstractTruffleException}, or
+ * number <code>3</code> for an {@link AssertionError}. The number is available in <code>a</code>
+ * local variable and <code>o.A</code> property, so that it can be passed to the
  * {@link #throwBug(java.lang.Object)}.
  * <p>
  * Extend this class and {@link #throwBug(java.lang.Object) throw bug} in a language method, or
@@ -92,11 +95,25 @@ import com.oracle.truffle.api.test.polyglot.ProxyLanguage;
  * <code>o</code> variable</li>
  * </ul>
  */
+@SuppressWarnings("static-method")
+
 public class TestDebugBuggyLanguage extends ProxyLanguage {
+
+    protected BiFunction<Node, Frame, Object> scopeProvider() {
+        return null;
+    }
+
+    protected final Object getDefaultScope(Node node, Frame frame, boolean enterNode) {
+        try {
+            return NodeLibrary.getUncached().getScope(((TestRootNode) node.getRootNode()).getDefaultScopeNode(), frame, enterNode);
+        } catch (UnsupportedMessageException e) {
+            throw CompilerDirectives.shouldNotReachHere(e);
+        }
+    }
 
     @Override
     protected final CallTarget parse(TruffleLanguage.ParsingRequest request) throws Exception {
-        return Truffle.getRuntime().createCallTarget(new TestRootNode(languageInstance, request.getSource()));
+        return new TestRootNode(languageInstance, request.getSource(), scopeProvider()).getCallTarget();
     }
 
     @SuppressWarnings("static-method")
@@ -107,7 +124,59 @@ public class TestDebugBuggyLanguage extends ProxyLanguage {
         }
     }
 
-    private static void throwBug(int v) {
+    @Override
+    protected Object getLanguageView(LanguageContext context, Object value) {
+        return new ProxyInteropObject.InteropWrapper(value) {
+            @Override
+            protected boolean hasLanguage() {
+                return true;
+            }
+
+            @Override
+            protected Class<? extends TruffleLanguage<?>> getLanguage() throws UnsupportedMessageException {
+                return ProxyLanguage.get(null).getClass();
+            }
+
+            @Override
+            protected boolean hasMetaObject() {
+                return true;
+            }
+
+            @Override
+            protected Object getMetaObject() throws UnsupportedMessageException {
+                return new MetaObject(delegate);
+            }
+
+            class MetaObject extends ProxyInteropObject.InteropWrapper {
+
+                MetaObject(Object v) {
+                    super(v);
+                }
+
+                @Override
+                protected boolean isMetaObject() {
+                    return true;
+                }
+
+                @Override
+                protected String getMetaSimpleName() throws UnsupportedMessageException {
+                    return delegate.getClass().getSimpleName();
+                }
+
+                @Override
+                protected String getMetaQualifiedName() throws UnsupportedMessageException {
+                    return delegate.getClass().getSimpleName();
+                }
+
+                @Override
+                protected Object toDisplayString(boolean allowSideEffects) {
+                    return Objects.toString(delegate);
+                }
+            }
+        };
+    }
+
+    static void throwBug(int v) {
         if (v == 1) {
             throw new IllegalStateException(Integer.toString(v));
         } else if (v == 2) {
@@ -120,13 +189,22 @@ public class TestDebugBuggyLanguage extends ProxyLanguage {
     private static final class TestRootNode extends RootNode {
 
         @Node.Child private TestStatementNode statement;
+        @Node.Child private TestStatementNode defaultScopeNode;
         private final SourceSection statementSection;
 
-        TestRootNode(TruffleLanguage<?> language, com.oracle.truffle.api.source.Source source) {
+        TestRootNode(TruffleLanguage<?> language, com.oracle.truffle.api.source.Source source, BiFunction<Node, Frame, Object> scopeProvider) {
             super(language);
             statementSection = source.createSection(1);
-            statement = new TestStatementNode(statementSection);
+            statement = scopeProvider != null ? new TestStatementScopedNode(statementSection, scopeProvider) : new TestStatementNode(statementSection);
+            defaultScopeNode = new TestStatementNode(statementSection);
             insert(statement);
+        }
+
+        Node getDefaultScopeNode() {
+            if (defaultScopeNode instanceof InstrumentableNode.WrapperNode) {
+                return ((InstrumentableNode.WrapperNode) defaultScopeNode).getDelegateNode();
+            }
+            return defaultScopeNode;
         }
 
         @Override
@@ -151,17 +229,17 @@ public class TestDebugBuggyLanguage extends ProxyLanguage {
 
         @CompilerDirectives.TruffleBoundary
         private void boundary(MaterializedFrame frame) {
-            FrameSlot slot = frame.getFrameDescriptor().findOrAddFrameSlot("a", FrameSlotKind.Int);
+            int slot = frame.getFrameDescriptor().findOrAddAuxiliarySlot("a");
             String text = statementSection.getCharacters().toString();
             int index = 0;
             while (!Character.isDigit(text.charAt(index))) {
                 index++;
             }
             int errNum = Integer.parseInt(text.substring(index));
-            frame.setInt(slot, errNum);
+            frame.setAuxiliarySlot(slot, errNum);
             TruffleObject obj = new ErrorObject(text.substring(0, index).trim(), errNum);
-            slot = frame.getFrameDescriptor().findOrAddFrameSlot("o", FrameSlotKind.Object);
-            frame.setObject(slot, obj);
+            slot = frame.getFrameDescriptor().findOrAddAuxiliarySlot("o");
+            frame.setAuxiliarySlot(slot, obj);
         }
 
         @Override
@@ -211,7 +289,33 @@ public class TestDebugBuggyLanguage extends ProxyLanguage {
 
     }
 
-    private static class ErrorObject extends ProxyInteropObject {
+    @ExportLibrary(NodeLibrary.class)
+    static class TestStatementScopedNode extends TestStatementNode {
+
+        private final BiFunction<Node, Frame, Object> scopeProvider;
+
+        TestStatementScopedNode(SourceSection sourceSection, BiFunction<Node, Frame, Object> scopeProvider) {
+            super(sourceSection);
+            this.scopeProvider = scopeProvider;
+        }
+
+        @ExportMessage
+        boolean hasScope(@SuppressWarnings("unused") Frame frame) {
+            return scopeProvider != null;
+        }
+
+        @ExportMessage
+        final Object getScope(Frame frame, @SuppressWarnings("unused") boolean nodeEnter) throws UnsupportedMessageException {
+            if (scopeProvider != null) {
+                return scopeProvider.apply(this, frame);
+            } else {
+                throw UnsupportedMessageException.create();
+            }
+        }
+    }
+
+    @ExportLibrary(InteropLibrary.class)
+    static final class ErrorObject implements TruffleObject {
 
         private final String error;
         private final int errNum;
@@ -221,28 +325,42 @@ public class TestDebugBuggyLanguage extends ProxyLanguage {
             this.errNum = errNum;
         }
 
-        @Override
-        public Object keys() throws UnsupportedMessageException {
+        @ExportMessage
+        boolean hasMembers() {
+            return true;
+        }
+
+        @ExportMessage
+        boolean isMemberInsertable(@SuppressWarnings("unused") String member) {
+            return false;
+        }
+
+        @ExportMessage
+        public Object getMembers(@SuppressWarnings("unused") boolean internal) {
             if ("KEYS".equals(error)) {
                 throwBug(errNum);
             }
             return new Keys();
         }
 
-        @Override
-        public int keyInfo(String key) {
-            if ("KEY_INFO".equals(error) && "A".equals(key)) {
+        @ExportMessage
+        boolean isMemberModifiable(String member) {
+            if ("KEY_INFO".equals(error) && "A".equals(member)) {
                 throwBug(errNum);
             }
-            if ("A".equals(key) || "B".equals(key)) {
-                return KeyInfo.READABLE | KeyInfo.MODIFIABLE;
-            } else {
-                return KeyInfo.NONE;
-            }
+            return "A".equals(member) || "B".equals(member);
         }
 
-        @Override
-        public Object read(String key) throws UnsupportedMessageException, UnknownIdentifierException {
+        @ExportMessage
+        boolean isMemberReadable(String member) {
+            if ("KEY_INFO".equals(error) && "A".equals(member)) {
+                throwBug(errNum);
+            }
+            return "A".equals(member) || "B".equals(member);
+        }
+
+        @ExportMessage
+        public Object readMember(String key) throws UnknownIdentifierException {
             if ("READ".equals(error) && "A".equals(key)) {
                 throwBug(errNum);
             }
@@ -251,23 +369,23 @@ public class TestDebugBuggyLanguage extends ProxyLanguage {
             } else if ("B".equals(key)) {
                 return 42;
             } else {
-                throw UnknownIdentifierException.raise(key);
+                throw UnknownIdentifierException.create(key);
             }
         }
 
-        @Override
-        public Object write(String key, Object value) throws UnsupportedMessageException, UnknownIdentifierException, UnsupportedTypeException {
+        @ExportMessage
+        public Object writeMember(String key, Object value) throws UnknownIdentifierException {
             if ("WRITE".equals(error) && "A".equals(key)) {
                 throwBug(errNum);
             }
             if ("A".equals(key) || "B".equals(key)) {
                 return value;
             } else {
-                throw UnknownIdentifierException.raise(key);
+                throw UnknownIdentifierException.create(key);
             }
         }
 
-        @Override
+        @ExportMessage
         public boolean isExecutable() {
             if ("CAN_EXECUTE".equals(error)) {
                 throwBug(errNum);
@@ -275,8 +393,8 @@ public class TestDebugBuggyLanguage extends ProxyLanguage {
             return true;
         }
 
-        @Override
-        public Object execute(Object[] args) throws UnsupportedTypeException, ArityException, UnsupportedMessageException {
+        @ExportMessage
+        public Object execute(@SuppressWarnings("unused") Object[] args) {
             if ("EXECUTE".equals(error)) {
                 throwBug(errNum);
             }
@@ -288,42 +406,40 @@ public class TestDebugBuggyLanguage extends ProxyLanguage {
             return "ErrorObject " + errNum + (error.isEmpty() ? "" : " " + error);
         }
 
-        private static class Keys extends ProxyInteropObject {
+        @ExportLibrary(InteropLibrary.class)
+        static class Keys implements TruffleObject {
 
-            @Override
-            public boolean hasSize() {
+            @ExportMessage
+            public boolean hasArrayElements() {
                 return true;
             }
 
-            @Override
-            public int getSize() {
-                return 2;
+            @ExportMessage
+            public long getArraySize() {
+                return 2L;
             }
 
-            @Override
-            public int keyInfo(Number key) {
-                if (key.intValue() == 0 || key.intValue() == 1) {
-                    return KeyInfo.READABLE;
-                } else {
-                    return KeyInfo.NONE;
-                }
+            @ExportMessage
+            public boolean isArrayElementReadable(long key) {
+                return key == 0 || key == 1;
             }
 
-            @Override
-            public Object read(Number key) throws UnsupportedMessageException, UnknownIdentifierException {
-                if (key.intValue() == 0) {
+            @ExportMessage
+            public Object readArrayElement(long key) throws InvalidArrayIndexException {
+                if (key == 0) {
                     return "A";
-                } else if (key.intValue() == 1) {
+                } else if (key == 1) {
                     return "B";
                 } else {
-                    throw UnknownIdentifierException.raise(key.toString());
+                    throw InvalidArrayIndexException.create(key);
                 }
             }
 
         }
     }
 
-    private static class TestTruffleException extends RuntimeException implements TruffleException {
+    @ExportLibrary(InteropLibrary.class)
+    static final class TestTruffleException extends AbstractTruffleException {
 
         private static final long serialVersionUID = 7653875618655878235L;
 
@@ -332,9 +448,54 @@ public class TestDebugBuggyLanguage extends ProxyLanguage {
         }
 
         @Override
-        public Node getLocation() {
-            return null;
+        public String toString() {
+            return getMessage();
         }
 
+        @ExportMessage
+        public boolean hasMetaObject() {
+            return true;
+        }
+
+        @ExportMessage
+        public Object getMetaObject() {
+            return new MetaObject();
+        }
+
+        @ExportMessage
+        Object toDisplayString(@SuppressWarnings("unused") boolean allowSideEffects) {
+            return getMessage();
+        }
+
+        @ExportLibrary(InteropLibrary.class)
+        static final class MetaObject implements TruffleObject {
+
+            @ExportMessage
+            boolean isMetaObject() {
+                return true;
+            }
+
+            @ExportMessage
+            String getMetaQualifiedName() {
+                return TestTruffleException.class.getName();
+            }
+
+            @ExportMessage
+            String getMetaSimpleName() {
+                return TestTruffleException.class.getSimpleName();
+            }
+
+            @ExportMessage
+            @SuppressWarnings("unused")
+            String toDisplayString(boolean allowSideEffects) {
+                return getMetaSimpleName();
+            }
+
+            @ExportMessage
+            boolean isMetaInstance(Object instance) {
+                return instance instanceof TestTruffleException;
+            }
+        }
     }
+
 }

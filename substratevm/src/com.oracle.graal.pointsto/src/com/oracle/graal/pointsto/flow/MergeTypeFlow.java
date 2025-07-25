@@ -24,14 +24,15 @@
  */
 package com.oracle.graal.pointsto.flow;
 
-import org.graalvm.compiler.nodes.ValueNode;
-import com.oracle.graal.pointsto.BigBang;
-import com.oracle.graal.pointsto.typestate.TypeState;
+import com.oracle.graal.pointsto.PointsToAnalysis;
+import com.oracle.graal.pointsto.meta.AnalysisType;
 
-public class MergeTypeFlow extends TypeFlow<ValueNode> {
+import jdk.vm.ci.code.BytecodePosition;
 
-    public MergeTypeFlow(ValueNode node) {
-        super(node, null);
+public class MergeTypeFlow extends TypeFlow<BytecodePosition> {
+
+    public MergeTypeFlow(BytecodePosition position, AnalysisType declaredType) {
+        super(position, declaredType);
     }
 
     public MergeTypeFlow(MergeTypeFlow original, MethodFlowsGraph methodFlows) {
@@ -39,18 +40,12 @@ public class MergeTypeFlow extends TypeFlow<ValueNode> {
     }
 
     @Override
-    public TypeFlow<ValueNode> copy(BigBang bb, MethodFlowsGraph methodFlows) {
+    public TypeFlow<BytecodePosition> copy(PointsToAnalysis bb, MethodFlowsGraph methodFlows) {
         return new MergeTypeFlow(this, methodFlows);
     }
 
     @Override
-    public boolean addState(BigBang bb, TypeState add) {
-        assert this.isClone();
-        return super.addState(bb, add);
-    }
-
-    @Override
     public String toString() {
-        return "MergeTypeFlow<" + getState() + ">";
+        return "MergeTypeFlow<" + getStateDescription() + ">";
     }
 }

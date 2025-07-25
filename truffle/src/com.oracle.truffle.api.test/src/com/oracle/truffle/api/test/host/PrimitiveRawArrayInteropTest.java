@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -48,11 +48,18 @@ import static org.junit.Assert.fail;
 import java.util.List;
 
 import org.graalvm.polyglot.PolyglotException;
+import org.junit.BeforeClass;
 import org.junit.Test;
 
 import com.oracle.truffle.api.interop.TruffleObject;
+import com.oracle.truffle.tck.tests.TruffleTestAssumptions;
 
 public class PrimitiveRawArrayInteropTest extends ProxyLanguageEnvTest {
+
+    @BeforeClass
+    public static void runWithWeakEncapsulationOnly() {
+        TruffleTestAssumptions.assumeWeakEncapsulation();
+    }
 
     private Object[] objArr;
     private byte[] byteArr;
@@ -281,7 +288,7 @@ public class PrimitiveRawArrayInteropTest extends ProxyLanguageEnvTest {
         assertEquals(msg, expected, v, 0.05);
     }
 
-    private static class SimulatedDeath extends ThreadDeath {
+    private static final class SimulatedDeath extends ThreadDeath {
         private static final long serialVersionUID = 1L;
 
         @Override

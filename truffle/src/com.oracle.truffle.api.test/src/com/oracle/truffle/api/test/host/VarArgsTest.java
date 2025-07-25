@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -42,31 +42,41 @@ package com.oracle.truffle.api.test.host;
 
 import static org.junit.Assert.assertEquals;
 
+import java.io.ByteArrayInputStream;
+import java.io.File;
+import java.io.InputStream;
+import java.nio.file.CopyOption;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.List;
 
 import org.junit.Assert;
+import org.junit.BeforeClass;
 import org.junit.Test;
 
-import com.oracle.truffle.api.interop.ForeignAccess;
 import com.oracle.truffle.api.interop.InteropException;
-import com.oracle.truffle.api.interop.Message;
+import com.oracle.truffle.api.interop.InteropLibrary;
 import com.oracle.truffle.api.interop.TruffleObject;
-import com.oracle.truffle.api.nodes.Node;
 import com.oracle.truffle.api.test.host.AsCollectionsTest.ListBasedTO;
+import com.oracle.truffle.tck.tests.TruffleTestAssumptions;
 
 public class VarArgsTest extends ProxyLanguageEnvTest {
+    private static final InteropLibrary INTEROP = InteropLibrary.getFactory().getUncached();
+
+    @BeforeClass
+    public static void runWithWeakEncapsulationOnly() {
+        TruffleTestAssumptions.assumeWeakEncapsulation();
+    }
 
     @Test
     public void testStringJoin1() throws InteropException {
         TruffleObject strClass = asTruffleHostSymbol(String.class);
 
-        TruffleObject join = (TruffleObject) ForeignAccess.sendRead(Message.READ.createNode(), strClass, "join");
+        TruffleObject join = (TruffleObject) INTEROP.readMember(strClass, "join");
         TruffleObject delimiter = asTruffleObject(" ");
         TruffleObject elements = asTruffleObject(new String[]{"Hello", "World"});
-        Object result = ForeignAccess.sendExecute(Message.EXECUTE.createNode(), join, new Object[]{delimiter, elements});
+        Object result = INTEROP.execute(join, new Object[]{delimiter, elements});
         Assert.assertEquals("Hello World", result);
     }
 
@@ -74,11 +84,11 @@ public class VarArgsTest extends ProxyLanguageEnvTest {
     public void testStringJoin2() throws InteropException {
         TruffleObject strClass = asTruffleHostSymbol(String.class);
 
-        TruffleObject join = (TruffleObject) ForeignAccess.sendRead(Message.READ.createNode(), strClass, "join");
+        TruffleObject join = (TruffleObject) INTEROP.readMember(strClass, "join");
         TruffleObject delimiter = asTruffleObject(" ");
         TruffleObject element1 = asTruffleObject("Hello");
         TruffleObject element2 = asTruffleObject("World");
-        Object result = ForeignAccess.sendExecute(Message.EXECUTE.createNode(), join, new Object[]{delimiter, element1, element2});
+        Object result = INTEROP.execute(join, new Object[]{delimiter, element1, element2});
         Assert.assertEquals("Hello World", result);
     }
 
@@ -86,14 +96,14 @@ public class VarArgsTest extends ProxyLanguageEnvTest {
     public void testStringEllipsis() throws InteropException {
         TruffleObject mainClass = asTruffleHostSymbol(Join.class);
 
-        TruffleObject ellipsis = (TruffleObject) ForeignAccess.sendRead(Message.READ.createNode(), mainClass, "stringEllipsis");
+        TruffleObject ellipsis = (TruffleObject) INTEROP.readMember(mainClass, "stringEllipsis");
         TruffleObject element1 = asTruffleObject("Hello");
         TruffleObject element2 = asTruffleObject("World");
-        Object result = ForeignAccess.sendExecute(Message.EXECUTE.createNode(), ellipsis, new Object[]{element1, element2});
+        Object result = INTEROP.execute(ellipsis, new Object[]{element1, element2});
         Assert.assertEquals("Hello World", result);
 
         TruffleObject elements = asTruffleObject(new String[]{"Hello", "World"});
-        result = ForeignAccess.sendExecute(Message.EXECUTE.createNode(), ellipsis, elements);
+        result = INTEROP.execute(ellipsis, elements);
         Assert.assertEquals("Hello World", result);
     }
 
@@ -101,42 +111,40 @@ public class VarArgsTest extends ProxyLanguageEnvTest {
     public void testCharSequenceEllipsis() throws InteropException {
         TruffleObject mainClass = asTruffleHostSymbol(Join.class);
 
-        TruffleObject ellipsis = (TruffleObject) ForeignAccess.sendRead(Message.READ.createNode(), mainClass, "charSequenceEllipsis");
+        TruffleObject ellipsis = (TruffleObject) INTEROP.readMember(mainClass, "charSequenceEllipsis");
         TruffleObject element1 = asTruffleObject("Hello");
         TruffleObject element2 = asTruffleObject("World");
-        Object result = ForeignAccess.sendExecute(Message.EXECUTE.createNode(), ellipsis, new Object[]{element1, element2});
+        Object result = INTEROP.execute(ellipsis, new Object[]{element1, element2});
         Assert.assertEquals("Hello World", result);
 
         TruffleObject elements = asTruffleObject(new String[]{"Hello", "World"});
-        result = ForeignAccess.sendExecute(Message.EXECUTE.createNode(), ellipsis, elements);
+        result = INTEROP.execute(ellipsis, elements);
         Assert.assertEquals("Hello World", result);
     }
 
     @Test
     public void testPathsGet() throws InteropException {
-        Node n = Message.INVOKE.createNode();
         TruffleObject paths = asTruffleHostSymbol(Paths.class);
         TruffleObject result;
-        result = (TruffleObject) ForeignAccess.sendInvoke(n, paths, "get", "dir");
+        result = (TruffleObject) INTEROP.invokeMember(paths, "get", "dir");
         assertEquals("dir", asJavaObject(Path.class, result).toString());
-        result = (TruffleObject) ForeignAccess.sendInvoke(n, paths, "get", "dir1", "dir2");
-        assertEquals("dir1/dir2", asJavaObject(Path.class, result).toString());
-        result = (TruffleObject) ForeignAccess.sendInvoke(n, paths, "get", "dir1", "dir2", "dir3");
-        assertEquals("dir1/dir2/dir3", asJavaObject(Path.class, result).toString());
-        result = (TruffleObject) ForeignAccess.sendInvoke(n, paths, "get", "dir1", asTruffleObject(new String[]{"dir2", "dir3"}));
-        assertEquals("dir1/dir2/dir3", asJavaObject(Path.class, result).toString());
+        result = (TruffleObject) INTEROP.invokeMember(paths, "get", "dir1", "dir2");
+        assertEquals(String.join(File.separator, "dir1", "dir2"), asJavaObject(Path.class, result).toString());
+        result = (TruffleObject) INTEROP.invokeMember(paths, "get", "dir1", "dir2", "dir3");
+        assertEquals(String.join(File.separator, "dir1", "dir2", "dir3"), asJavaObject(Path.class, result).toString());
+        result = (TruffleObject) INTEROP.invokeMember(paths, "get", "dir1", asTruffleObject(new String[]{"dir2", "dir3"}));
+        assertEquals(String.join(File.separator, "dir1", "dir2", "dir3"), asJavaObject(Path.class, result).toString());
     }
 
     @Test
     public void testOverloadedVarArgsPrimitive() throws InteropException {
-        Node n = Message.INVOKE.createNode();
         TruffleObject paths = asTruffleHostSymbol(Sum.class);
         Object result;
-        result = ForeignAccess.sendInvoke(n, paths, "sum", 10);
+        result = INTEROP.invokeMember(paths, "sum", 10);
         assertEquals("I", result);
-        result = ForeignAccess.sendInvoke(n, paths, "sum", 10, 20);
+        result = INTEROP.invokeMember(paths, "sum", 10, 20);
         assertEquals("DD", result);
-        result = ForeignAccess.sendInvoke(n, paths, "sum", 10, 20, 30);
+        result = INTEROP.invokeMember(paths, "sum", 10, 20, 30);
         assertEquals("I[I", result);
     }
 
@@ -144,17 +152,17 @@ public class VarArgsTest extends ProxyLanguageEnvTest {
     public void testGuestArray() throws InteropException {
         TruffleObject mainClass = asTruffleHostSymbol(Join.class);
 
-        TruffleObject ellipsis = (TruffleObject) ForeignAccess.sendRead(Message.READ.createNode(), mainClass, "stringEllipsis");
+        TruffleObject ellipsis = (TruffleObject) INTEROP.readMember(mainClass, "stringEllipsis");
         TruffleObject element1 = asTruffleObject("Hello");
         TruffleObject element2 = asTruffleObject("World");
-        Object result = ForeignAccess.sendExecute(Message.EXECUTE.createNode(), ellipsis, new ListBasedTO(Arrays.asList(element1, element2)));
+        Object result = INTEROP.execute(ellipsis, new ListBasedTO(Arrays.asList(element1, element2)));
         Assert.assertEquals("Hello World", result);
     }
 
     @Test
     public void testGuestArray2() throws InteropException {
-        TruffleObject sum = (TruffleObject) ForeignAccess.sendRead(Message.READ.createNode(), asTruffleHostSymbol(Sum.class), "sum");
-        Object result = ForeignAccess.sendExecute(Message.EXECUTE.createNode(), sum, 10, new ListBasedTO(Arrays.asList(20, 30)));
+        TruffleObject sum = (TruffleObject) INTEROP.readMember(asTruffleHostSymbol(Sum.class), "sum");
+        Object result = INTEROP.execute(sum, 10, new ListBasedTO(Arrays.asList(20, 30)));
         Assert.assertEquals("I[I", result);
     }
 
@@ -163,20 +171,53 @@ public class VarArgsTest extends ProxyLanguageEnvTest {
         for (Container<?> c : new Container<?>[]{new GenericContainer<>(), new GenericContainer2<>()}) {
             TruffleObject container = asTruffleObject(c);
             Object result;
-            result = ForeignAccess.sendExecute(Message.INVOKE.createNode(), container, "withPorts", 80);
+            result = INTEROP.invokeMember(container, "withPorts", 80);
             Assert.assertEquals(container, result);
-            result = ForeignAccess.sendExecute(Message.INVOKE.createNode(), container, "getPorts");
+            result = INTEROP.invokeMember(container, "getPorts");
             Assert.assertEquals(Arrays.asList(80), asJavaObject(List.class, (TruffleObject) result));
 
-            result = ForeignAccess.sendExecute(Message.INVOKE.createNode(), container, "withPorts", new ListBasedTO(Arrays.asList(80)));
+            result = INTEROP.invokeMember(container, "withPorts", new ListBasedTO(Arrays.asList(80)));
             Assert.assertEquals(container, result);
-            result = ForeignAccess.sendExecute(Message.INVOKE.createNode(), container, "getPorts");
+            result = INTEROP.invokeMember(container, "getPorts");
             Assert.assertEquals(Arrays.asList(80), asJavaObject(List.class, (TruffleObject) result));
 
-            result = ForeignAccess.sendExecute(Message.INVOKE.createNode(), container, "withPorts", asTruffleObject(new int[]{80}));
+            result = INTEROP.invokeMember(container, "withPorts", asTruffleObject(new int[]{80}));
             Assert.assertEquals(container, result);
-            result = ForeignAccess.sendExecute(Message.INVOKE.createNode(), container, "getPorts");
+            result = INTEROP.invokeMember(container, "getPorts");
             Assert.assertEquals(Arrays.asList(80), asJavaObject(List.class, (TruffleObject) result));
+        }
+    }
+
+    /*
+     * Test for GR-34985.
+     */
+    @Test
+    public void testPreferVarargsWithExactSignature() throws InteropException {
+        Object stream = asTruffleObject(new ByteArrayInputStream(new byte[0]));
+        Object path = asTruffleObject(Paths.get("/tmp/a"));
+
+        Object container = asTruffleObject(new PreferVarargsWithExactSignature());
+        assertEquals("copy1_2", INTEROP.invokeMember(container, "copy1", path, stream));
+        assertEquals("copy2_1", INTEROP.invokeMember(container, "copy2", path, stream));
+    }
+
+    @SuppressWarnings("unused")
+    public static class PreferVarargsWithExactSignature {
+
+        public String copy1(Path source, InputStream out, CopyOption... options) {
+            return "copy1_1";
+        }
+
+        public String copy1(Path source, InputStream out) {
+            return "copy1_2";
+        }
+
+        public String copy2(Path source, InputStream out, CopyOption... options) {
+            return "copy2_1";
+        }
+
+        public String copy2(InputStream source, InputStream out) {
+            return "copy2_2";
         }
     }
 

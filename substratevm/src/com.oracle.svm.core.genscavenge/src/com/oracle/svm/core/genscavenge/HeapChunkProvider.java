@@ -24,41 +24,43 @@
  */
 package com.oracle.svm.core.genscavenge;
 
-import org.graalvm.compiler.api.replacements.Fold;
+import static com.oracle.svm.core.Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_CODE;
+
+import org.graalvm.nativeimage.Platform;
+import org.graalvm.nativeimage.Platforms;
 import org.graalvm.word.Pointer;
 import org.graalvm.word.UnsignedWord;
 import org.graalvm.word.WordBase;
-import org.graalvm.word.WordFactory;
 
 import com.oracle.svm.core.FrameAccess;
-import com.oracle.svm.core.MemoryWalker;
-import com.oracle.svm.core.SubstrateOptions;
-import com.oracle.svm.core.annotate.AlwaysInline;
-import com.oracle.svm.core.annotate.Uninterruptible;
+import com.oracle.svm.core.Uninterruptible;
 import com.oracle.svm.core.genscavenge.AlignedHeapChunk.AlignedHeader;
 import com.oracle.svm.core.genscavenge.HeapChunk.Header;
 import com.oracle.svm.core.genscavenge.UnalignedHeapChunk.UnalignedHeader;
 import com.oracle.svm.core.jdk.UninterruptibleUtils;
+import com.oracle.svm.core.jdk.UninterruptibleUtils.AtomicUnsigned;
 import com.oracle.svm.core.log.Log;
-import com.oracle.svm.core.os.CommittedMemoryProvider;
+import com.oracle.svm.core.os.ChunkBasedCommittedMemoryProvider;
+import com.oracle.svm.core.thread.VMOperation;
 import com.oracle.svm.core.thread.VMThreads;
-import com.oracle.svm.core.util.AtomicUnsigned;
+import com.oracle.svm.core.util.UnsignedUtils;
+
+import jdk.graal.compiler.word.Word;
 
 /**
  * Allocates and frees the memory for aligned and unaligned heap chunks. The methods are
  * thread-safe, so no locking is necessary when calling them.
  *
- * Memory for aligned chunks is not immediately released to the OS. Up to
- * {@link HeapPolicy#getMinimumHeapSize()} chunks are saved in an unused chunk list. Memory for
- * unaligned chunks is released immediately.
+ * Memory for aligned chunks is not immediately released to the OS. Chunks with a total of up to
+ * {@link CollectionPolicy#getMaximumFreeAlignedChunksSize()} bytes are saved in an unused chunk
+ * list. Memory for unaligned chunks is released immediately.
  */
-class HeapChunkProvider {
-
+final class HeapChunkProvider {
     /**
      * The head of the linked list of unused aligned chunks. Chunks are chained using
-     * {@link Header#getNext()}.
+     * {@link HeapChunk#getNext}.
      */
-    private final UninterruptibleUtils.AtomicPointer<AlignedHeader> unusedAlignedChunks;
+    private final UninterruptibleUtils.AtomicPointer<AlignedHeader> unusedAlignedChunks = new UninterruptibleUtils.AtomicPointer<>();
 
     /**
      * The number of chunks in the {@link #unusedAlignedChunks} list.
@@ -67,157 +69,110 @@ class HeapChunkProvider {
      * head}, but this is OK because we only need the number of chunks for policy code (to avoid
      * running down the list and counting the number of chunks).
      */
-    private final AtomicUnsigned bytesInUnusedAlignedChunks;
+    private final AtomicUnsigned numUnusedAlignedChunks = new AtomicUnsigned();
 
-    /**
-     * The time of the first allocation, as the basis for computing deltas.
-     *
-     * We do not care if we race on initializing the field, since the times will be similar in that
-     * case anyway.
-     */
-    private long firstAllocationTime;
-
-    protected HeapChunkProvider() {
-        unusedAlignedChunks = new UninterruptibleUtils.AtomicPointer<>();
-        bytesInUnusedAlignedChunks = new AtomicUnsigned();
+    @Platforms(Platform.HOSTED_ONLY.class)
+    HeapChunkProvider() {
     }
 
-    /**
-     * Get the singleton instance, which is stored in {@link HeapImpl#chunkProvider}.
-     */
-    @Fold
-    protected static HeapChunkProvider get() {
-        return HeapImpl.getHeapImpl().chunkProvider;
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public UnsignedWord getBytesInUnusedChunks() {
+        return numUnusedAlignedChunks.get().multiply(HeapParameters.getAlignedHeapChunkSize());
     }
 
-    @AlwaysInline("Remove all logging when noopLog is returned by this method")
-    private static Log log() {
-        return Log.noopLog();
-    }
-
-    /** Throw the pre-allocated singleton instance to indicate failure from an Allocator method. */
-    static final class AllocatorOutOfMemoryError extends OutOfMemoryError {
-
-        /** Every Error should have one of these. */
-        private static final long serialVersionUID = -6391446900635004964L;
-
-        /** A pre-allocated singleton instance. */
-        private static final AllocatorOutOfMemoryError SINGLETON = new AllocatorOutOfMemoryError();
-
-        /** Private constructor because there is just the singleton instance. */
-        private AllocatorOutOfMemoryError() {
-            super();
-        }
-
-        /** Throw the singleton error, maybe with a runtime (but allocation-free!) message. */
-        static Error throwError(String message) {
-            /* Maybe log the message and throw the error. */
-            Log.noopLog().string("[Allocator.OutOfMemoryError.throwError:  message: ").string(message).string("]").newline();
-            throw SINGLETON;
-        }
-
-    }
-
-    /**
-     * Produce a new AlignedHeapChunk, either from the free list or from the operating system.
-     */
+    /** Acquire a new AlignedHeapChunk, either from the free list or from the operating system. */
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     AlignedHeader produceAlignedChunk() {
-        UnsignedWord chunkSize = HeapPolicy.getAlignedHeapChunkSize();
-        log().string("[HeapChunkProvider.produceAlignedChunk  chunk size: ").unsigned(chunkSize).newline();
-
+        UnsignedWord chunkSize = HeapParameters.getAlignedHeapChunkSize();
         AlignedHeader result = popUnusedAlignedChunk();
-        log().string("  unused chunk: ").hex(result).newline();
-
         if (result.isNull()) {
             /* Unused list was empty, need to allocate memory. */
-            noteFirstAllocationTime();
-            result = (AlignedHeader) CommittedMemoryProvider.get().allocate(chunkSize, HeapPolicy.getAlignedHeapChunkAlignment(), false);
-            if (result.isNull()) {
-                throw AllocatorOutOfMemoryError.throwError("No virtual memory for aligned chunk");
-            }
-            log().string("  new chunk: ").hex(result).newline();
-
-            initializeChunk(result, chunkSize);
-            resetAlignedHeapChunk(result);
+            result = (AlignedHeader) ChunkBasedCommittedMemoryProvider.get().allocateAlignedChunk(chunkSize, HeapParameters.getAlignedHeapChunkAlignment());
+            AlignedHeapChunk.initialize(result, chunkSize);
         }
-        assert result.getTop().equal(AlignedHeapChunk.getAlignedHeapChunkStart(result));
-        assert result.getEnd().equal(HeapChunk.asPointer(result).add(chunkSize));
+        assert HeapChunk.getTopOffset(result).equal(AlignedHeapChunk.getObjectsStartOffset());
+        assert HeapChunk.getEndOffset(result).equal(chunkSize);
 
-        if (HeapPolicy.getZapProducedHeapChunks()) {
-            zap(result, HeapPolicy.getProducedHeapChunkZapWord());
+        if (HeapParameters.getZapProducedHeapChunks()) {
+            zap(result, HeapParameters.getProducedHeapChunkZapWord());
         }
-
-        HeapPolicy.bytesAllocatedSinceLastCollection.addAndGet(chunkSize);
-
-        log().string("  result chunk: ").hex(result).string("  ]").newline();
         return result;
     }
 
-    /** Recycle an AlignedHeapChunk, either to the free list or back to the operating system. */
-    void consumeAlignedChunk(AlignedHeader chunk) {
-        log().string("[HeapChunkProvider.consumeAlignedChunk  chunk: ").hex(chunk).newline();
+    void freeExcessAlignedChunks() {
+        assert VMOperation.isGCInProgress();
+        consumeAlignedChunks(Word.nullPointer(), false);
+    }
 
-        /* Policy: Only keep a limited number of unused chunks. */
-        if (keepAlignedChunk()) {
-            cleanAlignedChunk(chunk);
-            pushUnusedAlignedChunk(chunk);
+    /**
+     * Releases a list of AlignedHeapChunks, either to the free list or back to the operating
+     * system. This method may only be called after the chunks were already removed from the spaces.
+     */
+    void consumeAlignedChunks(AlignedHeader firstChunk, boolean keepAll) {
+        assert VMOperation.isGCInProgress();
+        assert firstChunk.isNull() || HeapChunk.getPrevious(firstChunk).isNull() : "prev must be null";
+
+        UnsignedWord maxChunksToKeep = Word.zero();
+        UnsignedWord unusedChunksToFree = Word.zero();
+        if (keepAll) {
+            maxChunksToKeep = UnsignedUtils.MAX_VALUE;
         } else {
-            log().string("  release memory to the OS").newline();
-            freeAlignedChunk(chunk);
+            UnsignedWord freeListBytes = getBytesInUnusedChunks();
+            UnsignedWord reserveBytes = GCImpl.getPolicy().getMaximumFreeAlignedChunksSize();
+            UnsignedWord maxHeapFree = Word.unsigned(SerialGCOptions.MaxHeapFree.getValue());
+            if (maxHeapFree.aboveThan(0)) {
+                reserveBytes = UnsignedUtils.min(reserveBytes, maxHeapFree);
+            }
+            if (freeListBytes.belowThan(reserveBytes)) {
+                maxChunksToKeep = reserveBytes.subtract(freeListBytes).unsignedDivide(HeapParameters.getAlignedHeapChunkSize());
+            } else {
+                unusedChunksToFree = freeListBytes.subtract(reserveBytes).unsignedDivide(HeapParameters.getAlignedHeapChunkSize());
+            }
         }
-        log().string("  ]").newline();
+
+        // Potentially keep some chunks in the free list for quicker allocation, free the rest
+        AlignedHeader cur = firstChunk;
+        while (cur.isNonNull() && maxChunksToKeep.aboveThan(0)) {
+            AlignedHeader next = HeapChunk.getNext(cur);
+            cleanAlignedChunk(cur);
+            pushUnusedAlignedChunk(cur);
+
+            maxChunksToKeep = maxChunksToKeep.subtract(1);
+            cur = next;
+        }
+        freeAlignedChunkList(cur);
+
+        // Release chunks from the free list to the operating system when spaces shrink
+        freeUnusedAlignedChunksAtSafepoint(unusedChunksToFree);
     }
 
-    /** Should I keep another aligned chunk on the free list? */
-    private boolean keepAlignedChunk() {
-        final Log trace = Log.noopLog().string("[HeapChunkProvider.keepAlignedChunk:");
-        final UnsignedWord minimumHeapSize = HeapPolicy.getMinimumHeapSize();
-        final UnsignedWord heapChunkBytes = HeapImpl.getHeapImpl().getUsedChunkBytes();
-        final UnsignedWord unusedChunkBytes = bytesInUnusedAlignedChunks.get();
-        final UnsignedWord bytesInUse = heapChunkBytes.add(unusedChunkBytes);
-        /* If I am under the minimum heap size, then I can keep this chunk. */
-        final boolean result = bytesInUse.belowThan(minimumHeapSize);
-        trace
-                        .string("  minimumHeapSize: ").unsigned(minimumHeapSize)
-                        .string("  heapChunkBytes: ").unsigned(heapChunkBytes)
-                        .string("  unusedBytes: ").unsigned(unusedChunkBytes)
-                        .string("  bytesInUse: ").unsigned(bytesInUse)
-                        .string("  returns: ").bool(result)
-                        .string(" ]").newline();
-        return result;
-    }
-
-    /** Clean a chunk before putting it on a free list. */
     private static void cleanAlignedChunk(AlignedHeader alignedChunk) {
-        resetAlignedHeapChunk(alignedChunk);
-        if (HeapPolicy.getZapConsumedHeapChunks()) {
-            zap(alignedChunk, HeapPolicy.getConsumedHeapChunkZapWord());
+        assert VMOperation.isGCInProgress();
+        AlignedHeapChunk.reset(alignedChunk);
+        if (HeapParameters.getZapConsumedHeapChunks()) {
+            zap(alignedChunk, HeapParameters.getConsumedHeapChunkZapWord());
         }
     }
 
     /**
      * Push a chunk to the global linked list of unused chunks.
      * <p>
-     * This method is <em>not</em> atomic. It only runs when the {@link VMThreads#THREAD_MUTEX} is
-     * held (or the virtual machine is single-threaded). However it must not be allowed to compete
-     * with pops from the global free-list, because it might cause them an ABA problem. Pushing is
-     * only used during garbage collection, so making popping uninterruptible prevents simultaneous
-     * pushing and popping.
+     * This method is <em>not</em> atomic. It only runs when the VMThreads.THREAD_MUTEX is held (or
+     * the virtual machine is single-threaded). However it must not be allowed to compete with pops
+     * from the global free-list, because it might cause them an ABA problem. Pushing is only used
+     * during garbage collection, so making popping uninterruptible prevents simultaneous pushing
+     * and popping.
      *
      * Note the asymmetry with {@link #popUnusedAlignedChunk()}, which does not use a global free
      * list.
      */
     private void pushUnusedAlignedChunk(AlignedHeader chunk) {
-        if (SubstrateOptions.MultiThreaded.getValue()) {
-            VMThreads.THREAD_MUTEX.assertIsLocked("Should hold the lock when pushing to the global list.");
-        }
-        log().string("  old list top: ").hex(unusedAlignedChunks.get()).string("  list bytes ").signed(bytesInUnusedAlignedChunks.get()).newline();
+        assert VMOperation.isGCInProgress();
+        VMThreads.guaranteeOwnsThreadMutex("Should hold the lock when pushing to the global list.");
 
-        chunk.setNext(unusedAlignedChunks.get());
+        HeapChunk.setNext(chunk, unusedAlignedChunks.get());
         unusedAlignedChunks.set(chunk);
-        bytesInUnusedAlignedChunks.addAndGet(HeapPolicy.getAlignedHeapChunkSize());
-
-        log().string("  new list top: ").hex(unusedAlignedChunks.get()).string("  list bytes ").signed(bytesInUnusedAlignedChunks.get()).newline();
+        numUnusedAlignedChunks.addAndGet(Word.unsigned(1));
     }
 
     /**
@@ -228,21 +183,14 @@ class HeapChunkProvider {
      * but it is <em>not</em> safe with respect to competing pushes. Since pushes can happen during
      * garbage collections, I avoid the ABA problem by making the kernel of this method
      * uninterruptible so it can not be interrupted by a safepoint.
-     *
-     * Note the asymmetry with {@link #popUnusedAlignedChunk()}, which does not use a global free
-     * list.
      */
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     private AlignedHeader popUnusedAlignedChunk() {
-        log().string("  old list top: ").hex(unusedAlignedChunks.get()).string("  list bytes ").signed(bytesInUnusedAlignedChunks.get()).newline();
-
         AlignedHeader result = popUnusedAlignedChunkUninterruptibly();
         if (result.isNull()) {
-            /* Unused list is empty. */
-            return WordFactory.nullPointer();
+            return Word.nullPointer();
         } else {
-            /* Successfully popped an unused chunk from the list. */
-            bytesInUnusedAlignedChunks.subtractAndGet(HeapPolicy.getAlignedHeapChunkSize());
-            log().string("  new list top: ").hex(unusedAlignedChunks.get()).string("  list bytes ").signed(bytesInUnusedAlignedChunks.get()).newline();
+            numUnusedAlignedChunks.subtractAndGet(Word.unsigned(1));
             return result;
         }
     }
@@ -250,170 +198,90 @@ class HeapChunkProvider {
     @Uninterruptible(reason = "Must not be interrupted by competing pushes.")
     private AlignedHeader popUnusedAlignedChunkUninterruptibly() {
         while (true) {
-            /* Sample the head of the list of unused chunks. */
             AlignedHeader result = unusedAlignedChunks.get();
             if (result.isNull()) {
-                /* Unused list is empty. */
-                return WordFactory.nullPointer();
+                return Word.nullPointer();
             } else {
-                /* Sample the next pointer. */
-                AlignedHeader next = result.getNext();
-                /* Install next as the head of the list of unused chunks. */
+                AlignedHeader next = HeapChunk.getNext(result);
                 if (unusedAlignedChunks.compareAndSet(result, next)) {
-                    /* Successfully popped an unused chunk from the list. */
-                    result.setNext(WordFactory.nullPointer());
+                    HeapChunk.setNext(result, Word.nullPointer());
                     return result;
                 }
             }
         }
     }
 
-    /**
-     * Produce an UnalignedHeapChunk from the operating system.
-     */
+    private void freeUnusedAlignedChunksAtSafepoint(UnsignedWord count) {
+        assert VMOperation.isGCInProgress();
+        if (count.equal(0)) {
+            return;
+        }
+
+        AlignedHeader chunk = unusedAlignedChunks.get();
+        UnsignedWord released = Word.zero();
+        while (chunk.isNonNull() && released.belowThan(count)) {
+            AlignedHeader next = HeapChunk.getNext(chunk);
+            freeAlignedChunk(chunk);
+            chunk = next;
+            released = released.add(1);
+        }
+        unusedAlignedChunks.set(chunk);
+        numUnusedAlignedChunks.subtractAndGet(released);
+    }
+
+    /** Acquire an UnalignedHeapChunk from the operating system. */
+    @SuppressWarnings("static-method")
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
     UnalignedHeader produceUnalignedChunk(UnsignedWord objectSize) {
         UnsignedWord chunkSize = UnalignedHeapChunk.getChunkSizeForObject(objectSize);
-        log().string("[HeapChunkProvider.produceUnalignedChunk  objectSize: ").unsigned(objectSize).string("  chunkSize: ").hex(chunkSize).newline();
 
-        noteFirstAllocationTime();
-        UnalignedHeader result = (UnalignedHeader) CommittedMemoryProvider.get().allocate(chunkSize, CommittedMemoryProvider.UNALIGNED, false);
-        if (result.isNull()) {
-            throw AllocatorOutOfMemoryError.throwError("No virtual memory for unaligned chunk");
-        }
-
-        initializeChunk(result, chunkSize);
-        resetUnalignedChunk(result);
+        UnalignedHeader result = (UnalignedHeader) ChunkBasedCommittedMemoryProvider.get().allocateUnalignedChunk(chunkSize);
+        UnalignedHeapChunk.initialize(result, chunkSize, objectSize);
         assert objectSize.belowOrEqual(HeapChunk.availableObjectMemory(result)) : "UnalignedHeapChunk insufficient for requested object";
 
-        if (HeapPolicy.getZapProducedHeapChunks()) {
-            zap(result, HeapPolicy.getProducedHeapChunkZapWord());
+        /* Avoid zapping if unaligned chunks are pre-zeroed. */
+        if (!ChunkBasedCommittedMemoryProvider.get().areUnalignedChunksZeroed() && HeapParameters.getZapProducedHeapChunks()) {
+            zap(result, HeapParameters.getProducedHeapChunkZapWord());
         }
-
-        HeapPolicy.bytesAllocatedSinceLastCollection.addAndGet(chunkSize);
-
-        log().string("  returns ").hex(result).string("  ]").newline();
         return result;
     }
 
-    /**
-     * Recycle an UnalignedHeapChunk back to the operating system. They are never recycled to a free
-     * list.
-     */
-    void consumeUnalignedChunk(UnalignedHeader chunk) {
-        final UnsignedWord chunkSize = unalignedChunkSize(chunk);
-        log().string("[HeapChunkProvider.consumeUnalignedChunk  chunk: ").hex(chunk).string("  chunkSize: ").hex(chunkSize).newline();
-
-        freeUnalignedChunk(chunk);
-
-        log().string(" ]").newline();
-    }
-
-    /** Initialize the immutable state of a chunk. */
-    private static void initializeChunk(Header<?> that, UnsignedWord chunkSize) {
-        that.setEnd(HeapChunk.asPointer(that).add(chunkSize));
-    }
-
-    /** Reset the mutable state of a chunk. */
-    private static void resetChunkHeader(Header<?> chunk, Pointer objectsStart) {
-        chunk.setTop(objectsStart);
-        chunk.setPinned(false);
-        chunk.setSpace(null);
-        chunk.setNext(WordFactory.nullPointer());
-        chunk.setPrevious(WordFactory.nullPointer());
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
+    public static boolean areUnalignedChunksZeroed() {
+        return ChunkBasedCommittedMemoryProvider.get().areUnalignedChunksZeroed();
     }
 
     /**
-     * Reset just the header of an aligned heap chunk. Consider
-     * {@link #resetAlignedHeapChunk(AlignedHeader)}.
+     * Releases a list of UnalignedHeapChunks back to the operating system. They are never recycled
+     * to a free list.
      */
-    static void resetAlignedHeader(AlignedHeader alignedChunk) {
-        resetChunkHeader(alignedChunk, AlignedHeapChunk.getAlignedHeapChunkStart(alignedChunk));
+    static void consumeUnalignedChunks(UnalignedHeader firstChunk) {
+        assert VMOperation.isGCInProgress();
+        freeUnalignedChunkList(firstChunk);
     }
 
-    private static void resetAlignedHeapChunk(AlignedHeader chunk) {
-        resetChunkHeader(chunk, AlignedHeapChunk.getAlignedHeapChunkStart(chunk));
-
-        /* Initialize the space for the card remembered set table. */
-        CardTable.cleanTableToPointer(AlignedHeapChunk.getCardTableStart(chunk), AlignedHeapChunk.getCardTableLimit(chunk));
-        /* Initialize the space for the first object table. */
-        FirstObjectTable.initializeTableToPointer(AlignedHeapChunk.getFirstObjectTableStart(chunk), AlignedHeapChunk.getFirstObjectTableLimit(chunk));
-    }
-
-    private static void resetUnalignedChunk(UnalignedHeader result) {
-        resetChunkHeader(result, UnalignedHeapChunk.getUnalignedStart(result));
-
-        /* Initialize the space for the card remembered set table. */
-        CardTable.cleanTableToPointer(UnalignedHeapChunk.getCardTableStart(result), UnalignedHeapChunk.getCardTableLimit(result));
-    }
-
-    /** Write the given value over all the Object memory in the chunk. */
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     private static void zap(Header<?> chunk, WordBase value) {
-        Pointer start = chunk.getTop();
-        Pointer limit = chunk.getEnd();
-        log().string("  zap chunk: ").hex(chunk).string("  start: ").hex(start).string("  limit: ").hex(limit).string("  value: ").hex(value).newline();
+        Pointer start = HeapChunk.getTopPointer(chunk);
+        Pointer limit = HeapChunk.getEndPointer(chunk);
         for (Pointer p = start; p.belowThan(limit); p = p.add(FrameAccess.wordSize())) {
             p.writeWord(0, value);
         }
     }
 
-    protected Log report(Log log, boolean traceHeapChunks) {
-        log.string("[Unused:").indent(true);
-        log.string("aligned: ").signed(bytesInUnusedAlignedChunks.get())
-                        .string("/")
-                        .signed(bytesInUnusedAlignedChunks.get().unsignedDivide(HeapPolicy.getAlignedHeapChunkSize()));
-        if (traceHeapChunks) {
-            if (unusedAlignedChunks.get().isNonNull()) {
-                log.newline().string("aligned chunks:").redent(true);
-                for (AlignedHeapChunk.AlignedHeader aChunk = unusedAlignedChunks.get(); aChunk.isNonNull(); aChunk = aChunk.getNext()) {
-                    log.newline().hex(aChunk)
-                                    .string(" (").hex(AlignedHeapChunk.getAlignedHeapChunkStart(aChunk)).string("-").hex(aChunk.getTop()).string(")");
-                }
-                log.redent(false);
-            }
-        }
-        log.redent(false).string("]");
-        return log;
+    void logFreeChunks(Log log) {
+        HeapChunkLogging.logChunks(log, unusedAlignedChunks.get(), "F", false);
     }
 
-    boolean walkHeapChunks(MemoryWalker.Visitor visitor) {
-        boolean continueVisiting = true;
-        MemoryWalker.HeapChunkAccess<AlignedHeapChunk.AlignedHeader> access = AlignedHeapChunk.getMemoryWalkerAccess();
-        for (AlignedHeapChunk.AlignedHeader aChunk = unusedAlignedChunks.get(); continueVisiting && aChunk.isNonNull(); aChunk = aChunk.getNext()) {
-            continueVisiting = visitor.visitHeapChunk(aChunk, access);
-        }
-        return continueVisiting;
-    }
-
-    private void noteFirstAllocationTime() {
-        if (firstAllocationTime == 0L) {
-            firstAllocationTime = System.nanoTime();
-        }
-    }
-
-    static long getFirstAllocationTime() {
-        return get().firstAllocationTime;
-    }
-
-    boolean slowlyFindPointer(Pointer p) {
-        for (AlignedHeader chunk = unusedAlignedChunks.get(); chunk.isNonNull(); chunk = chunk.getNext()) {
-            Pointer chunkPtr = HeapChunk.asPointer(chunk);
-            if (p.aboveOrEqual(chunkPtr) && p.belowThan(chunkPtr.add(HeapPolicy.getAlignedHeapChunkSize()))) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /** Return all allocated virtual memory chunks to VirtualMemoryProvider. */
     @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
-    public final void tearDown() {
+    void tearDown() {
         freeAlignedChunkList(unusedAlignedChunks.get());
     }
 
     @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     static void freeAlignedChunkList(AlignedHeader first) {
         for (AlignedHeader chunk = first; chunk.isNonNull();) {
-            AlignedHeader next = chunk.getNext();
+            AlignedHeader next = HeapChunk.getNext(chunk);
             freeAlignedChunk(chunk);
             chunk = next;
         }
@@ -422,7 +290,7 @@ class HeapChunkProvider {
     @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     static void freeUnalignedChunkList(UnalignedHeader first) {
         for (UnalignedHeader chunk = first; chunk.isNonNull();) {
-            UnalignedHeader next = chunk.getNext();
+            UnalignedHeader next = HeapChunk.getNext(chunk);
             freeUnalignedChunk(chunk);
             chunk = next;
         }
@@ -430,16 +298,16 @@ class HeapChunkProvider {
 
     @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     private static void freeAlignedChunk(AlignedHeader chunk) {
-        CommittedMemoryProvider.get().free(chunk, HeapPolicy.getAlignedHeapChunkSize(), HeapPolicy.getAlignedHeapChunkAlignment(), false);
+        ChunkBasedCommittedMemoryProvider.get().freeAlignedChunk(chunk, HeapParameters.getAlignedHeapChunkSize(), HeapParameters.getAlignedHeapChunkAlignment());
     }
 
     @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     private static void freeUnalignedChunk(UnalignedHeader chunk) {
-        CommittedMemoryProvider.get().free(chunk, unalignedChunkSize(chunk), CommittedMemoryProvider.UNALIGNED, false);
+        ChunkBasedCommittedMemoryProvider.get().freeUnalignedChunk(chunk, unalignedChunkSize(chunk));
     }
 
     @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     private static UnsignedWord unalignedChunkSize(UnalignedHeader chunk) {
-        return chunk.getEnd().subtract(HeapChunk.asPointer(chunk));
+        return HeapChunk.getEndOffset(chunk);
     }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2014, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -46,8 +46,8 @@ import org.graalvm.word.ComparableWord;
  * A pointer which is relocated when the native image is loaded at runtime. Relocation entries are
  * created for such pointers in the native image. As a consequence, the value of a
  * {@link RelocatedPointer} is not known at native image generation.
- * 
- * @since 1.0
+ *
+ * @since 19.0
  */
 public interface RelocatedPointer extends ComparableWord {
 }

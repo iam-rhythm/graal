@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -41,11 +41,11 @@
 
 /*
  @ApiInfo(
- group="Graal SDK"
+ group="Polyglot"
  )
  */
 /**
- * The Graal-SDK polyglot API allows to embed Graal languages in Java applications.
+ * The GraalVM SDK polyglot API allows to embed Graal languages in Java applications.
  * <p>
  * To get started quickly create a new {@link org.graalvm.polyglot.Context} using
  * {@link org.graalvm.polyglot.Context#create(String...)} and then evaluate guest language code
@@ -57,6 +57,6 @@
  * examples on how to use this API.
  *
  * @see org.graalvm.polyglot.Context For an overview over the features the polyglot API provides.
- * @since 1.0
+ * @since 19.0
  */
 package org.graalvm.polyglot;

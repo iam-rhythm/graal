@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,6 +40,7 @@
  */
 package com.oracle.truffle.api.instrumentation;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
 
@@ -48,6 +49,8 @@ import com.oracle.truffle.api.nodes.Node;
 import com.oracle.truffle.api.nodes.NodeUtil;
 import com.oracle.truffle.api.nodes.NodeVisitor;
 import com.oracle.truffle.api.source.SourceSection;
+
+import static com.oracle.truffle.api.instrumentation.NearestNodesCollector.Position;
 
 /**
  * Implements the default logic of searching for the nearest {@link Node node} to the given source
@@ -60,7 +63,7 @@ import com.oracle.truffle.api.source.SourceSection;
  * {@link InstrumentableNode#findNearestNodeAt(int, Set)} needs to be implemented, possibly with
  * logic in this class applied to the language logical AST nodes.
  */
-class DefaultNearestNodeSearch {
+final class DefaultNearestNodeSearch {
 
     /**
      * We have a source offset (the character index) and a context node given. The offset is in
@@ -81,47 +84,40 @@ class DefaultNearestNodeSearch {
      * </ul>
      */
     static Node findNearestNodeAt(int offset, Node contextNode, Set<Class<? extends Tag>> tags) {
+        Position position = new Position(-1, -1, offset);
+        return findNearestNodeAt(position, contextNode, tags);
+    }
+
+    static Node findNearestNodeAt(int line, int column, Node contextNode, Set<Class<? extends Tag>> tags) {
+        Position position = new Position(line, column, -1);
+        return findNearestNodeAt(position, contextNode, tags);
+    }
+
+    private static Node findNearestNodeAt(Position position, Node contextNode, Set<Class<? extends Tag>> tags) {
         Node node = (Node) ((InstrumentableNode) contextNode).materializeInstrumentableNodes(tags);
         SourceSection section = node.getSourceSection();
-        int startIndex = section.getCharIndex();
-        int endIndex = getCharEndIndex(section);
-        if (startIndex <= offset && offset <= endIndex) {
-            Node parent = findParentTaggedNode(node, tags);
-            Node ch = findChildTaggedNode(node, offset, tags, parent != null, false);
-            while (ch == null) {
-                if (node == parent) {
-                    return parent;
-                }
+        Position start = Position.startOf(section);
+        Position end = Position.endOf(section);
+        if (start.isLessThanOrEqual(position) && position.isLessThanOrEqual(end)) {
+            Node ch;
+            while ((ch = findChildTaggedNode(node, position, tags)) == null) {
                 node = node.getParent();
                 if (node == null) {
                     break;
                 }
-                ch = findChildTaggedNode(node, offset, tags, parent != null, false);
             }
             return ch;
-        } else if (endIndex < offset) {
+        } else if (end.isLessThan(position)) {
             return findLastNode(node, tags);
-        } else { // offset < o1
+        } else { // position < start
             return findFirstNode(node, tags);
         }
     }
 
-    /**
-     * Finds the nearest tagged {@link Node node}. See the algorithm description at
-     * {@link InstrumentableNode#findNearestNodeAt(int, Set)}.
-     */
-    private static Node findChildTaggedNode(Node node, int offset, Set<Class<? extends Tag>> tags, boolean haveOuterCandidate, boolean preferFirst) {
-        Node[] highestLowerNode = new Node[]{null};
-        Node[] highestLowerTaggedNode = new Node[]{null};
-        Node[] lowestHigherNode = new Node[]{null};
-        Node[] lowestHigherTaggedNode = new Node[]{null};
-        final Node[] foundNode = new Node[]{null};
-        NodeUtil.forEachChild(node, new NodeVisitor() {
+    private static void forEachInstrumentableChild(Node parent, NodeVisitor visitor, Set<Class<? extends Tag>> tags) {
+        NodeUtil.forEachChild(parent, new NodeVisitor() {
 
-            int highestLowerNodeIndex = 0;
-            int highestLowerTaggedNodeIndex = 0;
-            int lowestHigherNodeIndex = 0;
-            int lowestHigherTaggedNodeIndex = 0;
+            private boolean keepVisiting = true;
 
             @Override
             public boolean visit(Node childNode) {
@@ -129,29 +125,54 @@ class DefaultNearestNodeSearch {
                 if (ch instanceof WrapperNode) {
                     ch = ((WrapperNode) ch).getDelegateNode();
                 }
-                SourceSection ss;
                 if (ch instanceof InstrumentableNode && ((InstrumentableNode) ch).isInstrumentable()) {
                     ch = (Node) ((InstrumentableNode) ch).materializeInstrumentableNodes(tags);
-                    ss = ch.getSourceSection();
-                    if (ss == null) {
-                        return true;
-                    }
                 } else {
                     // An unknown node, process its children on the same level.
                     NodeUtil.forEachChild(ch, this);
-                    return foundNode[0] == null;
+                    return keepVisiting;
+                }
+                return (keepVisiting = visitor.visit(ch));
+            }
+        });
+    }
+
+    /**
+     * Finds the nearest tagged {@link Node node}. See the algorithm description at
+     * {@link InstrumentableNode#findNearestNodeAt(int, Set)}.
+     */
+    private static Node findChildTaggedNode(Node node, Position position, Set<Class<? extends Tag>> tags) {
+        // Nodes with lower offset that we search for, inspected from the highest one.
+        SortedNodes lowerNodes = new SortedNodes();
+        // Nodes with higher offset that we search for, inspected from the smallest one.
+        SortedNodes higherNodes = new SortedNodes();
+        final Node[] foundNode = new Node[]{null};
+        forEachInstrumentableChild(node, new NodeVisitor() {
+
+            // The nearest tagged node with lower position
+            Position highestLowerTaggedNodeStart = null;
+            Position highestLowerTaggedNodeEnd = null;
+            // The nearest tagged node with higher position
+            Position lowestHigherTaggedNodeStart = null;
+            Position lowestHigherTaggedNodeEnd = null;
+
+            @Override
+            public boolean visit(Node ch) {
+                SourceSection ss = ch.getSourceSection();
+                if (ss == null || !ss.isAvailable()) {
+                    return true;
                 }
                 boolean isTagged = isTaggedWith((InstrumentableNode) ch, tags);
-                int i1 = ss.getCharIndex();
-                int i2 = getCharEndIndex(ss);
-                if (isTagged && offset == i1) {
+                Position p1 = Position.startOf(ss);
+                Position p2 = Position.endOf(ss);
+                if (isTagged && position.equals(p1)) {
                     // We're at it
                     foundNode[0] = ch;
                     return false;
                 }
-                if (i1 <= offset && offset <= i2) {
+                if (p1.isLessThanOrEqual(position) && position.isLessThanOrEqual(p2)) {
                     // In an encapsulating source section
-                    Node taggedNode = findChildTaggedNode(ch, offset, tags, isTagged || haveOuterCandidate, preferFirst);
+                    Node taggedNode = findChildTaggedNode(ch, position, tags);
                     if (taggedNode != null) {
                         foundNode[0] = taggedNode;
                         return false;
@@ -162,102 +183,56 @@ class DefaultNearestNodeSearch {
                         return false;
                     }
                 }
-                if (offset < i1) {
+                if (position.isLessThan(p1) && !(lowestHigherTaggedNodeStart != null && lowestHigherTaggedNodeStart.isLessThanOrEqual(p1) && p2.isLessThanOrEqual(lowestHigherTaggedNodeEnd))) {
                     // We're after the offset
-                    if (lowestHigherNode[0] == null || lowestHigherNodeIndex > i1) {
-                        lowestHigherNode[0] = ch;
-                        lowestHigherNodeIndex = i1;
-                    }
-                    if (isTagged) {
-                        if (lowestHigherTaggedNode[0] == null || lowestHigherTaggedNodeIndex > i1) {
-                            lowestHigherTaggedNode[0] = ch;
-                            lowestHigherTaggedNodeIndex = i1;
+                    if (lowestHigherTaggedNodeStart == null || lowestHigherTaggedNodeStart.isGreaterThan(p1)) {
+                        higherNodes.add(ch, p1);
+                        if (isTagged) {
+                            lowestHigherTaggedNodeStart = p1;
+                            lowestHigherTaggedNodeEnd = p2;
+                            higherNodes.cutHigherThan(p1);
                         }
                     }
                 }
-                if (i2 < offset) {
+                if (p2.isLessThan(position) && !(highestLowerTaggedNodeStart != null && highestLowerTaggedNodeStart.isLessThanOrEqual(p1) && p2.isLessThanOrEqual(highestLowerTaggedNodeEnd))) {
                     // We're before the offset
-                    if (highestLowerNode[0] == null || (preferFirst ? i1 < highestLowerNodeIndex : highestLowerNodeIndex < i1)) {
-                        highestLowerNode[0] = ch;
-                        highestLowerNodeIndex = i1;
-                    }
-                    if (isTagged) {
-                        if (highestLowerTaggedNode[0] == null || (preferFirst ? i1 < highestLowerTaggedNodeIndex : highestLowerTaggedNodeIndex < i1)) {
-                            highestLowerTaggedNode[0] = ch;
-                            highestLowerTaggedNodeIndex = i1;
+                    if (highestLowerTaggedNodeStart == null || (highestLowerTaggedNodeStart.isLessThan(p1))) {
+                        lowerNodes.add(ch, p1);
+                        if (isTagged) {
+                            highestLowerTaggedNodeStart = p1;
+                            highestLowerTaggedNodeEnd = p2;
+                            lowerNodes.cutLowerThan(p1);
                         }
                     }
                 }
                 return true;
             }
-        });
+        }, tags);
         if (foundNode[0] != null) {
             return foundNode[0];
         }
-        Node primaryNode;
-        Node primaryTaggedNode;
-        Node secondaryNode;
-        Node secondaryTaggedNode;
-        if (preferFirst) {
-            // Prefer node before the offset:
-            primaryNode = highestLowerNode[0];
-            primaryTaggedNode = highestLowerTaggedNode[0];
-            secondaryNode = lowestHigherNode[0];
-            secondaryTaggedNode = lowestHigherTaggedNode[0];
-        } else {
-            // Prefer node after the offset:
-            primaryNode = lowestHigherNode[0];
-            primaryTaggedNode = lowestHigherTaggedNode[0];
-            secondaryNode = highestLowerNode[0];
-            secondaryTaggedNode = highestLowerTaggedNode[0];
-        }
-
-        if (isTaggedWith(primaryNode, tags)) {
-            return primaryNode;
-        }
-        // Try to go in the preferred node:
-        Node taggedNode = null;
-        if (!haveOuterCandidate) {
-            if (primaryNode != null) {
-                taggedNode = findChildTaggedNode(primaryNode, offset, tags, haveOuterCandidate, true);
-            }
-        }
-        if (taggedNode == null && primaryTaggedNode != null) {
-            return primaryTaggedNode;
-        }
-        if (isTaggedWith(secondaryNode, tags)) {
-            return secondaryNode;
-        }
-        // Try to go in a node before:
-        if (!haveOuterCandidate) {
-            if (taggedNode == null && secondaryNode != null) {
-                taggedNode = findChildTaggedNode(secondaryNode, offset, tags, haveOuterCandidate, true);
-            }
-        }
-        if (taggedNode == null && secondaryTaggedNode != null) {
-            return secondaryTaggedNode;
+        Node taggedNode = findChildTaggedNode(higherNodes.nodes, higherNodes.size, position, tags, false);
+        if (taggedNode == null) {
+            taggedNode = findChildTaggedNode(lowerNodes.nodes, lowerNodes.size, position, tags, true);
         }
         return taggedNode;
     }
 
-    /** Get the last character index (inclusive). */
-    private static int getCharEndIndex(SourceSection ss) {
-        if (ss.getCharLength() > 0) {
-            return ss.getCharEndIndex() - 1;
-        } else {
-            return ss.getCharIndex();
-        }
-    }
-
-    private static Node findParentTaggedNode(Node node, Set<Class<? extends Tag>> tags) {
-        if (isTaggedWith(node, tags)) {
-            return node;
-        }
-        Node parent = node.getParent();
-        if (parent == null) {
+    private static Node findChildTaggedNode(Node[] nodes, int size, Position position, Set<Class<? extends Tag>> tags, boolean reverse) {
+        if (nodes == null) {
             return null;
         }
-        return findParentTaggedNode(parent, tags);
+        for (int i = (reverse ? size - 1 : 0); reverse ? i >= 0 : i < size; i = (reverse) ? i - 1 : i + 1) {
+            Node node = nodes[i];
+            if (isTaggedWith(node, tags)) {
+                return node;
+            }
+            Node taggedNode = findChildTaggedNode(node, position, tags);
+            if (taggedNode != null) {
+                return taggedNode;
+            }
+        }
+        return null;
     }
 
     private static Node findFirstNode(Node contextNode, Set<Class<? extends Tag>> tags) {
@@ -308,6 +283,76 @@ class DefaultNearestNodeSearch {
             }
         }
         return false;
+    }
+
+    private static final class SortedNodes {
+
+        private static final int DEFAULT_SIZE = 10;
+
+        private Node[] nodes = null;
+        Position[] nodeOffsets = null;
+        int size = 0;
+
+        void add(Node node, Position position) {
+            if (nodes == null) {
+                nodes = new Node[DEFAULT_SIZE];
+                nodeOffsets = new Position[DEFAULT_SIZE];
+                nodes[0] = node;
+                nodeOffsets[0] = position;
+                size++;
+            } else {
+                ensureCapacity(size + 1);
+                if (nodeOffsets[size - 1].isLessThan(position)) { // common case
+                    nodes[size] = node;
+                    nodeOffsets[size] = position;
+                } else {
+                    int index = Arrays.binarySearch(nodeOffsets, 0, size, position, Position.COMPARATOR);
+                    if (index < 0) {
+                        index = -index - 1;
+                    }
+                    System.arraycopy(nodes, index, nodes, index + 1, size - index);
+                    nodes[index] = node;
+                    System.arraycopy(nodeOffsets, index, nodeOffsets, index + 1, size - index);
+                    nodeOffsets[index] = position;
+                }
+                size++;
+            }
+        }
+
+        void ensureCapacity(int capacity) {
+            if (nodes.length < capacity) {
+                int newCapacity = capacity + (capacity >> 1);
+                if (newCapacity < capacity) {
+                    newCapacity = capacity;
+                }
+                nodes = Arrays.copyOf(nodes, newCapacity);
+                nodeOffsets = Arrays.copyOf(nodeOffsets, newCapacity);
+            }
+        }
+
+        void cutHigherThan(Position position) {
+            int index = Arrays.binarySearch(nodeOffsets, 0, size, position, Position.COMPARATOR);
+            if (index < 0) {
+                index = -index - 1;
+            } else {
+                index++;
+            }
+            if (index < size) {
+                size = index;
+            }
+        }
+
+        void cutLowerThan(Position position) {
+            int index = Arrays.binarySearch(nodeOffsets, 0, size, position, Position.COMPARATOR);
+            if (index < 0) {
+                index = -index - 1;
+            }
+            if (index > 0) {
+                System.arraycopy(nodes, index, nodes, 0, size - index);
+                System.arraycopy(nodeOffsets, index, nodeOffsets, 0, size - index);
+                size -= index;
+            }
+        }
     }
 
 }

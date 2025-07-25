@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates.
+ * Copyright (c) 2017, 2023, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -32,9 +32,12 @@ package com.oracle.truffle.llvm.runtime.debug.value;
 import java.math.BigInteger;
 import java.util.Objects;
 
-import com.oracle.truffle.api.CompilerDirectives;
 import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
-import com.oracle.truffle.api.interop.TruffleObject;
+import com.oracle.truffle.api.interop.InteropLibrary;
+import com.oracle.truffle.api.interop.UnsupportedMessageException;
+import com.oracle.truffle.api.library.ExportLibrary;
+import com.oracle.truffle.api.library.ExportMessage;
+import com.oracle.truffle.api.source.SourceSection;
 import com.oracle.truffle.llvm.runtime.LLVMFunctionDescriptor;
 import com.oracle.truffle.llvm.runtime.debug.LLVMDebuggerValue;
 import com.oracle.truffle.llvm.runtime.debug.scope.LLVMSourceLocation;
@@ -45,15 +48,17 @@ import com.oracle.truffle.llvm.runtime.debug.type.LLVMSourcePointerType;
 import com.oracle.truffle.llvm.runtime.debug.type.LLVMSourceStaticMemberType;
 import com.oracle.truffle.llvm.runtime.debug.type.LLVMSourceType;
 import com.oracle.truffle.llvm.runtime.floating.LLVM80BitFloat;
-import com.oracle.truffle.llvm.runtime.interop.LLVMTypedForeignObject;
+import com.oracle.truffle.llvm.runtime.library.internal.LLVMAsForeignLibrary;
 import com.oracle.truffle.llvm.runtime.pointer.LLVMManagedPointer;
 
 /**
  * This class describes a source-level variable. Debuggers can use it to display the original
  * source-level state of an executed LLVM IR file.
  */
+@ExportLibrary(InteropLibrary.class)
 public abstract class LLVMDebugObject extends LLVMDebuggerValue {
 
+    private static final InteropLibrary UNCACHED_INTEROP = InteropLibrary.getFactory().getUncached();
     private static final String[] NO_KEYS = new String[0];
 
     protected final long offset;
@@ -76,13 +81,32 @@ public abstract class LLVMDebugObject extends LLVMDebuggerValue {
      *
      * @return the type of the referenced object
      */
-    protected LLVMSourceType getType() {
+    public final LLVMSourceType getType() {
         return type;
     }
 
-    @Override
-    public LLVMSourceType getMetaObject() {
-        return getType();
+    @ExportMessage
+    public final Object getMetaObject() throws UnsupportedMessageException {
+        if (type == null) {
+            throw UnsupportedMessageException.create();
+        }
+        return type;
+    }
+
+    @ExportMessage
+    public final boolean hasMetaObject() {
+        return type != null;
+    }
+
+    @ExportMessage
+    final boolean hasSourceLocation() {
+        return location != null;
+    }
+
+    @ExportMessage
+    @TruffleBoundary
+    final SourceSection getSourceLocation() {
+        return location.getSourceSection();
     }
 
     public LLVMSourceLocation getDeclaration() {
@@ -128,7 +152,8 @@ public abstract class LLVMDebugObject extends LLVMDebuggerValue {
      *
      * @return the value of the referenced variable
      */
-    protected Object getValue() {
+    @TruffleBoundary
+    public Object getValue() {
         if (value == null) {
             return "";
 
@@ -151,12 +176,12 @@ public abstract class LLVMDebugObject extends LLVMDebuggerValue {
 
         if (LLVMManagedPointer.isInstance(currentValue)) {
             final LLVMManagedPointer managedPointer = LLVMManagedPointer.cast(currentValue);
-            final TruffleObject target = managedPointer.getObject();
+            final Object target = managedPointer.getObject();
 
             String targetString;
             if (target instanceof LLVMFunctionDescriptor) {
                 final LLVMFunctionDescriptor function = (LLVMFunctionDescriptor) target;
-                targetString = "LLVM function " + function.getName();
+                targetString = "LLVM function " + function.getLLVMFunction().getName();
 
             } else {
                 targetString = "<managed pointer>";
@@ -249,7 +274,7 @@ public abstract class LLVMDebugObject extends LLVMDebuggerValue {
             final LLVMSourceType elementType = getType().getElementType(key);
             final long newOffset = this.offset + elementType.getOffset();
             final LLVMSourceLocation declaration = getType().getElementDeclaration(key);
-            return instantiate(elementType, newOffset, value, declaration);
+            return create(elementType, newOffset, value, declaration);
         }
 
         @Override
@@ -319,10 +344,224 @@ public abstract class LLVMDebugObject extends LLVMDebuggerValue {
         }
     }
 
-    private static final class Primitive extends LLVMDebugObject {
+    @ExportLibrary(InteropLibrary.class)
+    static final class Primitive extends LLVMDebugObject {
 
         Primitive(LLVMDebugValue value, long offset, LLVMSourceType type, LLVMSourceLocation declaration) {
             super(value, offset, type, declaration);
+        }
+
+        /**
+         * Some special primitive debugger values like "unavailable" are represented as strings.
+         */
+        @ExportMessage
+        @TruffleBoundary
+        boolean isString() {
+            Object v = getValue();
+            return v instanceof String;
+        }
+
+        /**
+         * Some special primitive debugger values like "unavailable" are represented as strings.
+         */
+        @ExportMessage
+        @TruffleBoundary
+        String asString() throws UnsupportedMessageException {
+            Object v = getValue();
+            if (v instanceof String) {
+                return (String) v;
+            } else {
+                throw UnsupportedMessageException.create();
+            }
+        }
+
+        @ExportMessage
+        @TruffleBoundary
+        boolean isNumber() {
+            Object v = getValue();
+            if (v instanceof BigInteger) {
+                return true;
+            } else {
+                return UNCACHED_INTEROP.isNumber(v);
+            }
+        }
+
+        @ExportMessage
+        @TruffleBoundary
+        boolean fitsInByte() {
+            Object v = getValue();
+            if (v instanceof BigInteger) {
+                try {
+                    @SuppressWarnings("unused")
+                    byte b = ((BigInteger) v).byteValueExact();
+                    return true;
+                } catch (ArithmeticException e) {
+                    return false;
+                }
+            } else {
+                return UNCACHED_INTEROP.fitsInByte(v);
+            }
+        }
+
+        @ExportMessage
+        @TruffleBoundary
+        boolean fitsInShort() {
+            Object v = getValue();
+            if (v instanceof BigInteger) {
+                try {
+                    @SuppressWarnings("unused")
+                    short s = ((BigInteger) v).shortValueExact();
+                    return true;
+                } catch (ArithmeticException e) {
+                    return false;
+                }
+            } else {
+                return UNCACHED_INTEROP.fitsInShort(v);
+            }
+        }
+
+        @ExportMessage
+        @TruffleBoundary
+        boolean fitsInInt() {
+            Object v = getValue();
+            if (v instanceof BigInteger) {
+                try {
+                    @SuppressWarnings("unused")
+                    int i = ((BigInteger) v).intValueExact();
+                    return true;
+                } catch (ArithmeticException e) {
+                    return false;
+                }
+            } else {
+                return UNCACHED_INTEROP.fitsInInt(v);
+            }
+        }
+
+        @ExportMessage
+        @TruffleBoundary
+        boolean fitsInLong() {
+            Object v = getValue();
+            if (v instanceof BigInteger) {
+                try {
+                    @SuppressWarnings("unused")
+                    long l = ((BigInteger) v).longValueExact();
+                    return true;
+                } catch (ArithmeticException e) {
+                    return false;
+                }
+            } else {
+                return UNCACHED_INTEROP.fitsInLong(v);
+            }
+        }
+
+        @ExportMessage
+        @TruffleBoundary
+        boolean fitsInBigInteger() {
+            Object v = getValue();
+            if (v instanceof BigInteger) {
+                return true;
+            } else {
+                return UNCACHED_INTEROP.fitsInBigInteger(v);
+            }
+        }
+
+        @ExportMessage
+        @TruffleBoundary
+        boolean fitsInFloat() {
+            Object v = getValue();
+            if (v instanceof BigInteger) {
+                return true;
+            } else {
+                return UNCACHED_INTEROP.fitsInFloat(v);
+            }
+        }
+
+        @ExportMessage
+        @TruffleBoundary
+        boolean fitsInDouble() {
+            Object v = getValue();
+            if (v instanceof BigInteger) {
+                return true;
+            } else {
+                return UNCACHED_INTEROP.fitsInDouble(v);
+            }
+        }
+
+        @ExportMessage
+        @TruffleBoundary
+        byte asByte() throws UnsupportedMessageException {
+            Object v = getValue();
+            if (v instanceof BigInteger) {
+                return ((BigInteger) v).byteValue();
+            } else {
+                return UNCACHED_INTEROP.asByte(v);
+            }
+        }
+
+        @ExportMessage
+        @TruffleBoundary
+        short asShort() throws UnsupportedMessageException {
+            Object v = getValue();
+            if (v instanceof BigInteger) {
+                return ((BigInteger) v).shortValue();
+            } else {
+                return UNCACHED_INTEROP.asShort(v);
+            }
+        }
+
+        @ExportMessage
+        @TruffleBoundary
+        int asInt() throws UnsupportedMessageException {
+            Object v = getValue();
+            if (v instanceof BigInteger) {
+                return ((BigInteger) v).intValue();
+            } else {
+                return UNCACHED_INTEROP.asInt(v);
+            }
+        }
+
+        @ExportMessage
+        @TruffleBoundary
+        long asLong() throws UnsupportedMessageException {
+            Object v = getValue();
+            if (v instanceof BigInteger) {
+                return ((BigInteger) v).longValue();
+            } else {
+                return UNCACHED_INTEROP.asLong(v);
+            }
+        }
+
+        @ExportMessage
+        @TruffleBoundary
+        BigInteger asBigInteger() throws UnsupportedMessageException {
+            Object v = getValue();
+            if (v instanceof BigInteger) {
+                return new BigInteger(((BigInteger) v).toByteArray());
+            } else {
+                return UNCACHED_INTEROP.asBigInteger(v);
+            }
+        }
+
+        @ExportMessage
+        @TruffleBoundary
+        float asFloat() throws UnsupportedMessageException {
+            Object v = getValue();
+            if (v instanceof BigInteger) {
+                return ((BigInteger) v).floatValue();
+            } else {
+                return UNCACHED_INTEROP.asFloat(v);
+            }
+        }
+
+        @ExportMessage
+        @TruffleBoundary
+        double asDouble() throws UnsupportedMessageException {
+            Object v = getValue();
+            if (v instanceof BigInteger) {
+                return ((BigInteger) v).doubleValue();
+            } else {
+                return UNCACHED_INTEROP.asDouble(v);
+            }
         }
 
         @Override
@@ -403,13 +642,15 @@ public abstract class LLVMDebugObject extends LLVMDebuggerValue {
                         return value.readUnknown(offset, size);
                 }
             } catch (IllegalStateException e) {
-                CompilerDirectives.transferToInterpreter();
                 return e.getMessage();
             }
         }
     }
 
     private static final class Pointer extends LLVMDebugObject {
+
+        private static final String[] SAFE_DEREFERENCE_KEYS = new String[]{"<target>"};
+        private static final String[] FOREIGN_KEYS = new String[]{"<foreign>", "<offset>"};
 
         private final LLVMSourcePointerType pointerType;
 
@@ -424,21 +665,66 @@ public abstract class LLVMDebugObject extends LLVMDebuggerValue {
             }
         }
 
+        private boolean isPointerToForeign() {
+            if (value.isManagedPointer()) {
+                Object base = value.getManagedPointerBase();
+                return LLVMAsForeignLibrary.getFactory().getUncached().isForeign(base);
+            } else {
+                return false;
+            }
+        }
+
         @Override
         public String[] getKeysSafe() {
+            if (pointerType != null && !pointerType.isReference() && (value.isAlwaysSafeToDereference(offset) || pointerType.isSafeToDereference())) {
+                return SAFE_DEREFERENCE_KEYS;
+            } else if (isPointerToForeign()) {
+                return FOREIGN_KEYS;
+            }
             final LLVMDebugObject target = dereference();
             return target == null ? NO_KEYS : target.getKeys();
         }
 
         @Override
         public Object getMemberSafe(String identifier) {
-            final LLVMDebugObject target = dereference();
-            return target == null ? "Cannot dereference pointer!" : target.getMember(identifier);
+            if (FOREIGN_KEYS[0].equals(identifier)) {
+                Object base = value.getManagedPointerBase();
+                if (LLVMAsForeignLibrary.getFactory().getUncached().isForeign(base)) {
+                    return LLVMAsForeignLibrary.getFactory().getUncached().asForeign(base);
+                } else {
+                    return "Cannot get foreign base pointer!";
+                }
+
+            } else if (FOREIGN_KEYS[1].equals(identifier)) {
+                return value.getManagedPointerOffset();
+
+            } else {
+                final LLVMDebugObject target = dereference();
+                if (target == null) {
+                    return "Cannot dereference pointer!";
+                }
+
+                if (SAFE_DEREFERENCE_KEYS[0].equals(identifier)) {
+                    assert pointerType != null;
+                    assert !pointerType.isReference();
+                    assert value.isAlwaysSafeToDereference(offset) || pointerType.isSafeToDereference();
+                    return target;
+                } else {
+                    return target.getMember(identifier);
+                }
+            }
         }
 
         @Override
         protected Object getValueSafe() {
-            if (pointerType == null || !pointerType.isReference()) {
+            if (isPointerToForeign()) {
+                long o = offset + value.getManagedPointerOffset();
+                if (o == 0) {
+                    return "<foreign>";
+                } else {
+                    return String.format("<foreign> + %d byte", o);
+                }
+            } else if (pointerType == null || !pointerType.isReference()) {
                 return value.readAddress(offset);
             } else {
                 final LLVMDebugObject target = dereference();
@@ -456,7 +742,7 @@ public abstract class LLVMDebugObject extends LLVMDebuggerValue {
             if (targetValue == null) {
                 return null;
             }
-            return instantiate(pointerType.getBaseType(), 0L, targetValue, null);
+            return create(pointerType.getBaseType(), 0L, targetValue, null);
         }
     }
 
@@ -527,8 +813,9 @@ public abstract class LLVMDebugObject extends LLVMDebuggerValue {
             }
 
             Object obj = value.asInteropValue();
-            if (obj instanceof LLVMTypedForeignObject) {
-                obj = ((LLVMTypedForeignObject) obj).getForeign();
+
+            if (LLVMAsForeignLibrary.getFactory().getUncached().isForeign(obj)) {
+                obj = LLVMAsForeignLibrary.getFactory().getUncached().asForeign(obj);
             }
             return obj;
         }
@@ -539,7 +826,8 @@ public abstract class LLVMDebugObject extends LLVMDebuggerValue {
         }
     }
 
-    public static LLVMDebugObject instantiate(LLVMSourceType type, long baseOffset, LLVMDebugValue value, LLVMSourceLocation declaration) {
+    @TruffleBoundary
+    public static LLVMDebugObject create(LLVMSourceType type, long baseOffset, LLVMDebugValue value, LLVMSourceLocation declaration) {
         if (type.getActualType() == LLVMSourceType.UNKNOWN || type.getActualType() == LLVMSourceType.UNSUPPORTED) {
             return new Unsupported(value, baseOffset, LLVMSourceType.UNSUPPORTED, declaration);
 

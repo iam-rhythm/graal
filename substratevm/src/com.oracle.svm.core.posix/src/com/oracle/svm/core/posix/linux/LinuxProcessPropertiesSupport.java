@@ -24,17 +24,17 @@
  */
 package com.oracle.svm.core.posix.linux;
 
-import org.graalvm.nativeimage.Feature;
-import org.graalvm.nativeimage.ImageSingletons;
-import org.graalvm.nativeimage.Platform;
-import org.graalvm.nativeimage.Platforms;
+import java.util.EnumSet;
+
 import org.graalvm.nativeimage.impl.ProcessPropertiesSupport;
 
-import com.oracle.svm.core.annotate.AutomaticFeature;
+import com.oracle.svm.core.feature.AutomaticallyRegisteredImageSingleton;
+import com.oracle.svm.core.layeredimagesingleton.InitialLayerOnlyImageSingleton;
+import com.oracle.svm.core.layeredimagesingleton.LayeredImageSingletonBuilderFlags;
 import com.oracle.svm.core.posix.PosixProcessPropertiesSupport;
 
-@Platforms(Platform.LINUX_AND_JNI.class)
-public class LinuxProcessPropertiesSupport extends PosixProcessPropertiesSupport {
+@AutomaticallyRegisteredImageSingleton(ProcessPropertiesSupport.class)
+public class LinuxProcessPropertiesSupport extends PosixProcessPropertiesSupport implements InitialLayerOnlyImageSingleton {
 
     @Override
     public String getExecutableName() {
@@ -42,13 +42,13 @@ public class LinuxProcessPropertiesSupport extends PosixProcessPropertiesSupport
         return realpath(exefileString);
     }
 
-    @AutomaticFeature
-    public static class ImagePropertiesFeature implements Feature {
-
-        @Override
-        public void afterRegistration(AfterRegistrationAccess access) {
-            ImageSingletons.add(ProcessPropertiesSupport.class, new LinuxProcessPropertiesSupport());
-        }
+    @Override
+    public EnumSet<LayeredImageSingletonBuilderFlags> getImageBuilderFlags() {
+        return LayeredImageSingletonBuilderFlags.RUNTIME_ACCESS_ONLY;
     }
 
+    @Override
+    public boolean accessibleInFutureLayers() {
+        return true;
+    }
 }

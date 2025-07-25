@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -50,13 +50,15 @@ import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.ListIterator;
+import java.util.Objects;
 import java.util.Set;
 
 import javax.lang.model.element.AnnotationMirror;
 import javax.lang.model.element.Element;
-import javax.lang.model.element.ElementKind;
 import javax.lang.model.element.Modifier;
+import javax.lang.model.element.TypeElement;
 
+import com.oracle.truffle.dsl.processor.java.ElementUtils;
 import com.oracle.truffle.dsl.processor.java.transform.AbstractCodeWriter;
 
 public abstract class CodeElement<E extends Element> implements Element, GeneratedElement {
@@ -64,11 +66,11 @@ public abstract class CodeElement<E extends Element> implements Element, Generat
     private final Set<Modifier> modifiers;
     private List<AnnotationMirror> annotations;
     private List<E> enclosedElements;
-
     private Element enclosingElement;
 
     private Element generatorElement;
     private AnnotationMirror generatorAnnotationMirror;
+    private CodeTree docTree;
 
     public CodeElement(Set<Modifier> modifiers) {
         this.modifiers = new LinkedHashSet<>(modifiers);
@@ -89,9 +91,46 @@ public abstract class CodeElement<E extends Element> implements Element, Generat
         return generatorAnnotationMirror;
     }
 
+    public final CodeTree getDocTree() {
+        return docTree;
+    }
+
+    public final void setDocTree(CodeTree docTree) {
+        this.docTree = docTree;
+    }
+
+    public final CodeTreeBuilder createDocBuilder() {
+        CodeTreeBuilder builder = new CodeTreeBuilder(null);
+        builder.setEnclosingElement(this);
+        this.docTree = builder.getTree();
+        return builder;
+    }
+
+    @Override
+    public boolean equals(Object obj) {
+        if (obj != null && this.getClass() == obj.getClass()) {
+            CodeElement<?> other = (CodeElement<?>) obj;
+            return Objects.equals(modifiers, other.modifiers) && //
+                            Objects.equals(annotations, other.annotations) && //
+                            Objects.equals(enclosedElements, other.enclosedElements);
+        }
+        return super.equals(obj);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(modifiers, annotations, enclosedElements);
+    }
+
     @Override
     public Element getGeneratorElement() {
         return generatorElement;
+    }
+
+    public <T extends E> void addAll(Collection<? extends T> elements) {
+        for (T t : elements) {
+            add(t);
+        }
     }
 
     public <T extends E> T add(T element) {
@@ -107,10 +146,6 @@ public abstract class CodeElement<E extends Element> implements Element, Generat
             add(element);
         }
         return element;
-    }
-
-    public void remove(E element) {
-        getEnclosedElements().remove(element);
     }
 
     @Override
@@ -148,15 +183,6 @@ public abstract class CodeElement<E extends Element> implements Element, Generat
      *
      * @param annotationType
      */
-    public <A extends Annotation> A[] getAnnotations(Class<A> annotationType) {
-        throw new UnsupportedOperationException();
-    }
-
-    /**
-     * Support for some JDK8 builds. (remove after jdk8 is released)
-     *
-     * @param annotationType
-     */
     public <A extends Annotation> A getAnnotation(Class<A> annotationType) {
         throw new UnsupportedOperationException();
     }
@@ -173,12 +199,12 @@ public abstract class CodeElement<E extends Element> implements Element, Generat
         return enclosingElement;
     }
 
-    public CodeTypeElement getEnclosingClass() {
+    public TypeElement getEnclosingClass() {
         Element p = enclosingElement;
-        while (p != null && p.getKind() != ElementKind.CLASS && p.getKind() != ElementKind.ENUM) {
+        while (p != null && !p.getKind().isClass() && !p.getKind().isInterface()) {
             p = p.getEnclosingElement();
         }
-        return (CodeTypeElement) p;
+        return (TypeElement) p;
     }
 
     <T> List<T> parentableList(Element parent, List<T> list) {
@@ -188,23 +214,32 @@ public abstract class CodeElement<E extends Element> implements Element, Generat
     @Override
     public String toString() {
         StringBuilderCodeWriter codeWriter = new StringBuilderCodeWriter();
-        accept(codeWriter, null);
-        return codeWriter.getString();
+        String s;
+        try {
+            accept(codeWriter, null);
+            s = codeWriter.getString();
+        } catch (Exception t) {
+            s = ElementUtils.printException(t);
+        }
+        return s;
     }
 
-    private static class StringBuilderCodeWriter extends AbstractCodeWriter {
+    public static class StringBuilderCodeWriter extends AbstractCodeWriter {
 
-        StringBuilderCodeWriter() {
-            this.writer = new CharArrayWriter();
+        private final CharArrayWriter charWriter;
+
+        public StringBuilderCodeWriter() {
+            this.charWriter = new CharArrayWriter();
+            this.writer = charWriter;
         }
 
         @Override
         protected Writer createWriter(CodeTypeElement clazz) throws IOException {
-            return writer;
+            return this.charWriter;
         }
 
         public String getString() {
-            return new String(((CharArrayWriter) writer).toCharArray()).trim();
+            return new String(this.charWriter.toCharArray()).trim();
         }
 
     }

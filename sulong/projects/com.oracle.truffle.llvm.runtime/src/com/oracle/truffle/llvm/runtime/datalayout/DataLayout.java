@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2018, Oracle and/or its affiliates.
+ * Copyright (c) 2016, 2023, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -29,15 +29,17 @@
  */
 package com.oracle.truffle.llvm.runtime.datalayout;
 
+import java.nio.ByteOrder;
 import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
+import java.util.IdentityHashMap;
 
 import com.oracle.truffle.llvm.runtime.datalayout.DataLayoutParser.DataTypeSpecification;
 import com.oracle.truffle.llvm.runtime.types.FunctionType;
 import com.oracle.truffle.llvm.runtime.types.PointerType;
 import com.oracle.truffle.llvm.runtime.types.PrimitiveType;
+import com.oracle.truffle.llvm.runtime.types.StructureType;
 import com.oracle.truffle.llvm.runtime.types.Type;
+import com.oracle.truffle.llvm.runtime.types.Type.TypeOverflowException;
 import com.oracle.truffle.llvm.runtime.types.VariableBitWidthType;
 
 /**
@@ -50,51 +52,64 @@ import com.oracle.truffle.llvm.runtime.types.VariableBitWidthType;
  */
 public final class DataLayout {
 
-    private final List<DataTypeSpecification> dataLayout;
+    private final ArrayList<DataTypeSpecification> dataLayout;
+    private ByteOrder byteOrder;
 
-    public DataLayout() {
+    private final IdentityHashMap<Type, Long> sizeCache = new IdentityHashMap<>();
+    private final IdentityHashMap<Type, Integer> alignmentCache = new IdentityHashMap<>();
+
+    public DataLayout(ByteOrder byteOrder) {
         this.dataLayout = new ArrayList<>();
+        this.byteOrder = byteOrder;
     }
 
-    public DataLayout(String layout) {
-        this.dataLayout = DataLayoutParser.parseDataLayout(layout);
-    }
-
-    public int getSize(Type type) {
-        return Math.max(1, getBitAlignment(type) / Byte.SIZE);
-    }
-
-    public int getBitAlignment(Type baseType) {
-        if (baseType instanceof VariableBitWidthType) {
-            /*
-             * Handling of integer datatypes when the exact match not found
-             * http://releases.llvm.org/3.9.0/docs/LangRef.html#data-layout
-             */
-            DataTypeSpecification integerLayout = dataLayout.stream().filter(d -> d.getType() == DataLayoutType.INTEGER_WIDTHS).findFirst().orElseThrow(IllegalStateException::new);
-            int minPossibleSize = Arrays.stream(integerLayout.getValues()).max().orElseThrow(IllegalStateException::new);
-            int size = baseType.getBitSize();
-            for (int value : integerLayout.getValues()) {
-                if (size < value && minPossibleSize > value) {
-                    minPossibleSize = value;
-                }
-            }
-            if (minPossibleSize >= size) {
-                return minPossibleSize;
-            } else {
-                // is that correct?
-                return ((size + 7) / 8) * 8;
-            }
-        } else {
-            DataTypeSpecification spec = getDataTypeSpecification(baseType);
-            if (spec == null) {
-                throw new IllegalStateException("No data specification found for " + baseType);
-            }
-            return spec.getAbiAlignment();
+    public DataLayout(String layout, String defaultLayout) {
+        this.dataLayout = new ArrayList<>();
+        this.byteOrder = DataLayoutParser.parseDataLayout(defaultLayout, dataLayout);
+        if (!defaultLayout.equalsIgnoreCase(layout)) {
+            this.byteOrder = DataLayoutParser.parseDataLayout(layout, dataLayout);
         }
     }
 
+    public ByteOrder getByteOrder() {
+        return byteOrder;
+    }
+
+    public long getSize(Type type) throws TypeOverflowException {
+        Long cachedSize = sizeCache.get(type);
+        if (cachedSize != null) {
+            return cachedSize;
+        }
+        long size = type.getBitSize();
+        int align = getBitAlignment(type);
+        long rem = Long.remainderUnsigned(size, align);
+        if (rem != 0) {
+            size = Type.addUnsignedExact(size, Type.subUnsignedExact(align, rem));
+        }
+        size = Math.max(1, Long.divideUnsigned(size, Byte.SIZE));
+        sizeCache.put(type, size);
+        return size;
+    }
+
+    public int getBitAlignment(Type baseType) {
+        Integer cachedAlignment = alignmentCache.get(baseType);
+        if (cachedAlignment != null) {
+            return cachedAlignment;
+        }
+        DataTypeSpecification spec = getDataTypeSpecification(baseType);
+        if (spec == null) {
+            throw new IllegalStateException("No data specification found for " + baseType + ". Data layout is " + dataLayout);
+        }
+        int alignment = spec.getAbiAlignment();
+        alignmentCache.put(baseType, alignment);
+        return alignment;
+    }
+
     public DataLayout merge(DataLayout other) {
-        DataLayout result = new DataLayout();
+        if (other.byteOrder != byteOrder) {
+            throw new IllegalStateException("Multiple bitcode files with incompatible byte order are used: " + this.toString() + " vs. " + other.toString());
+        }
+        DataLayout result = new DataLayout(byteOrder);
         for (DataTypeSpecification otherEntry : other.dataLayout) {
             DataTypeSpecification thisEntry;
             if (otherEntry.getType() == DataLayoutType.POINTER || otherEntry.getType() == DataLayoutType.INTEGER_WIDTHS) {
@@ -120,7 +135,10 @@ public final class DataLayout {
 
     private DataTypeSpecification getDataTypeSpecification(Type baseType) {
         if (baseType instanceof PointerType || baseType instanceof FunctionType) {
-            return getDataTypeSpecification(DataLayoutType.POINTER);
+            DataTypeSpecification ptrDTSpec = getDataTypeSpecification(DataLayoutType.POINTER, 64);
+            // The preceding call does not work for ARM arch that uses 128 bit pointers. In that
+            // case we take the first pointer spec available.
+            return ptrDTSpec == null ? getDataTypeSpecification(DataLayoutType.POINTER) : ptrDTSpec;
         } else if (baseType instanceof PrimitiveType) {
             PrimitiveType primitiveType = (PrimitiveType) baseType;
             switch (primitiveType.getPrimitiveKind()) {
@@ -142,6 +160,40 @@ public final class DataLayout {
                     return getDataTypeSpecification(DataLayoutType.FLOAT, 64);
                 case X86_FP80:
                     return getDataTypeSpecification(DataLayoutType.FLOAT, 80);
+                case F128:
+                    return getDataTypeSpecification(DataLayoutType.FLOAT, 128);
+            }
+        } else if (baseType instanceof VariableBitWidthType) {
+            int bits = ((VariableBitWidthType) baseType).getBitSizeInt();
+
+            DataTypeSpecification largest = null;
+            DataTypeSpecification smallestLarger = null;
+            for (DataTypeSpecification spec : dataLayout) {
+                if (spec.getType() == DataLayoutType.INTEGER) {
+                    if (largest == null || largest.getSize() < spec.getSize()) {
+                        largest = spec;
+                    }
+                    if (spec.getSize() >= bits) {
+                        if (smallestLarger == null || smallestLarger.getSize() > spec.getSize()) {
+                            smallestLarger = spec;
+                        }
+                    }
+                }
+            }
+
+            // http://releases.llvm.org/3.9.0/docs/LangRef.html#data-layout
+            if (smallestLarger != null) {
+                /*
+                 * If no match is found, and the type sought is an integer type, then the smallest
+                 * integer type that is larger than the bitwidth of the sought type is used.
+                 */
+                return smallestLarger;
+            } else {
+                /*
+                 * If none of the specifications are larger than the bitwidth then the largest
+                 * integer type is used.
+                 */
+                return largest;
             }
         }
         return null;
@@ -163,5 +215,65 @@ public final class DataLayout {
             }
         }
         return null;
+    }
+
+    public long getByteSize(Type type) throws TypeOverflowException {
+        return type.getSize(this);
+    }
+
+    public int getBytePadding(long offset, Type type) {
+        return Type.getPadding(offset, type, this);
+    }
+
+    public static final class StructureTypeOffsets {
+        Type[] types;
+        long[] offsets;
+
+        private StructureTypeOffsets(Type[] retTypes, long[] retOffsets) {
+            this.types = retTypes;
+            this.offsets = retOffsets;
+        }
+
+        public Type[] getTypes() {
+            return types;
+        }
+
+        public long[] getOffsets() {
+            return offsets;
+        }
+
+        public static StructureTypeOffsets fromStructuredType(DataLayout dataLayout, StructureType retType) throws TypeOverflowException {
+            Type[] retTypes = null;
+            long[] retOffsets = null;
+            StructureType struct = retType;
+            retOffsets = new long[struct.getNumberOfElementsInt()];
+            retTypes = new Type[struct.getNumberOfElementsInt()];
+            long currentOffset = 0;
+            for (int i = 0; i < struct.getNumberOfElements(); i++) {
+                Type elemType = struct.getElementType(i);
+
+                if (!struct.isPacked()) {
+                    currentOffset = Type.addUnsignedExact(currentOffset, dataLayout.getBytePadding(currentOffset, elemType));
+                }
+
+                retOffsets[i] = currentOffset;
+                retTypes[i] = elemType;
+                currentOffset = Type.addUnsignedExact(currentOffset, dataLayout.getByteSize(elemType));
+            }
+            assert currentOffset <= dataLayout.getByteSize(retType) : "currentOffset " + currentOffset + " vs. byteSize " + dataLayout.getByteSize(retType);
+
+            return new StructureTypeOffsets(retTypes, retOffsets);
+        }
+
+        public static StructureTypeOffsets fromType(DataLayout dataLayout, Type retType) throws TypeOverflowException {
+            if (retType instanceof StructureType) {
+                return fromStructuredType(dataLayout, (StructureType) retType);
+            }
+            return new StructureTypeOffsets(null, null);
+        }
+    }
+
+    public StructureTypeOffsets getStructureTypeOffsets(Type type) throws TypeOverflowException {
+        return StructureTypeOffsets.fromType(this, type);
     }
 }

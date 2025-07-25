@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2014, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,20 +24,22 @@
  */
 package com.oracle.svm.graal;
 
-import org.graalvm.compiler.api.replacements.SnippetReflectionProvider;
-import org.graalvm.compiler.api.runtime.GraalRuntime;
-import org.graalvm.compiler.core.target.Backend;
-import org.graalvm.compiler.runtime.RuntimeProvider;
 import org.graalvm.nativeimage.Platform;
 import org.graalvm.nativeimage.Platforms;
 
+import com.oracle.svm.core.graal.GraalConfiguration;
+import com.oracle.svm.core.graal.meta.RuntimeConfiguration;
 import com.oracle.svm.core.stack.SubstrateStackIntrospection;
-import com.oracle.svm.core.util.Replaced;
+import com.oracle.svm.util.ClassUtil;
 
+import jdk.graal.compiler.api.replacements.SnippetReflectionProvider;
+import jdk.graal.compiler.api.runtime.GraalRuntime;
+import jdk.graal.compiler.core.target.Backend;
+import jdk.graal.compiler.runtime.RuntimeProvider;
 import jdk.vm.ci.code.Architecture;
 import jdk.vm.ci.code.stack.StackIntrospection;
 
-public class SubstrateGraalRuntime implements GraalRuntime, RuntimeProvider, Replaced {
+public class SubstrateGraalRuntime implements GraalRuntime, RuntimeProvider {
 
     @Platforms(Platform.HOSTED_ONLY.class)
     public SubstrateGraalRuntime() {
@@ -45,7 +47,7 @@ public class SubstrateGraalRuntime implements GraalRuntime, RuntimeProvider, Rep
 
     @Override
     public String getName() {
-        return getClass().getSimpleName();
+        return ClassUtil.getUnqualifiedName(getClass());
     }
 
     @SuppressWarnings("unchecked")
@@ -54,7 +56,8 @@ public class SubstrateGraalRuntime implements GraalRuntime, RuntimeProvider, Rep
         if (clazz == RuntimeProvider.class) {
             return (T) this;
         } else if (clazz == SnippetReflectionProvider.class) {
-            return (T) GraalSupport.getRuntimeConfig().getSnippetReflection();
+            RuntimeConfiguration runtimeConfiguration = TruffleRuntimeCompilationSupport.getRuntimeConfig();
+            return (T) runtimeConfiguration.getProviders().getSnippetReflection();
         } else if (clazz == StackIntrospection.class) {
             return (T) SubstrateStackIntrospection.SINGLETON;
         }
@@ -63,12 +66,17 @@ public class SubstrateGraalRuntime implements GraalRuntime, RuntimeProvider, Rep
 
     @Override
     public Backend getHostBackend() {
-        return GraalSupport.getRuntimeConfig().getBackendForNormalMethod();
+        return TruffleRuntimeCompilationSupport.getRuntimeConfig().getBackendForNormalMethod();
     }
 
     @Override
     public <T extends Architecture> Backend getBackend(Class<T> arch) {
-        assert arch.isInstance(GraalSupport.getRuntimeConfig().getBackendForNormalMethod().getTarget().arch);
-        return GraalSupport.getRuntimeConfig().getBackendForNormalMethod();
+        assert arch.isInstance(TruffleRuntimeCompilationSupport.getRuntimeConfig().getBackendForNormalMethod().getTarget().arch);
+        return TruffleRuntimeCompilationSupport.getRuntimeConfig().getBackendForNormalMethod();
+    }
+
+    @Override
+    public String getCompilerConfigurationName() {
+        return GraalConfiguration.runtimeInstance().getCompilerConfigurationName();
     }
 }

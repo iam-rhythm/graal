@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -88,7 +88,7 @@ public abstract class SourceSection {
      * valid line numbers, when <code>false</code>, {@link #getStartLine()} and
      * {@link #getEndLine()} return <code>1</code>.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public abstract boolean hasLines();
 
@@ -99,7 +99,7 @@ public abstract class SourceSection {
      * <code>false</code>, {@link #getStartColumn()} and {@link #getEndColumn()} return
      * <code>1</code>.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public abstract boolean hasColumns();
 
@@ -110,7 +110,7 @@ public abstract class SourceSection {
      * <code>false</code>, {@link #getCharIndex()}, {@link #getCharEndIndex()} and
      * {@link #getCharLength()} return <code>0</code>.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public abstract boolean hasCharIndex();
 

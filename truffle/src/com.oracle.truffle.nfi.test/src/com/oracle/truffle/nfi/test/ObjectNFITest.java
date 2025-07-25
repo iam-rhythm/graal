@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,28 +40,29 @@
  */
 package com.oracle.truffle.nfi.test;
 
-import com.oracle.truffle.api.CallTarget;
-import com.oracle.truffle.api.frame.VirtualFrame;
-import com.oracle.truffle.api.interop.ForeignAccess;
-import com.oracle.truffle.api.interop.InteropException;
-import com.oracle.truffle.api.interop.Message;
-import com.oracle.truffle.api.interop.TruffleObject;
-import com.oracle.truffle.api.nodes.Node;
-import com.oracle.truffle.nfi.test.interop.TestCallback;
-import com.oracle.truffle.tck.TruffleRunner;
-import com.oracle.truffle.tck.TruffleRunner.Inject;
 import static org.hamcrest.CoreMatchers.instanceOf;
 import static org.hamcrest.CoreMatchers.is;
+import static org.hamcrest.MatcherAssert.assertThat;
+
 import org.junit.AfterClass;
 import org.junit.Assert;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
+import com.oracle.truffle.api.CallTarget;
+import com.oracle.truffle.api.frame.VirtualFrame;
+import com.oracle.truffle.api.interop.InteropException;
+import com.oracle.truffle.api.interop.InteropLibrary;
+import com.oracle.truffle.api.interop.TruffleObject;
+import com.oracle.truffle.nfi.test.interop.TestCallback;
+import com.oracle.truffle.tck.TruffleRunner;
+import com.oracle.truffle.tck.TruffleRunner.Inject;
+
 @RunWith(TruffleRunner.class)
 public class ObjectNFITest extends NFITest {
 
-    private static TruffleObject nativeAPI;
+    private static Object nativeAPI;
 
     private static class TestObject implements TruffleObject {
 
@@ -84,12 +85,6 @@ public class ObjectNFITest extends NFITest {
             Assert.assertEquals("field name", "intField", field);
             intField = value;
         }
-
-        @Override
-        public ForeignAccess getForeignAccess() {
-            Assert.fail("unexpected interop access to TestObject");
-            return null;
-        }
     }
 
     interface ReadIntField {
@@ -104,23 +99,23 @@ public class ObjectNFITest extends NFITest {
 
     @BeforeClass
     public static void initEnv() {
-        TruffleObject createNewObject = new TestCallback(0, (args) -> new TestObject());
-        TruffleObject readIntField = new TestCallback(2, (args) -> {
-            Assert.assertThat("args[0]", args[0], is(instanceOf(TestObject.class)));
-            Assert.assertThat("args[1]", args[1], is(instanceOf(String.class)));
+        Object createNewObject = new TestCallback(0, (args) -> new TestObject());
+        Object readIntField = new TestCallback(2, (args) -> {
+            assertThat("args[0]", args[0], is(instanceOf(TestObject.class)));
+            assertThat("args[1]", args[1], is(instanceOf(String.class)));
             return ((TestObject) args[0]).readField((String) args[1]);
         });
-        TruffleObject writeIntField = new TestCallback(3, (args) -> {
-            Assert.assertThat("args[0]", args[0], is(instanceOf(TestObject.class)));
-            Assert.assertThat("args[1]", args[1], is(instanceOf(String.class)));
-            Assert.assertThat("args[2]", args[2], is(instanceOf(Integer.class)));
+        Object writeIntField = new TestCallback(3, (args) -> {
+            assertThat("args[0]", args[0], is(instanceOf(TestObject.class)));
+            assertThat("args[1]", args[1], is(instanceOf(String.class)));
+            assertThat("args[2]", args[2], is(instanceOf(Integer.class)));
             ((TestObject) args[0]).writeField((String) args[1], (Integer) args[2]);
             return null;
         });
 
-        TruffleObject initializeAPI = lookupAndBind("initialize_api", "( env, ():object, (object,string):sint32, (object,string,sint32):void ) : pointer");
+        Object initializeAPI = lookupAndBind("initialize_api", "( env, ():object, (object,string):sint32, (object,string,sint32):void ) : pointer");
         try {
-            nativeAPI = (TruffleObject) ForeignAccess.sendExecute(Message.EXECUTE.createNode(), initializeAPI, createNewObject, readIntField, writeIntField);
+            nativeAPI = UNCACHED_INTEROP.execute(initializeAPI, createNewObject, readIntField, writeIntField);
         } catch (InteropException ex) {
             throw new AssertionError(ex);
         }
@@ -128,12 +123,14 @@ public class ObjectNFITest extends NFITest {
 
     @AfterClass
     public static void deleteAPI() {
-        TruffleObject deleteAPI = lookupAndBind("delete_api", "(env, pointer):void");
-        try {
-            ForeignAccess.sendExecute(Message.EXECUTE.createNode(), deleteAPI, nativeAPI);
-            nativeAPI = null;
-        } catch (InteropException ex) {
-            throw new AssertionError(ex);
+        if (nativeAPI != null) {
+            Object deleteAPI = lookupAndBind("delete_api", "(env, pointer):void");
+            try {
+                UNCACHED_INTEROP.execute(deleteAPI, nativeAPI);
+                nativeAPI = null;
+            } catch (InteropException ex) {
+                throw new AssertionError(ex);
+            }
         }
     }
 
@@ -149,7 +146,7 @@ public class ObjectNFITest extends NFITest {
         TestObject testObj = new TestObject(42);
 
         Object ret = callTarget.call(nativeAPI, testObj);
-        Assert.assertThat("return value", ret, is(instanceOf(TestObject.class)));
+        assertThat("return value", ret, is(instanceOf(TestObject.class)));
 
         TestObject testRet = (TestObject) ret;
         Assert.assertNotSame("return value", testObj, testRet);
@@ -160,13 +157,13 @@ public class ObjectNFITest extends NFITest {
 
     public class TestKeepObjectNode extends NFITestRootNode {
 
-        final TruffleObject keepExistingObject = lookupAndBind("keep_existing_object", "(env, object):pointer");
-        final TruffleObject freeAndGetObject = lookupAndBind("free_and_get_object", "(env, pointer):object");
-        final TruffleObject freeAndGetContent = lookupAndBind("free_and_get_content", "(env, pointer, pointer):sint32");
+        final Object keepExistingObject = lookupAndBind("keep_existing_object", "(env, object):pointer");
+        final Object freeAndGetObject = lookupAndBind("free_and_get_object", "(env, pointer):object");
+        final Object freeAndGetContent = lookupAndBind("free_and_get_content", "(env, pointer, pointer):sint32");
 
-        @Child Node executeKeepExistingObject = Message.EXECUTE.createNode();
-        @Child Node executeFreeAndGetObject = Message.EXECUTE.createNode();
-        @Child Node executeFreeAndGetContent = Message.EXECUTE.createNode();
+        @Child InteropLibrary keepExistingObjectInterop = getInterop(keepExistingObject);
+        @Child InteropLibrary freeAndGetObjectInterop = getInterop(freeAndGetObject);
+        @Child InteropLibrary freeAndGetContentInterop = getInterop(freeAndGetContent);
 
         @Override
         public Object executeTest(VirtualFrame frame) throws InteropException {
@@ -174,19 +171,19 @@ public class ObjectNFITest extends NFITest {
 
             testArg.intField = 42;
 
-            Object nativePtr1 = ForeignAccess.sendExecute(executeKeepExistingObject, keepExistingObject, obj);
-            Object nativePtr2 = ForeignAccess.sendExecute(executeKeepExistingObject, keepExistingObject, obj);
-            Object nativePtr3 = ForeignAccess.sendExecute(executeKeepExistingObject, keepExistingObject, obj);
+            Object nativePtr1 = keepExistingObjectInterop.execute(keepExistingObject, obj);
+            Object nativePtr2 = keepExistingObjectInterop.execute(keepExistingObject, obj);
+            Object nativePtr3 = keepExistingObjectInterop.execute(keepExistingObject, obj);
 
-            Object ret = ForeignAccess.sendExecute(executeFreeAndGetContent, freeAndGetContent, nativeAPI, nativePtr1);
+            Object ret = freeAndGetContentInterop.execute(freeAndGetContent, nativeAPI, nativePtr1);
             assertEquals(42, (int) (Integer) ret);
 
             testArg.intField--;
 
-            ret = ForeignAccess.sendExecute(executeFreeAndGetContent, freeAndGetContent, nativeAPI, nativePtr2);
+            ret = freeAndGetContentInterop.execute(freeAndGetContent, nativeAPI, nativePtr2);
             assertEquals(41, (int) (Integer) ret);
 
-            return ForeignAccess.sendExecute(executeFreeAndGetObject, freeAndGetObject, nativePtr3);
+            return freeAndGetObjectInterop.execute(freeAndGetObject, nativePtr3);
         }
     }
 
@@ -196,22 +193,22 @@ public class ObjectNFITest extends NFITest {
 
         Object finalRet = callTarget.call(testArg);
 
-        Assert.assertThat("return value", finalRet, is(instanceOf(TestObject.class)));
+        assertThat("return value", finalRet, is(instanceOf(TestObject.class)));
         Assert.assertSame("return value", testArg, finalRet);
     }
 
     public static class TestKeepNewObjectNode extends NFITestRootNode {
 
-        final TruffleObject keepNewObject = lookupAndBind("keep_new_object", "(pointer):pointer");
-        final TruffleObject freeAndGetObject = lookupAndBind("free_and_get_object", "(env, pointer):object");
+        final Object keepNewObject = lookupAndBind("keep_new_object", "(pointer):pointer");
+        final Object freeAndGetObject = lookupAndBind("free_and_get_object", "(env, pointer):object");
 
-        @Child Node executeKeepNewObject = Message.EXECUTE.createNode();
-        @Child Node executeFreeAndGetObject = Message.EXECUTE.createNode();
+        @Child InteropLibrary keepNewObjectInterop = getInterop(keepNewObject);
+        @Child InteropLibrary freeAndGetObjectInterop = getInterop(freeAndGetObject);
 
         @Override
         public Object executeTest(VirtualFrame frame) throws InteropException {
-            Object nativePtr = ForeignAccess.sendExecute(executeKeepNewObject, keepNewObject, nativeAPI);
-            return ForeignAccess.sendExecute(executeFreeAndGetObject, freeAndGetObject, nativePtr);
+            Object nativePtr = keepNewObjectInterop.execute(keepNewObject, nativeAPI);
+            return freeAndGetObjectInterop.execute(freeAndGetObject, nativePtr);
         }
     }
 
@@ -219,28 +216,27 @@ public class ObjectNFITest extends NFITest {
     public void testKeepNewObject(@Inject(TestKeepNewObjectNode.class) CallTarget callTarget) {
         Object ret = callTarget.call();
 
-        Assert.assertThat("return value", ret, is(instanceOf(TestObject.class)));
+        assertThat("return value", ret, is(instanceOf(TestObject.class)));
         Assert.assertEquals("intField", 8472, ((TestObject) ret).intField);
     }
 
     public class TestCompareObjectNode extends NFITestRootNode {
 
-        final TruffleObject keepExistingObject = lookupAndBind("keep_existing_object", "(env, object):pointer");
-        final TruffleObject compareExistingObject = lookupAndBind("compare_existing_object", "(env, pointer, pointer):sint32");
+        final Object keepExistingObject = lookupAndBind("keep_existing_object", "(env, object):pointer");
+        final Object compareExistingObject = lookupAndBind("compare_existing_object", "(env, pointer, pointer):sint32");
 
-        @Child Node executeKeepExistingObject = Message.EXECUTE.createNode();
-        @Child Node executeCompareExistingObject = Message.EXECUTE.createNode();
-        @Child Node executeFreeAndGetContent = Message.EXECUTE.createNode();
+        @Child InteropLibrary keepExistingObjectInterop = getInterop(keepExistingObject);
+        @Child InteropLibrary compareExistingObjectInterop = getInterop(compareExistingObject);
 
         @Override
         public Object executeTest(VirtualFrame frame) throws InteropException {
             Object obj1 = frame.getArguments()[0];
             Object obj2 = frame.getArguments()[1];
 
-            Object nativePtr1 = ForeignAccess.sendExecute(executeKeepExistingObject, keepExistingObject, obj1);
-            Object nativePtr2 = ForeignAccess.sendExecute(executeKeepExistingObject, keepExistingObject, obj2);
+            Object nativePtr1 = keepExistingObjectInterop.execute(keepExistingObject, obj1);
+            Object nativePtr2 = keepExistingObjectInterop.execute(keepExistingObject, obj2);
 
-            Object ret = ForeignAccess.sendExecute(executeCompareExistingObject, compareExistingObject, nativePtr1, nativePtr2);
+            Object ret = compareExistingObjectInterop.execute(compareExistingObject, nativePtr1, nativePtr2);
             return ret;
         }
     }

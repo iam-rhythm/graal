@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2023, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -45,7 +45,7 @@ import java.util.List;
 import org.graalvm.polyglot.PolyglotException;
 import org.graalvm.polyglot.SourceSection;
 import org.graalvm.polyglot.Value;
-import static org.graalvm.polyglot.management.ExecutionListener.IMPL;
+import org.graalvm.polyglot.impl.AbstractPolyglotImpl.AbstractExecutionEventDispatch;
 
 /**
  * An execution event object passed to an execution listener consumer. Execution event instances
@@ -53,24 +53,26 @@ import static org.graalvm.polyglot.management.ExecutionListener.IMPL;
  * until the context was closed.
  *
  * @see ExecutionListener For further details.
- * @since 1.0
+ * @since 19.0
  */
 public final class ExecutionEvent {
 
-    private final Object impl;
+    final AbstractExecutionEventDispatch dispatch;
+    final Object receiver;
 
-    ExecutionEvent(Object impl) {
-        this.impl = impl;
+    ExecutionEvent(AbstractExecutionEventDispatch dispatch, Object receiver) {
+        this.dispatch = dispatch;
+        this.receiver = receiver;
     }
 
     /**
      * Returns the source location of the event that was triggered or <code>null</code> if no
      * location source location is available.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public SourceSection getLocation() {
-        return IMPL.getLocation(impl);
+        return (SourceSection) dispatch.getExecutionEventLocation(receiver);
     }
 
     /**
@@ -78,10 +80,10 @@ public final class ExecutionEvent {
      * available for events caused by expressions and statements. In this case the name of the
      * containing root will be returned.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public String getRootName() {
-        return IMPL.getRootName(impl);
+        return dispatch.getExecutionEventRootName(receiver);
     }
 
     /**
@@ -94,10 +96,11 @@ public final class ExecutionEvent {
      * unmodifiable. The returned input values may escape the event consumer and remain valid until
      * the context is closed.
      *
-     * @since 1.0
+     * @since 19.0
      */
+    @SuppressWarnings("unchecked")
     public List<Value> getInputValues() {
-        return IMPL.getInputValues(impl);
+        return (List<Value>) (List<?>) dispatch.getExecutionEventInputValues(receiver);
     }
 
     /**
@@ -108,10 +111,10 @@ public final class ExecutionEvent {
      * events. The returned value is allowed to escape the event consumer and remain valid until the
      * context is closed.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public Value getReturnValue() {
-        return IMPL.getReturnValue(impl);
+        return (Value) dispatch.getExecutionEventReturnValue(receiver);
     }
 
     /**
@@ -122,10 +125,10 @@ public final class ExecutionEvent {
      * events if an exception was thrown when the location was executed. The returned value is
      * allowed to escape the event consumer and remains valid until the context is closed.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public PolyglotException getException() {
-        return IMPL.getException(impl);
+        return (PolyglotException) dispatch.getExecutionEventException(receiver);
     }
 
     /**
@@ -133,10 +136,10 @@ public final class ExecutionEvent {
      * <code>false</code>. The collection of expression events may be enabled by calling
      * {@link ExecutionListener.Builder#expressions(boolean)}.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public boolean isExpression() {
-        return IMPL.isExpression(impl);
+        return dispatch.isExecutionEventExpression(receiver);
     }
 
     /**
@@ -144,10 +147,10 @@ public final class ExecutionEvent {
      * <code>false</code>. The collection of statement events may be enabled by calling
      * {@link ExecutionListener.Builder#statements(boolean)}.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public boolean isStatement() {
-        return IMPL.isStatement(impl);
+        return dispatch.isExecutionEventStatement(receiver);
     }
 
     /**
@@ -155,16 +158,16 @@ public final class ExecutionEvent {
      * closure, else <code>false</code>. The collection of root events may be enabled by calling
      * {@link ExecutionListener.Builder#roots(boolean)}.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public boolean isRoot() {
-        return IMPL.isRoot(impl);
+        return dispatch.isExecutionEventRoot(receiver);
     }
 
     /**
      * {@inheritDoc}
      *
-     * @since 1.0
+     * @since 19.0
      */
     @Override
     public String toString() {

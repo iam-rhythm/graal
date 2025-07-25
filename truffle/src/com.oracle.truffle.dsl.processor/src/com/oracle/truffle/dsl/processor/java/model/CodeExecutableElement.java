@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -44,7 +44,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 
-import javax.annotation.processing.ProcessingEnvironment;
 import javax.lang.model.element.AnnotationMirror;
 import javax.lang.model.element.AnnotationValue;
 import javax.lang.model.element.Element;
@@ -59,6 +58,7 @@ import javax.lang.model.type.TypeMirror;
 
 import com.oracle.truffle.dsl.processor.java.ElementUtils;
 
+@SuppressWarnings("this-escape")
 public class CodeExecutableElement extends CodeElement<Element> implements ExecutableElement {
 
     private final List<TypeMirror> throwables = new ArrayList<>();
@@ -83,6 +83,7 @@ public class CodeExecutableElement extends CodeElement<Element> implements Execu
         super(modifiers);
         this.returnType = returnType;
         this.name = CodeNames.of(name);
+
         for (CodeVariableElement codeParameter : parameters) {
             addParameter(codeParameter);
         }
@@ -226,13 +227,25 @@ public class CodeExecutableElement extends CodeElement<Element> implements Execu
         return v.visitExecutable(this, p);
     }
 
-    public static CodeExecutableElement clone(@SuppressWarnings("unused") ProcessingEnvironment env, ExecutableElement method) {
+    public static CodeExecutableElement cloneNoAnnotations(ExecutableElement executable) {
+        CodeExecutableElement clone = CodeExecutableElement.clone(executable);
+        clone.getAnnotationMirrors().clear();
+        for (VariableElement var : clone.getParameters()) {
+            ((CodeVariableElement) var).getAnnotationMirrors().clear();
+        }
+        return clone;
+    }
+
+    public static CodeExecutableElement clone(ExecutableElement method) {
         CodeExecutableElement copy = new CodeExecutableElement(method.getReturnType(), method.getSimpleName().toString());
         for (TypeMirror thrownType : method.getThrownTypes()) {
             copy.addThrownType(thrownType);
         }
         copy.setDefaultValue(method.getDefaultValue());
 
+        for (TypeParameterElement parameter : method.getTypeParameters()) {
+            copy.getTypeParameters().add(parameter);
+        }
         for (AnnotationMirror mirror : method.getAnnotationMirrors()) {
             copy.addAnnotationMirror(mirror);
         }
@@ -244,10 +257,25 @@ public class CodeExecutableElement extends CodeElement<Element> implements Execu
         }
         copy.getModifiers().addAll(method.getModifiers());
         copy.setVarArgs(method.isVarArgs());
+        if (method instanceof CodeExecutableElement) {
+            copy.setBodyTree(((CodeExecutableElement) method).getBodyTree());
+        }
         return copy;
     }
 
     public TypeMirror getReceiverType() {
         throw new UnsupportedOperationException();
+    }
+
+    public void renameArguments(String... args) {
+        for (int i = 0; i < args.length && i < getParameters().size(); i++) {
+            ((CodeVariableElement) getParameters().get(i)).setName(args[i]);
+        }
+    }
+
+    public void changeTypes(TypeMirror... args) {
+        for (int i = 0; i < args.length && i < getParameters().size(); i++) {
+            ((CodeVariableElement) getParameters().get(i)).setType(args[i]);
+        }
     }
 }

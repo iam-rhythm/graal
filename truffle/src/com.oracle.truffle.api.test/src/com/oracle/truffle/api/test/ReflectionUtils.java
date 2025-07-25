@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2016, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -64,7 +64,19 @@ public class ReflectionUtils {
 
     public static Object getField(Object value, String name) {
         try {
-            Field f = value.getClass().getDeclaredField(name);
+            Class<?> c = value.getClass();
+            Field f = null;
+            while (c != null) {
+                try {
+                    f = c.getDeclaredField(name);
+                    break;
+                } catch (NoSuchFieldException e) {
+                    c = c.getSuperclass();
+                    if (c == null) {
+                        throw e;
+                    }
+                }
+            }
             setAccessible(f, true);
             return f.get(value);
         } catch (Exception e) {
@@ -111,22 +123,16 @@ public class ReflectionUtils {
      * {@code flag}.
      */
     public static void setAccessible(Field field, boolean flag) {
-        if (!Java8OrEarlier) {
-            openForReflectionTo(field.getDeclaringClass(), ReflectionUtils.class);
-        }
+        openForReflectionTo(field.getDeclaringClass(), ReflectionUtils.class);
         field.setAccessible(flag);
     }
-
-    public static final boolean Java8OrEarlier = System.getProperty("java.specification.version").compareTo("1.9") < 0;
 
     /**
      * Calls {@link AccessibleObject#setAccessible(boolean)} on {@code executable} with the value
      * {@code flag}.
      */
     public static void setAccessible(Executable executable, boolean flag) {
-        if (!Java8OrEarlier) {
-            openForReflectionTo(executable.getDeclaringClass(), ReflectionUtils.class);
-        }
+        openForReflectionTo(executable.getDeclaringClass(), ReflectionUtils.class);
         executable.setAccessible(flag);
     }
 
@@ -164,12 +170,47 @@ public class ReflectionUtils {
 
     public static Object invoke(Object object, String name, Class<?>[] argTypes, Object... args) {
         try {
-            Method m = object.getClass().getDeclaredMethod(name, argTypes);
-            setAccessible(m, true);
-            return m.invoke(object, args);
+            return requireDeclaredMethod(object.getClass(), name, argTypes).invoke(object, args);
         } catch (Exception e) {
             throw new AssertionError(e);
         }
+    }
+
+    public static Method requireDeclaredMethod(Class<?> clazz, String name, Class<?>[] argTypes) {
+        try {
+            Class<?> lookupClass = clazz;
+            Method found = null;
+
+            while (found == null && lookupClass != null) {
+                if (argTypes == null) {
+                    // search just by name
+                    for (Method search : lookupClass.getDeclaredMethods()) {
+                        if (search.getName().equals(name)) {
+                            if (found != null) {
+                                throw new AssertionError("Ambiguous method name " + search + " " + found + ". Use argTypes to disamgbiguate.");
+                            }
+                            found = search;
+                        }
+                    }
+                } else {
+                    try {
+                        found = lookupClass.getDeclaredMethod(name, argTypes);
+                    } catch (NoSuchMethodException e) {
+                    }
+                }
+                lookupClass = lookupClass.getSuperclass();
+            }
+
+            if (found == null) {
+                throw new NoSuchMethodException(name);
+            }
+
+            setAccessible(found, true);
+            return found;
+        } catch (Exception e) {
+            throw new AssertionError(e);
+        }
+
     }
 
     public static Object invoke(Object object, String name, Object... args) {

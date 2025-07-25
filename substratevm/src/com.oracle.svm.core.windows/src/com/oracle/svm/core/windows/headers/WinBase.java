@@ -24,35 +24,40 @@
  */
 package com.oracle.svm.core.windows.headers;
 
-import org.graalvm.nativeimage.Platform;
-import org.graalvm.nativeimage.Platforms;
 import org.graalvm.nativeimage.c.CContext;
 import org.graalvm.nativeimage.c.constant.CConstant;
 import org.graalvm.nativeimage.c.function.CFunction;
 import org.graalvm.nativeimage.c.function.CFunction.Transition;
-import org.graalvm.nativeimage.c.struct.AllowWideningCast;
 import org.graalvm.nativeimage.c.struct.CField;
+import org.graalvm.nativeimage.c.struct.CPointerTo;
 import org.graalvm.nativeimage.c.struct.CStruct;
 import org.graalvm.nativeimage.c.type.CIntPointer;
 import org.graalvm.nativeimage.c.type.CLongPointer;
-import org.graalvm.nativeimage.c.type.CCharPointer;
-import org.graalvm.word.Pointer;
+import org.graalvm.nativeimage.c.type.VoidPointer;
 import org.graalvm.word.PointerBase;
-import org.graalvm.word.UnsignedWord;
-import org.graalvm.word.WordBase;
+
+import com.oracle.svm.core.windows.headers.WindowsLibC.WCharPointer;
 
 // Checkstyle: stop
 
 @CContext(WindowsDirectives.class)
-@Platforms(Platform.WINDOWS.class)
 public class WinBase {
 
     public static final int MAX_PATH = 260;
+    public static final int UNLEN = 256;
 
     /**
      * Windows opaque Handle type
      */
-    public interface HANDLE extends WordBase {
+    public interface HANDLE extends PointerBase {
+    }
+
+    @CConstant
+    public static native HANDLE INVALID_HANDLE_VALUE();
+
+    @CPointerTo(nameOfCType = "HANDLE")
+    public interface LPHANDLE extends PointerBase {
+        HANDLE read();
     }
 
     /**
@@ -61,209 +66,25 @@ public class WinBase {
     public interface HMODULE extends PointerBase {
     }
 
-    /**
-     * Structure containing information about physical and virtual memory.
-     */
-    @CStruct(addStructKeyword = false)
-    public interface MEMORYSTATUSEX extends PointerBase {
-        @CField
-        @AllowWideningCast
-        int dwLength();
+    @CPointerTo(nameOfCType = "HMODULE")
+    public interface HMODULEPointer extends PointerBase {
+        public HMODULE read();
 
-        @CField
-        void set_dwLength(int value);
-
-        @CField
-        @AllowWideningCast
-        int dwMemoryLoad();
-
-        @CField
-        long ullTotalPhys();
-
-        @CField
-        long ullAvailPhys();
-
-        @CField
-        long ullTotalPageFile();
-
-        @CField
-        long ullAvailPageFile();
-
-        @CField
-        long ullTotalVirtual();
-
-        @CField
-        long ullAvailVirtual();
-
-        @CField
-        long ullAvailExtendedVirtual();
+        public void write(HMODULE value);
     }
 
     /**
-     * Return information about physical and virtual memory.
+     * Contains a 64-bit value representing the number of 100-nanosecond intervals since January 1,
+     * 1601 (UTC).
      */
-    @CFunction(transition = Transition.NO_TRANSITION)
-    public static native boolean GlobalMemoryStatusEx(MEMORYSTATUSEX lpBuffer);
-
-    /**
-     * Structure containing information about the current computer system.
-     */
-    @CStruct(addStructKeyword = false)
-    public interface SYSTEM_INFO extends PointerBase {
+    @CStruct
+    public interface FILETIME extends PointerBase {
         @CField
-        @AllowWideningCast
-        int wProcessorArchitecture();
+        int dwLowDateTime();
 
         @CField
-        @AllowWideningCast
-        int wReserved();
-
-        @CField
-        @AllowWideningCast
-        int dwPageSize();
-
-        @CField
-        Pointer lpMinimumApplicationAddress();
-
-        @CField
-        Pointer lpMaximumApplicationAddress();
-
-        @CField
-        @AllowWideningCast
-        long dwActiveProcessorMask();
-
-        @CField
-        @AllowWideningCast
-        int dwNumberOfProcessors();
-
-        @CField
-        @AllowWideningCast
-        int dwProcessorType();
-
-        @CField
-        @AllowWideningCast
-        int dwAllocationGranularity();
-
-        @CField
-        @AllowWideningCast
-        short wProcessorLevel();
-
-        @CField
-        @AllowWideningCast
-        short wProcessorRevision();
+        int dwHighDateTime();
     }
-
-    /**
-     * Return information about the current computer system.
-     */
-    @CFunction(transition = Transition.NO_TRANSITION)
-    public static native void GetSystemInfo(SYSTEM_INFO lpSystemInfo);
-
-    /**
-     * CreateFileMapping - reserve, commit or change states of a region of pages.
-     */
-    @CFunction(transition = Transition.NO_TRANSITION)
-    public static native Pointer CreateFileMapping(long hFile, Pointer lpFileMappingAttributes, int flProtect, int dwMaximumSizeHigh, int dwMaximumSizeLow, Pointer lpName);
-
-    /**
-     * MapViewOfFile - dwDesiredAccess Constants
-     */
-
-    @CConstant
-    public static native int FILE_MAP_EXECUTE();
-
-    @CConstant
-    public static native int FILE_MAP_READ();
-
-    @CConstant
-    public static native int FILE_MAP_WRITE();
-
-    /**
-     * MapViewOfFile - Maps a view of a file into the address space
-     */
-    @CFunction(transition = Transition.NO_TRANSITION)
-    public static native Pointer MapViewOfFile(Pointer hFileMappingObject, int dwDesiredAccess, int dwFileOffsetHigh, int dwFileOffsetLow, UnsignedWord dwNumberOfBytesToMap);
-
-    /**
-     * VirtualAlloc - flAllocationType Constants
-     */
-    @CConstant
-    public static native int MEM_COMMIT();
-
-    @CConstant
-    public static native int MEM_RESERVE();
-
-    @CConstant
-    public static native int MEM_RESET();
-
-    @CConstant
-    public static native int MEM_LARGE_PAGES();
-
-    @CConstant
-    public static native int MEM_PHYSICAL();
-
-    @CConstant
-    public static native int MEM_TOP_DOWN();
-
-    @CConstant
-    public static native int MEM_WRITE_WATCH();
-
-    /**
-     * VirtualAlloc - flProtect Constants
-     */
-    @CConstant
-    public static native int PAGE_EXECUTE();
-
-    @CConstant
-    public static native int PAGE_EXECUTE_READ();
-
-    @CConstant
-    public static native int PAGE_EXECUTE_READWRITE();
-
-    @CConstant
-    public static native int PAGE_GUARD();
-
-    @CConstant
-    public static native int PAGE_NOACCESS();
-
-    @CConstant
-    public static native int PAGE_NOCACHE();
-
-    @CConstant
-    public static native int PAGE_READONLY();
-
-    @CConstant
-    public static native int PAGE_READWRITE();
-
-    @CConstant
-    public static native int PAGE_WRITECOMBINE();
-
-    /**
-     * VirtualAlloc - reserve, commit or change states of a region of pages.
-     */
-    @CFunction(transition = Transition.NO_TRANSITION)
-    public static native Pointer VirtualAlloc(PointerBase lpAddress, UnsignedWord dwSize, int flAllocationType, int flProtect);
-
-    /**
-     * VirtualFree - dwFreeType Constants
-     */
-    @CConstant
-    public static native int MEM_DECOMMIT();
-
-    @CConstant
-    public static native int MEM_RELEASE();
-
-    /**
-     * VirtualFree
-     */
-    @CFunction(transition = Transition.NO_TRANSITION)
-    public static native int VirtualFree(PointerBase lpAddress, UnsignedWord dwSize, int dwFreeType);
-
-    /**
-     * VirtualProtect - change states of a region of pages.
-     */
-    @CFunction(transition = Transition.NO_TRANSITION)
-    public static native int VirtualProtect(PointerBase lpAddress, UnsignedWord dwSize, int flNewProtect, CIntPointer lpflOldProtect);
 
     /**
      * GetLastError - Return additional error information
@@ -273,6 +94,9 @@ public class WinBase {
 
     @CConstant
     public static native int ERROR_TIMEOUT();
+
+    @CConstant
+    public static native int ERROR_SUCCESS();
 
     /**
      * QueryPerformance Counter - used for elapsed time
@@ -293,72 +117,20 @@ public class WinBase {
     @CFunction(transition = Transition.NO_TRANSITION)
     public static native int CloseHandle(HANDLE hFile);
 
-    /**
-     * GetModuleHandle
-     */
     @CFunction(transition = Transition.NO_TRANSITION)
-    public static native Pointer GetModuleHandleA(PointerBase lpModuleName);
-
-    /**
-     * GetModuleFileNameA
-     */
-    @CFunction(transition = Transition.NO_TRANSITION)
-    public static native int GetModuleFileNameA(Pointer hModule, CCharPointer lpFilename, int nSize);
-
-    /**
-     * GetProcAddress
-     */
-    @CFunction(transition = Transition.NO_TRANSITION)
-    public static native PointerBase GetProcAddress(Pointer hModule, PointerBase lpProcName);
-
-    /**
-     * LoadLibraryA
-     */
-    @CFunction(transition = Transition.NO_TRANSITION)
-    public static native Pointer LoadLibraryA(PointerBase lpFileName);
-
-    /**
-     * LoadLibraryExA
-     */
-    @CFunction(transition = Transition.NO_TRANSITION)
-    public static native Pointer LoadLibraryExA(PointerBase lpFileName, int dummy, int flags);
-
-    /**
-     * SetDllDirectoryA
-     */
-    @CFunction(transition = Transition.NO_TRANSITION)
-    public static native boolean SetDllDirectoryA(PointerBase lpPathName);
-
-    @CStruct(addStructKeyword = false)
-    public interface MEMORY_BASIC_INFORMATION extends PointerBase {
-        @CField
-        Pointer BaseAddress();
-
-        @CField
-        Pointer AllocationBase();
-
-        @CField
-        int AllocationProtect();
-
-        @CField
-        UnsignedWord RegionSize();
-
-        @CField
-        int State();
-
-        @CField
-        int Protect();
-
-        @CField
-        int Type();
-    }
+    public static native int DuplicateHandle(HANDLE hSourceProcessHandle, HANDLE hSourceHandle, HANDLE hTargetProcessHandle, LPHANDLE lpTargetHandle, int dwDesiredAccess, boolean bInheritHandle,
+                    int dwOptions);
 
     @CFunction(transition = Transition.NO_TRANSITION)
-    public static native UnsignedWord VirtualQuery(PointerBase lpAddress, MEMORY_BASIC_INFORMATION lpBuffer, UnsignedWord dwLength);
+    public static native int GetCurrentDirectoryW(int nBufferLength, WCharPointer lpBuffer);
 
     @CFunction(transition = Transition.NO_TRANSITION)
-    public static native int GetVersion();
+    public static native int GetUserNameW(WCharPointer lpBuffer, CIntPointer pcbBuffer);
 
     @CFunction(transition = Transition.NO_TRANSITION)
-    public static native int GetCurrentDirectoryA(long nBufferLength, CCharPointer lpBuffer);
+    public static native int GetUserProfileDirectoryW(HANDLE hToken, WCharPointer lpProfileDir, CIntPointer lpcchSize);
+
+    @CFunction(transition = Transition.NO_TRANSITION)
+    public static native WinBase.HANDLE CreateSemaphoreA(VoidPointer lpSemaphoreAttributes, int lInitialCount, int lMaximumCount, VoidPointer lpName);
+
 }

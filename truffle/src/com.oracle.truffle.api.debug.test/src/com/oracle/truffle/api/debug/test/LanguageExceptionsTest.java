@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -42,24 +42,24 @@ package com.oracle.truffle.api.debug.test;
 
 import java.io.PrintWriter;
 import java.io.StringWriter;
-import java.util.Collections;
 import java.util.Objects;
+import java.util.function.BiFunction;
 
+import org.graalvm.polyglot.Source;
 import org.junit.Assert;
 import org.junit.Test;
 
-import com.oracle.truffle.api.Scope;
 import com.oracle.truffle.api.debug.DebugException;
+import com.oracle.truffle.api.debug.DebugScope;
 import com.oracle.truffle.api.debug.DebugValue;
 import com.oracle.truffle.api.debug.DebuggerSession;
 import com.oracle.truffle.api.debug.SuspendedCallback;
 import com.oracle.truffle.api.debug.SuspendedEvent;
 import com.oracle.truffle.api.frame.Frame;
+import com.oracle.truffle.api.interop.TruffleObject;
 import com.oracle.truffle.api.nodes.Node;
-import com.oracle.truffle.api.source.SourceSection;
+import com.oracle.truffle.api.test.polyglot.ProxyInteropObject;
 import com.oracle.truffle.api.test.polyglot.ProxyLanguage;
-
-import org.graalvm.polyglot.Source;
 
 /**
  * Test that all language Throwables are converted to DebugException.
@@ -67,55 +67,15 @@ import org.graalvm.polyglot.Source;
 public class LanguageExceptionsTest extends AbstractDebugTest {
 
     @Test
-    public void testBuggyToString() {
-        testBuggyLanguageCalls(new TestDebugBuggyLanguage() {
-            @Override
-            protected String toString(ProxyLanguage.LanguageContext c, Object value) {
-                throwBug(value);
-                return Objects.toString(value);
-            }
-        }, (SuspendedEvent event) -> {
-            DebugValue value = event.getTopStackFrame().getScope().getDeclaredValue("a");
-            value.as(String.class);
-        });
-    }
-
-    @Test
-    public void testBuggyFindMetaObject() {
-        testBuggyLanguageCalls(new TestDebugBuggyLanguage() {
-            @Override
-            protected Object findMetaObject(ProxyLanguage.LanguageContext context, Object value) {
-                throwBug(value);
-                return value.getClass().getName();
-            }
-        }, (SuspendedEvent event) -> {
-            DebugValue value = event.getTopStackFrame().getScope().getDeclaredValue("a");
-            value.getMetaObject();
-        });
-    }
-
-    @Test
-    public void testBuggySourceLocation() {
-        testBuggyLanguageCalls(new TestDebugBuggyLanguage() {
-            @Override
-            protected SourceSection findSourceLocation(ProxyLanguage.LanguageContext context, Object value) {
-                throwBug(value);
-                return null;
-            }
-        }, (SuspendedEvent event) -> {
-            DebugValue value = event.getTopStackFrame().getScope().getDeclaredValue("a");
-            value.getSourceLocation();
-        });
-    }
-
-    @Test
     public void testBuggyScope() {
         testBuggyLanguageCalls(new TestDebugBuggyLanguage() {
             @Override
-            protected Iterable<Scope> findLocalScopes(ProxyLanguage.LanguageContext context, Node node, Frame frame) {
-                String text = node.getSourceSection().getCharacters().toString();
-                throwBug(Integer.parseInt(text));
-                return Collections.emptyList();
+            protected BiFunction<Node, Frame, Object> scopeProvider() {
+                return (node, frame) -> {
+                    String text = node.getSourceSection().getCharacters().toString();
+                    throwBug(Integer.parseInt(text));
+                    return null;
+                };
             }
         }, (SuspendedEvent event) -> {
             event.getTopStackFrame().getScope();
@@ -145,7 +105,7 @@ public class LanguageExceptionsTest extends AbstractDebugTest {
         testBuggyLanguageCalls(new TestDebugBuggyLanguage(),
                         (SuspendedEvent event) -> {
                             DebugValue value = event.getTopStackFrame().getScope().getDeclaredValue("o");
-                            value.getProperty("A").as(String.class);
+                            value.getProperty("A").toDisplayString();
                         }, "READ");
     }
 
@@ -154,7 +114,7 @@ public class LanguageExceptionsTest extends AbstractDebugTest {
         testBuggyLanguageCalls(new TestDebugBuggyLanguage(),
                         (SuspendedEvent event) -> {
                             DebugValue value = event.getTopStackFrame().getScope().getDeclaredValue("o");
-                            value.getProperty("A").set(10);
+                            value.getProperty("A").set(event.getSession().createPrimitiveValue(10, null));
                         }, "WRITE");
     }
 
@@ -181,6 +141,22 @@ public class LanguageExceptionsTest extends AbstractDebugTest {
                             DebugValue value = event.getTopStackFrame().getScope().getDeclaredValue("o");
                             value.canExecute();
                         }, "CAN_EXECUTE");
+    }
+
+    @Test
+    public void testBuggyScopeName() {
+        testBuggyLanguageCalls(new TestDebugBuggyLanguage() {
+            @Override
+            protected BiFunction<Node, Frame, Object> scopeProvider() {
+                return (node, frame) -> {
+                    return new BuggyProxyScope(node);
+                };
+            }
+        },
+                        (SuspendedEvent event) -> {
+                            DebugScope scope = event.getStackFrames().iterator().next().getScope();
+                            scope.getName();
+                        }, "SCOPE_DISPLAY_STRING");
     }
 
     private void testBuggyLanguageCalls(ProxyLanguage language, SuspendedCallback callback) {
@@ -246,4 +222,39 @@ public class LanguageExceptionsTest extends AbstractDebugTest {
         Assert.assertTrue(trace, trace.indexOf(TestDebugBuggyLanguage.class.getName() + ".throwBug") > 0);
     }
 
+    private class BuggyProxyScope extends ProxyInteropObject.InteropWrapper {
+
+        protected final String error;
+        private final int errNum;
+
+        BuggyProxyScope(Node node) {
+            super(new TruffleObject() {
+            });
+            String text = node.getSourceSection().getCharacters().toString();
+            int index = 0;
+            while (!Character.isDigit(text.charAt(index))) {
+                index++;
+            }
+            error = text.substring(0, index).trim();
+            errNum = Integer.parseInt(text.substring(index));
+        }
+
+        @Override
+        protected boolean isScope() {
+            return true;
+        }
+
+        @Override
+        protected boolean hasMembers() {
+            return true;
+        }
+
+        @Override
+        public Object toDisplayString(boolean allowSideEffects) {
+            if ("SCOPE_DISPLAY_STRING".equals(error)) {
+                TestDebugBuggyLanguage.throwBug(errNum);
+            }
+            return "toDisplayString";
+        }
+    }
 }

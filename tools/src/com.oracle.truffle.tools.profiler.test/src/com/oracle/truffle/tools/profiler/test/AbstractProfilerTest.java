@@ -28,12 +28,15 @@ import java.io.ByteArrayOutputStream;
 
 import org.graalvm.polyglot.Context;
 import org.graalvm.polyglot.Source;
+import org.junit.After;
+import org.junit.Assert;
 import org.junit.Before;
 
 import com.oracle.truffle.api.instrumentation.SourceSectionFilter;
 import com.oracle.truffle.api.instrumentation.StandardTags;
 import com.oracle.truffle.api.instrumentation.test.InstrumentationTestLanguage;
 
+@SuppressWarnings("this-escape")
 public abstract class AbstractProfilerTest {
 
     protected Context context;
@@ -55,6 +58,16 @@ public abstract class AbstractProfilerTest {
                     "DEFINE(bar,ROOT(BLOCK(STATEMENT,LOOP(10, CALL(foo)))))," +
                     "CALL(bar)" +
             ")");
+
+    protected static void expectProfilerException(Runnable configProfiler, Runnable runProfiler) {
+        try {
+            configProfiler.run();
+            runProfiler.run();
+            Assert.fail("Exception expected.");
+        } catch (Exception e) {
+            Assert.assertEquals("class com.oracle.truffle.tools.profiler.ProfilerException", e.getClass().toString());
+        }
+    }
 
     protected Source makeSource(String s) {
         return Source.newBuilder(InstrumentationTestLanguage.ID, s, "test").buildLiteral();
@@ -79,6 +92,11 @@ public abstract class AbstractProfilerTest {
 
     protected void eval(Source source) {
         context.eval(source);
+    }
+
+    @After
+    public void after() {
+        context.close();
     }
 
 }

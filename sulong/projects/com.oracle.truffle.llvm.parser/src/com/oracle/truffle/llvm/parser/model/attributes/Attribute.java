@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates.
+ * Copyright (c) 2017, 2025, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -29,8 +29,11 @@
  */
 package com.oracle.truffle.llvm.parser.model.attributes;
 
+import com.oracle.truffle.llvm.runtime.types.Type;
+
 public abstract class Attribute {
 
+    // see llvm/include/llvm/Bitcode/LLVMBitCodes.h, enum AttributeKindCodes
     public enum Kind {
 
         NONE,
@@ -87,7 +90,56 @@ public abstract class Attribute {
         INACCESSIBLEMEM_OR_ARGMEMONLY,
         ALLOCSIZE,
         WRITEONLY,
-        SPECULATABLE;
+        SPECULATABLE,
+        STRICT_FP,
+        SANITIZE_HWADDRESS,
+        NOCF_CHECK,
+        OPT_FOR_FUZZING,
+        SHADOWCALLSTACK,
+        SPECULATIVE_LOAD_HARDENING,
+        IMMARG,
+        WILLRETURN,
+        NOFREE,
+        NOSYNC,
+        SANITIZE_MEMTAG,
+        PREALLOCATED,
+        NO_MERGE,
+        NULL_POINTER_IS_VALID,
+        NOUNDEF,
+        BYREF,
+        MUSTPROGRESS,
+        NO_CALLBACK,
+        HOT,
+        NO_PROFILE,
+        VSCALE_RANGE,
+        SWIFT_ASYNC,
+        NO_SANITIZE_COVERAGE,
+        ELEMENTTYPE,
+        DISABLE_SANITIZER_INSTRUMENTATION,
+        NO_SANITIZE_BOUNDS,
+        ALLOC_ALIGN,
+        ALLOCATED_POINTER,
+        ALLOC_KIND,
+        PRESPLIT_COROUTINE,
+        FNRETTHUNK_EXTERN,
+        SKIP_PROFILE,
+        MEMORY,
+        NOFPCLASS,
+        OPTIMIZE_FOR_DEBUGGING,
+        WRITABLE,
+        CORO_ONLY_DESTROY_WHEN_COMPLETE,
+        DEAD_ON_UNWIND,
+        RANGE,
+        SANITIZE_NUMERICAL_STABILITY,
+        INITIALIZES,
+        HYBRID_PATCHABLE,
+        SANITIZE_REALTIME,
+        SANITIZE_REALTIME_BLOCKING,
+        CORO_ELIDE_SAFE,
+        NO_EXT,
+        NO_DIVERGENCE_SOURCE,
+        SANITIZE_TYPE,
+        CAPTURES;
 
         private static final Kind[] VALUES = values();
 
@@ -122,12 +174,42 @@ public abstract class Attribute {
         }
     }
 
+    public static class KnownTypedAttribute extends KnownAttribute {
+
+        private final Type type;
+
+        public KnownTypedAttribute(Kind paramAttr, Type type) {
+            super(paramAttr);
+            this.type = type;
+        }
+
+        public Type getType() {
+            return type;
+        }
+    }
+
     public static final class KnownIntegerValueAttribute extends KnownAttribute {
         private final int value;
 
-        public KnownIntegerValueAttribute(Kind paramAttr, int value) {
+        public KnownIntegerValueAttribute(Kind paramAttr, long value) {
             super(paramAttr);
-            this.value = value;
+            if (paramAttr == Kind.ALLOCSIZE) {
+                /*
+                 * See https://llvm.org/docs/BitCodeFormat.html#paramattr-grp-code-entry-record
+                 * <quote> The allocsize attribute has a special encoding for its arguments. Its two
+                 * arguments, which are 32-bit integers, are packed into one 64-bit integer value
+                 * (i.e. (EltSizeParam << 32) | NumEltsParam), with NumEltsParam taking on the
+                 * sentinel value -1 if it is not specified. </quote>
+                 *
+                 * With the exception of Kind.ALIGN, #value is only used for printing so we are
+                 * ignoring the number of elements for now.
+                 */
+                int eltSizeParam = (int) (value >> 32L);
+                // int numEltsParam = (int) value; <-- ignored
+                this.value = eltSizeParam;
+            } else {
+                this.value = (int) value;
+            }
         }
 
         public int getValue() {

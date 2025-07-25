@@ -24,29 +24,24 @@
  */
 package com.oracle.graal.pointsto.flow;
 
-import org.graalvm.compiler.nodes.ValueNode;
-
-import com.oracle.graal.pointsto.BigBang;
-import com.oracle.graal.pointsto.api.PointstoOptions;
+import com.oracle.graal.pointsto.PointsToAnalysis;
 import com.oracle.graal.pointsto.flow.context.AnalysisContext;
-import com.oracle.graal.pointsto.flow.context.BytecodeLocation;
+import com.oracle.graal.pointsto.meta.AnalysisType;
 import com.oracle.graal.pointsto.typestate.TypeState;
 
-public final class DynamicNewInstanceTypeFlow extends TypeFlow<ValueNode> {
+import jdk.vm.ci.code.BytecodePosition;
 
-    protected final BytecodeLocation allocationSite;
-
+public final class DynamicNewInstanceTypeFlow extends TypeFlow<BytecodePosition> {
     /** The new type provider. */
-    protected TypeFlow<?> newTypeFlow;
+    private TypeFlow<?> newTypeFlow;
 
     /**
      * The allocation context for the generated dynamic object. Null if this is not a clone.
      */
-    protected final AnalysisContext allocationContext;
+    private final AnalysisContext allocationContext;
 
-    public DynamicNewInstanceTypeFlow(TypeFlow<?> newTypeFlow, ValueNode node, BytecodeLocation allocationLabel) {
-        super(node, null);
-        this.allocationSite = allocationLabel;
+    public DynamicNewInstanceTypeFlow(BytecodePosition location, TypeFlow<?> newTypeFlow, AnalysisType type) {
+        super(location, type);
         this.allocationContext = null;
         this.newTypeFlow = newTypeFlow;
 
@@ -58,53 +53,46 @@ public final class DynamicNewInstanceTypeFlow extends TypeFlow<ValueNode> {
          */
     }
 
-    private DynamicNewInstanceTypeFlow(BigBang bb, DynamicNewInstanceTypeFlow original, MethodFlowsGraph methodFlows, AnalysisContext allocationContext) {
+    private DynamicNewInstanceTypeFlow(PointsToAnalysis bb, DynamicNewInstanceTypeFlow original, MethodFlowsGraph methodFlows, AnalysisContext allocationContext) {
         super(original, methodFlows);
-        this.allocationSite = original.allocationSite;
         this.allocationContext = allocationContext;
         this.newTypeFlow = methodFlows.lookupCloneOf(bb, original.newTypeFlow);
     }
 
     @Override
-    public TypeFlow<ValueNode> copy(BigBang bb, MethodFlowsGraph methodFlows) {
-        AnalysisContext enclosingContext = methodFlows.context();
-        AnalysisContext allocContext = bb.contextPolicy().allocationContext(enclosingContext, PointstoOptions.MaxHeapContextDepth.getValue(bb.getOptions()));
-
+    public TypeFlow<BytecodePosition> copy(PointsToAnalysis bb, MethodFlowsGraph methodFlows) {
+        AnalysisContext allocContext = bb.analysisPolicy().allocationContext(bb, methodFlows);
         return new DynamicNewInstanceTypeFlow(bb, this, methodFlows, allocContext);
     }
 
     @Override
-    public void initClone(BigBang bb) {
-        assert this.isClone();
-        this.newTypeFlow.addObserver(bb, this);
+    public void initFlow(PointsToAnalysis bb) {
+        assert !bb.usePredicates() || newTypeFlow.getPredicate() != null || MethodFlowsGraph.nonMethodFlow(newTypeFlow) : "Missing predicate for the flow " + newTypeFlow + ", which is input for " +
+                        this;
+        newTypeFlow.addObserver(bb, this);
     }
 
     @Override
-    public void onObservedUpdate(BigBang bb) {
-        /* Only a clone should be updated */
-        assert this.isClone();
+    public boolean needsInitialization() {
+        return true;
+    }
 
+    @Override
+    protected void onFlowEnabled(PointsToAnalysis bb) {
+        if (newTypeFlow.isFlowEnabled()) {
+            bb.postTask(() -> onObservedUpdate(bb));
+        }
+    }
+
+    @Override
+    public void onObservedUpdate(PointsToAnalysis bb) {
+        if (!isFlowEnabled()) {
+            return;
+        }
         /* The state of the new type provider has changed. */
         TypeState newTypeState = newTypeFlow.getState();
-        TypeState currentTypeState = getState();
-
-        /* Generate a heap object for every new incoming type. */
-        TypeState resultState = newTypeState.typesStream()
-                        .filter(t -> !currentTypeState.containsType(t))
-                        .map(type -> TypeState.forAllocation(bb, source, allocationSite, type, allocationContext))
-                        .reduce(TypeState.forEmpty(), (s1, s2) -> TypeState.forUnion(bb, s1, s2));
-
-        assert !resultState.canBeNull();
-
-        addState(bb, resultState);
-    }
-
-    public TypeFlow<?> newTypeFlow() {
-        return newTypeFlow;
-    }
-
-    public BytecodeLocation allocationSite() {
-        return allocationSite;
+        TypeState updateState = bb.analysisPolicy().dynamicNewInstanceState(bb, getState(), newTypeState, source, allocationContext);
+        addState(bb, updateState);
     }
 
     public AnalysisContext allocationContext() {
@@ -112,9 +100,29 @@ public final class DynamicNewInstanceTypeFlow extends TypeFlow<ValueNode> {
     }
 
     @Override
+    public void setObserved(TypeFlow<?> declaredTypeFlow) {
+        this.newTypeFlow = declaredTypeFlow;
+    }
+
+    @Override
+    public void onObservedSaturated(PointsToAnalysis bb, TypeFlow<?> observed) {
+        if (bb.isClosed(declaredType)) {
+            /* When the new-type flow saturates start observing the flow of the declared type. */
+            replaceObservedWith(bb, declaredType);
+        } else {
+            /* Propagate the saturation stamp through the dynamic new instance flow. */
+            onSaturated(bb);
+        }
+    }
+
+    @Override
+    public boolean canSaturate(PointsToAnalysis bb) {
+        /* Dynamic new instance of closed types doesn't saturate, it tracks all input types. */
+        return !bb.isClosed(declaredType);
+    }
+
+    @Override
     public String toString() {
-        StringBuilder str = new StringBuilder();
-        str.append("DynamicNewInstanceFlow<").append(getState()).append(">");
-        return str.toString();
+        return "DynamicNewInstanceFlow<" + getStateDescription() + ">";
     }
 }

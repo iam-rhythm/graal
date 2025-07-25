@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,42 +40,43 @@
  */
 package com.oracle.truffle.polyglot;
 
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.PrintStream;
-import java.net.URL;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
-import java.util.Enumeration;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Properties;
+import java.util.Map;
+import java.util.ServiceLoader;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.function.Supplier;
+import java.util.stream.Stream;
+import java.util.stream.StreamSupport;
 
 import com.oracle.truffle.api.TruffleOptions;
 import com.oracle.truffle.api.instrumentation.TruffleInstrument;
-import java.util.Map;
-import java.util.WeakHashMap;
+import com.oracle.truffle.api.instrumentation.TruffleInstrument.Registration;
+import com.oracle.truffle.api.instrumentation.provider.TruffleInstrumentProvider;
+import com.oracle.truffle.polyglot.EngineAccessor.AbstractClassLoaderSupplier;
+import com.oracle.truffle.polyglot.EngineAccessor.StrongClassLoaderSupplier;
+import org.graalvm.polyglot.SandboxPolicy;
 
-//TODO (chumer): maybe this class should share some code with LanguageCache?
 final class InstrumentCache {
-
-    private static final boolean JDK8OrEarlier = System.getProperty("java.specification.version").compareTo("1.9") < 0;
-
     private static final List<InstrumentCache> nativeImageCache = TruffleOptions.AOT ? new ArrayList<>() : null;
-    private static Map<ClassLoader, List<InstrumentCache>> runtimeCaches = new WeakHashMap<>();
+    private static Map<List<AbstractClassLoaderSupplier>, List<InstrumentCache>> runtimeCaches = new HashMap<>();
 
-    private Class<? extends TruffleInstrument> instrumentClass;
     private final String className;
     private final String id;
     private final String name;
     private final String version;
+    private final String website;
     private final boolean internal;
-    private final ClassLoader loader;
     private final Set<String> services;
+    private final TruffleInstrumentProvider provider;
+    private final SandboxPolicy sandboxPolicy;
+    private final Map<String, InternalResourceCache> internalResources;
 
     /**
      * Initializes state for native image generation.
@@ -86,7 +87,22 @@ final class InstrumentCache {
      */
     @SuppressWarnings("unused")
     private static void initializeNativeImageState(ClassLoader imageClassLoader) {
-        nativeImageCache.addAll(doLoad(Collections.emptyList(), imageClassLoader));
+        nativeImageCache.addAll(doLoad(List.of(new StrongClassLoaderSupplier(imageClassLoader))));
+    }
+
+    /**
+     * Collect tools included in a native image.
+     *
+     * NOTE: this method is called reflectively by TruffleBaseFeature
+     */
+    @SuppressWarnings("unused")
+    private static Set<String> collectInstruments() {
+        assert TruffleOptions.AOT : "Only supported during image generation";
+        Set<String> res = new HashSet<>();
+        for (InstrumentCache instrumentCache : nativeImageCache) {
+            res.add(instrumentCache.id);
+        }
+        return res;
     }
 
     /**
@@ -100,114 +116,134 @@ final class InstrumentCache {
         runtimeCaches.clear();
     }
 
-    private InstrumentCache(String prefix, Properties info, ClassLoader loader) {
-        this.loader = loader;
-        this.className = info.getProperty(prefix + "className");
-        this.name = info.getProperty(prefix + "name");
-        this.version = info.getProperty(prefix + "version");
-        this.internal = Boolean.valueOf(info.getProperty(prefix + "internal"));
-        String loadedId = info.getProperty(prefix + "id");
-        if (loadedId.equals("")) {
-            /* use class name default id */
-            int lastIndex = className.lastIndexOf('$');
-            if (lastIndex == -1) {
-                lastIndex = className.lastIndexOf('.');
-            }
-            this.id = className.substring(lastIndex + 1, className.length());
-        } else {
-            this.id = loadedId;
-        }
-        int servicesCounter = 0;
-        this.services = new TreeSet<>();
-        for (;;) {
-            String nth = prefix + "service" + servicesCounter++;
-            String serviceName = info.getProperty(nth);
-            if (serviceName == null) {
-                break;
-            }
-            this.services.add(serviceName);
-        }
-        if (TruffleOptions.AOT) {
-            loadClass();
-        }
+    private InstrumentCache(String id, String name, String version, String className, boolean internal, Set<String> services,
+                    TruffleInstrumentProvider provider, String website, SandboxPolicy sandboxPolicy, Map<String, InternalResourceCache> internalResources) {
+        this.id = id;
+        this.name = name;
+        this.version = version;
+        this.website = website;
+        this.className = className;
+        this.internal = internal;
+        this.services = services;
+        this.provider = provider;
+        this.sandboxPolicy = sandboxPolicy;
+        this.internalResources = internalResources;
     }
 
-    public boolean isInternal() {
+    boolean isInternal() {
         return internal;
     }
 
-    static List<InstrumentCache> load(Collection<ClassLoader> loaders, ClassLoader additionalLoader) {
+    static List<InstrumentCache> load() {
         if (TruffleOptions.AOT) {
             return nativeImageCache;
         }
         synchronized (InstrumentCache.class) {
-            List<InstrumentCache> cache = runtimeCaches.get(additionalLoader);
+            List<AbstractClassLoaderSupplier> classLoaders = EngineAccessor.locatorOrDefaultLoaders();
+            List<InstrumentCache> cache = runtimeCaches.get(classLoaders);
             if (cache == null) {
-                cache = doLoad(loaders, additionalLoader);
-                runtimeCaches.put(additionalLoader, cache);
+                cache = doLoad(classLoaders);
+                runtimeCaches.put(classLoaders, cache);
             }
             return cache;
         }
     }
 
-    private static List<InstrumentCache> doLoad(Collection<ClassLoader> loaders, ClassLoader additionalLoader) {
+    static Collection<InstrumentCache> internalInstruments() {
+        Set<InstrumentCache> result = new HashSet<>();
+        for (InstrumentCache i : load()) {
+            if (i.isInternal()) {
+                result.add(i);
+            }
+        }
+        return result;
+    }
+
+    static List<InstrumentCache> doLoad(List<AbstractClassLoaderSupplier> suppliers) {
         List<InstrumentCache> list = new ArrayList<>();
         Set<String> classNamesUsed = new HashSet<>();
-        for (ClassLoader loader : loaders) {
-            loadForOne(loader, list, classNamesUsed);
+        ClassLoader truffleClassLoader = InstrumentCache.class.getClassLoader();
+        boolean usesTruffleClassLoader = false;
+        Map<String, Map<String, Supplier<InternalResourceCache>>> optionalResources = InternalResourceCache.loadOptionalInternalResources(suppliers);
+        for (AbstractClassLoaderSupplier supplier : suppliers) {
+            ClassLoader loader = supplier.get();
+            if (loader == null) {
+                continue;
+            }
+            usesTruffleClassLoader |= truffleClassLoader == loader;
+            loadProviders(loader).filter((p) -> supplier.accepts(p.getClass())).forEach((p) -> loadInstrumentImpl(p, list, classNamesUsed, optionalResources));
         }
-        if (additionalLoader != null) {
-            loadForOne(additionalLoader, list, classNamesUsed);
+        /*
+         * Resolves a missing debugger instrument when the GuestLangToolsClassLoader does not define
+         * module. If the ClassLoader does not define module it has no ServiceCatalog. The
+         * ServiceLoader does not load module services from parent classloader. This code can be
+         * removed if we add system classloader into GraalVMLocator.
+         */
+        if (!usesTruffleClassLoader) {
+            Module truffleModule = InstrumentCache.class.getModule();
+            loadProviders(truffleClassLoader).//
+                            filter((p) -> p.getClass().getModule().equals(truffleModule)).//
+                            forEach((p) -> loadInstrumentImpl(p, list, classNamesUsed, optionalResources));
         }
-        if (!JDK8OrEarlier) {
-            loadForOne(ModuleResourceLocator.createLoader(), list, classNamesUsed);
-        }
+        list.sort(Comparator.comparing(InstrumentCache::getId));
         return list;
     }
 
-    private static void loadForOne(ClassLoader loader, List<InstrumentCache> list, Set<String> classNamesUsed) {
-        if (loader == null) {
+    private static Stream<? extends TruffleInstrumentProvider> loadProviders(ClassLoader loader) {
+        return StreamSupport.stream(ServiceLoader.load(TruffleInstrumentProvider.class, loader).spliterator(), false);
+    }
+
+    private static void loadInstrumentImpl(TruffleInstrumentProvider provider, List<? super InstrumentCache> list, Set<? super String> classNamesUsed,
+                    Map<String, Map<String, Supplier<InternalResourceCache>>> optionalResources) {
+        Class<?> providerClass = provider.getClass();
+        Module providerModule = providerClass.getModule();
+        JDKSupport.exportTransitivelyTo(providerModule);
+        /*
+         * Forward the native access capability to all loaded tools.
+         */
+        JDKSupport.enableNativeAccess(providerModule);
+        Registration reg = providerClass.getAnnotation(Registration.class);
+        if (reg == null) {
+            emitWarning("Warning Truffle instrument ignored: Provider %s is missing @Registration annotation.", providerClass);
             return;
         }
-        Enumeration<URL> en;
-        try {
-            en = loader.getResources("META-INF/truffle/instrument");
-        } catch (IOException ex) {
-            throw new IllegalStateException("Cannot read list of Truffle instruments", ex);
-        }
-        while (en.hasMoreElements()) {
-            URL u = en.nextElement();
-            Properties p;
-            try {
-                p = new Properties();
-                try (InputStream is = u.openStream()) {
-                    p.load(is);
-                }
-            } catch (IOException ex) {
-                PrintStream out = System.err;
-                out.println("Cannot process " + u + " as language definition");
-                ex.printStackTrace();
-                continue;
+        String className = EngineAccessor.INSTRUMENT_PROVIDER.getInstrumentClassName(provider);
+        String name = reg.name();
+        String id = reg.id();
+        if (id == null || id.isEmpty()) {
+            /* use class name default id */
+            int lastIndex = className.lastIndexOf('$');
+            if (lastIndex == -1) {
+                lastIndex = className.lastIndexOf('.');
             }
-            for (int cnt = 1;; cnt++) {
-                String prefix = "instrument" + cnt + ".";
-                String className = p.getProperty(prefix + "className");
-                if (className == null) {
-                    break;
-                }
-                // we don't want multiple instruments with the same class name
-                if (!classNamesUsed.contains(className)) {
-                    classNamesUsed.add(className);
-                    list.add(new InstrumentCache(prefix, p, loader));
-                }
+            id = className.substring(lastIndex + 1);
+        }
+        String version = reg.version();
+        String website = reg.website();
+        SandboxPolicy sandboxPolicy = reg.sandbox();
+        boolean internal = reg.internal();
+        Set<String> servicesClassNames = new TreeSet<>(EngineAccessor.INSTRUMENT_PROVIDER.getServicesClassNames(provider));
+        Map<String, InternalResourceCache> resources = new HashMap<>();
+        for (String resourceId : EngineAccessor.INSTRUMENT_PROVIDER.getInternalResourceIds(provider)) {
+            resources.put(resourceId, new InternalResourceCache(id, resourceId, () -> EngineAccessor.INSTRUMENT_PROVIDER.createInternalResource(provider, resourceId)));
+        }
+        for (Map.Entry<String, Supplier<InternalResourceCache>> resourceSupplier : optionalResources.getOrDefault(id, Map.of()).entrySet()) {
+            InternalResourceCache resource = resourceSupplier.getValue().get();
+            InternalResourceCache old = resources.put(resourceSupplier.getKey(), resource);
+            if (old != null) {
+                throw InternalResourceCache.throwDuplicateOptionalResourceException(old, resource);
             }
         }
-        Collections.sort(list, new Comparator<InstrumentCache>() {
-            @Override
-            public int compare(InstrumentCache o1, InstrumentCache o2) {
-                return o1.getId().compareTo(o2.getId());
+        for (String optionalResourceId : reg.optionalResources()) {
+            if (!resources.containsKey(optionalResourceId)) {
+                resources.put(optionalResourceId, new InternalResourceCache(id, optionalResourceId, InternalResourceCache.nonExistingResource(id, optionalResourceId)));
             }
-        });
+        }
+        // we don't want multiple instruments with the same class name
+        if (!classNamesUsed.contains(className)) {
+            classNamesUsed.add(className);
+            list.add(new InstrumentCache(id, name, version, className, internal, servicesClassNames, provider, website, sandboxPolicy, Collections.unmodifiableMap(resources)));
+        }
     }
 
     String getId() {
@@ -226,11 +262,8 @@ final class InstrumentCache {
         return version;
     }
 
-    Class<?> getInstrumentationClass() {
-        if (!TruffleOptions.AOT && instrumentClass == null) {
-            loadClass();
-        }
-        return instrumentClass;
+    TruffleInstrument loadInstrument() {
+        return (TruffleInstrument) EngineAccessor.INSTRUMENT_PROVIDER.create(provider);
     }
 
     boolean supportsService(Class<?> clazz) {
@@ -241,12 +274,27 @@ final class InstrumentCache {
         return services.toArray(new String[0]);
     }
 
-    private void loadClass() {
-        try {
-            instrumentClass = Class.forName(className, true, loader).asSubclass(TruffleInstrument.class);
-        } catch (Exception ex) {
-            throw new IllegalStateException("Cannot initialize " + getName() + " instrument with implementation " + className, ex);
-        }
+    InternalResourceCache getResourceCache(String resourceId) {
+        return internalResources.get(resourceId);
     }
 
+    Collection<String> getResourceIds() {
+        return internalResources.keySet();
+    }
+
+    Collection<InternalResourceCache> getResources() {
+        return internalResources.values();
+    }
+
+    String getWebsite() {
+        return website;
+    }
+
+    SandboxPolicy getSandboxPolicy() {
+        return sandboxPolicy;
+    }
+
+    private static void emitWarning(String message, Object... args) {
+        PolyglotEngineImpl.logFallback(String.format(message + "%n", args));
+    }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2019, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -36,12 +36,14 @@ import com.oracle.truffle.tools.chromeinspector.InspectorExecutionContext;
  */
 class SessionClass extends AbstractInspectorObject {
 
-    private static final TruffleObject KEYS = new Keys();
+    private static final TruffleObject KEYS = new Keys(new String[0]);
 
-    private Supplier<InspectorExecutionContext> contextSupplier;
+    private final Supplier<InspectorExecutionContext> contextSupplier;
+    private final UndefinedProvider undefinedProvider;
 
-    SessionClass(Supplier<InspectorExecutionContext> contextSupplier) {
+    SessionClass(Supplier<InspectorExecutionContext> contextSupplier, UndefinedProvider undefinedProvider) {
         this.contextSupplier = contextSupplier;
+        this.undefinedProvider = undefinedProvider;
     }
 
     public static boolean isInstance(TruffleObject obj) {
@@ -55,12 +57,12 @@ class SessionClass extends AbstractInspectorObject {
 
     @Override
     @CompilerDirectives.TruffleBoundary
-    protected Object createNew(Object[] arguments) {
-        return new Session(contextSupplier);
+    protected Object instantiate(Object[] arguments) {
+        return new Session(contextSupplier, undefinedProvider);
     }
 
     @Override
-    protected TruffleObject getKeys() {
+    protected TruffleObject getMembers(boolean includeInternal) {
         return KEYS;
     }
 
@@ -80,23 +82,9 @@ class SessionClass extends AbstractInspectorObject {
     }
 
     @Override
-    protected Object invokeMethod(String name, Object[] arguments) {
+    protected Object invokeMember(String name, Object[] arguments) throws UnknownIdentifierException {
         CompilerDirectives.transferToInterpreter();
-        throw UnknownIdentifierException.raise(name);
-    }
-
-    static final class Keys extends AbstractInspectorArray {
-
-        @Override
-        int getLength() {
-            return 0;
-        }
-
-        @Override
-        Object getElementAt(int index) {
-            CompilerDirectives.transferToInterpreter();
-            throw UnknownIdentifierException.raise(Integer.toString(index));
-        }
+        throw UnknownIdentifierException.create(name);
     }
 
 }

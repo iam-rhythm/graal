@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -49,14 +49,15 @@ import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
 /**
- * Nodes annotated with this annotation (and their subclasses) will, if processed by the DSL,
- * automatically {@link Node#reportPolymorphicSpecialize() report polymorphic specializations}.
+ * Enables reporting of polymorphic specializations from this node or exported message to the
+ * runtime.
  *
  * Polymorphic specializations include, but are not limited to, activating another specialization,
  * increasing the number of instances of an active specialization, excluding a specialization, etc.
- * Individual specializations can be excluded from this consideration buy using the
- * {@link ReportPolymorphism.Exclude} Polymorphic specializations are never reported on the first
- * specialization.
+ *
+ * Additional information on the effect of {@link ReportPolymorphism} can be found in <a href=
+ * "https://github.com/oracle/graal/blob/master/truffle/docs/splitting/ReportingPolymorphism.md">
+ * ReportingPolymorphism.md</a>.
  *
  * @since 0.33
  */
@@ -70,12 +71,37 @@ public @interface ReportPolymorphism {
      * excluded from consideration when {@link Node#reportPolymorphicSpecialize() reporting
      * polymorphic specializations}.
      *
+     * Individual specializations can be excluded from this consideration by using the
+     * {@link ReportPolymorphism.Exclude} Polymorphic specializations are never reported on the
+     * first specialization.
+     *
      * @since 0.33
      */
     @Retention(RetentionPolicy.CLASS)
     @Target({ElementType.METHOD, ElementType.TYPE})
     @Inherited
     @interface Exclude {
+
+    }
+
+    /**
+     * Specializations annotated with this annotation are considered megamorphic. This means that on
+     * the first activation of such a specialization the node will
+     * {@link Node#reportPolymorphicSpecialize() report a polymorphic specialization}.
+     *
+     * This annotation can be used independently of {@link ReportPolymorphism}. This means that a
+     * node need not report every polymorphic specialization as with {@link ReportPolymorphism} but
+     * only ones that produce generic and expensive cases. For example, if a node has several fast
+     * specializations and a very slow generic specialization it does not make sense to report
+     * activations of these fast specializations as polymorphic specializations as they perform well
+     * even without runtime intervention (e.g. Splitting). On the other hand, the activation of the
+     * generic case is slow and something that the runtime might be able to remove.
+     *
+     * @since 20.3
+     */
+    @Retention(RetentionPolicy.CLASS)
+    @Target(ElementType.METHOD)
+    @interface Megamorphic {
 
     }
 }

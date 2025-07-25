@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -57,12 +57,8 @@ import org.graalvm.word.WordBase;
  * the pointer to the struct that is accessed
  * <p>
  * The field offset, i.e., the value that is added to the receiver, is a compile time constant.
- * <p>
- * The optional parameter {@code index} denotes an index, i.e., the receiver is treated as an array
- * of the struct. The type must be a primitive integer type or a {@link WordBase word type}. Address
- * arithmetic is used to scale the index with the size of the struct.
- * 
- * @since 1.0
+ *
+ * @since 19.0
  */
 @Retention(RetentionPolicy.RUNTIME)
 @Target({ElementType.METHOD})
@@ -73,7 +69,7 @@ public @interface CFieldAddress {
      * method name is used as the field name. A possible "addressOf" prefix of the method name is
      * removed.
      *
-     * @since 1.0
+     * @since 19.0
      */
     String value() default "";
 }

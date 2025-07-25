@@ -24,23 +24,18 @@
  */
 package com.oracle.svm.hosted.option;
 
-import static com.oracle.svm.core.option.SubstrateOptionsParser.BooleanOptionFormat.PLUS_MINUS;
+import static com.oracle.svm.common.option.CommonOptionParser.BooleanOptionFormat.PLUS_MINUS;
 import static com.oracle.svm.core.util.VMError.shouldNotReachHere;
 
-import java.lang.reflect.Modifier;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
-import java.util.SortedMap;
-import java.util.TreeMap;
 
+import jdk.graal.compiler.options.OptionsContainer;
 import org.graalvm.collections.EconomicMap;
 import org.graalvm.collections.EconomicSet;
-import org.graalvm.compiler.options.OptionDescriptor;
-import org.graalvm.compiler.options.OptionDescriptors;
-import org.graalvm.compiler.options.OptionKey;
-import org.graalvm.compiler.options.OptionValues;
 import org.graalvm.nativeimage.Platforms;
 
 import com.oracle.svm.core.option.HostedOptionKey;
@@ -48,62 +43,56 @@ import com.oracle.svm.core.option.RuntimeOptionKey;
 import com.oracle.svm.core.option.SubstrateOptionsParser;
 import com.oracle.svm.core.util.InterruptImageBuilding;
 import com.oracle.svm.core.util.UserError;
-import com.oracle.svm.hosted.ImageClassLoader;
+
+import jdk.graal.compiler.options.OptionDescriptor;
+import jdk.graal.compiler.options.OptionDescriptors;
+import jdk.graal.compiler.options.OptionKey;
+import jdk.graal.compiler.options.OptionValues;
 
 public class HostedOptionParser implements HostedOptionProvider {
 
-    private EconomicMap<OptionKey<?>, Object> hostedValues = OptionValues.newOptionMap();
-    private EconomicMap<OptionKey<?>, Object> runtimeValues = OptionValues.newOptionMap();
-    private SortedMap<String, OptionDescriptor> allHostedOptions = new TreeMap<>();
-    private SortedMap<String, OptionDescriptor> allRuntimeOptions = new TreeMap<>();
+    private final List<String> arguments;
+    private final EconomicMap<OptionKey<?>, Object> hostedValues = OptionValues.newOptionMap();
+    private final EconomicMap<OptionKey<?>, Object> runtimeValues = OptionValues.newOptionMap();
+    private final EconomicMap<String, OptionDescriptor> allHostedOptions = EconomicMap.create();
+    private final EconomicMap<String, OptionDescriptor> allRuntimeOptions = EconomicMap.create();
 
-    public HostedOptionParser(ImageClassLoader imageClassLoader) {
-        collectOptions(imageClassLoader.findSubclasses(OptionDescriptors.class), allHostedOptions, allRuntimeOptions);
+    public HostedOptionParser(ClassLoader imageClassLoader, List<String> arguments) {
+        this.arguments = Collections.unmodifiableList(arguments);
+        collectOptions(OptionsContainer.getDiscoverableOptions(imageClassLoader), allHostedOptions, allRuntimeOptions);
     }
 
-    public static void collectOptions(List<Class<? extends OptionDescriptors>> optionsClasses, SortedMap<String, OptionDescriptor> allHostedOptions,
-                    SortedMap<String, OptionDescriptor> allRuntimeOptions) {
-        for (Class<? extends OptionDescriptors> optionsClass : optionsClasses) {
-            if (Modifier.isAbstract(optionsClass.getModifiers())) {
-                continue;
+    public static void collectOptions(Iterable<OptionDescriptors> optionDescriptors, EconomicMap<String, OptionDescriptor> allHostedOptions,
+                    EconomicMap<String, OptionDescriptor> allRuntimeOptions) {
+        SubstrateOptionsParser.collectOptions(optionDescriptors, descriptor -> {
+            String name = descriptor.getName();
+
+            if (descriptor.getDeclaringClass().getAnnotation(Platforms.class) != null) {
+                throw UserError.abort("Options must not be declared in a class that has a @%s annotation: option %s declared in %s",
+                                Platforms.class.getSimpleName(), name, descriptor.getDeclaringClass().getTypeName());
             }
 
-            OptionDescriptors descriptors;
-            try {
-                descriptors = optionsClass.getDeclaredConstructor().newInstance();
-            } catch (Exception ex) {
-                throw shouldNotReachHere(ex);
-            }
-            for (OptionDescriptor descriptor : descriptors) {
-                String name = descriptor.getName();
-
-                if (descriptor.getDeclaringClass().getAnnotation(Platforms.class) != null) {
-                    throw UserError.abort("Options must not be declared in a class that has a @" + Platforms.class.getSimpleName() + " annotation: option " + name + " declared in " +
-                                    descriptor.getDeclaringClass().getTypeName());
-                }
-
-                if (!(descriptor.getOptionKey() instanceof RuntimeOptionKey)) {
-                    OptionDescriptor existing = allHostedOptions.put(name, descriptor);
-                    if (existing != null) {
-                        throw shouldNotReachHere("Option name \"" + name + "\" has multiple definitions: " + existing.getLocation() + " and " + descriptor.getLocation());
-                    }
-                }
-                if (!(descriptor.getOptionKey() instanceof HostedOptionKey)) {
-                    OptionDescriptor existing = allRuntimeOptions.put(name, descriptor);
-                    if (existing != null) {
-                        throw shouldNotReachHere("Option name \"" + name + "\" has multiple definitions: " + existing.getLocation() + " and " + descriptor.getLocation());
-                    }
+            if (!(descriptor.getOptionKey() instanceof RuntimeOptionKey)) {
+                OptionDescriptor existing = allHostedOptions.put(name, descriptor);
+                if (existing != null) {
+                    throw shouldNotReachHere("Option name \"" + name + "\" has multiple definitions: " + existing.getLocation() + " and " + descriptor.getLocation());
                 }
             }
-        }
+            if (!(descriptor.getOptionKey() instanceof HostedOptionKey)) {
+                OptionDescriptor existing = allRuntimeOptions.put(name, descriptor);
+                if (existing != null) {
+                    throw shouldNotReachHere("Option name \"" + name + "\" has multiple definitions: " + existing.getLocation() + " and " + descriptor.getLocation());
+                }
+            }
+        });
     }
 
-    public String[] parse(String[] args) {
+    public List<String> parse() {
 
         List<String> remainingArgs = new ArrayList<>();
         Set<String> errors = new HashSet<>();
         InterruptImageBuilding interrupt = null;
-        for (String arg : args) {
+        for (String arg : arguments) {
             boolean isImageBuildOption = false;
             try {
                 isImageBuildOption |= SubstrateOptionsParser.parseHostedOption(SubstrateOptionsParser.HOSTED_OPTION_PREFIX, allHostedOptions, hostedValues, PLUS_MINUS, errors, arg, System.out);
@@ -131,13 +120,25 @@ public class HostedOptionParser implements HostedOptionProvider {
          * However, we set these options to null here, so that at least they do not have a sensible
          * value.
          */
-        for (OptionDescriptor descriptor : allRuntimeOptions.values()) {
-            if (!allHostedOptions.containsValue(descriptor)) {
+        for (OptionDescriptor descriptor : allRuntimeOptions.getValues()) {
+            if (!allHostedOptions.containsKey(descriptor.getName())) {
                 hostedValues.put(descriptor.getOptionKey(), null);
             }
         }
 
-        return remainingArgs.toArray(new String[remainingArgs.size()]);
+        return remainingArgs;
+    }
+
+    public List<String> getArguments() {
+        return arguments;
+    }
+
+    public EconomicMap<String, OptionDescriptor> getAllHostedOptions() {
+        return allHostedOptions;
+    }
+
+    public EconomicMap<String, OptionDescriptor> getAllRuntimeOptions() {
+        return allRuntimeOptions;
     }
 
     @Override
@@ -152,7 +153,7 @@ public class HostedOptionParser implements HostedOptionProvider {
 
     public EconomicSet<String> getRuntimeOptionNames() {
         EconomicSet<String> res = EconomicSet.create(allRuntimeOptions.size());
-        allRuntimeOptions.keySet().forEach(res::add);
+        allRuntimeOptions.getKeys().forEach(res::add);
         return res;
     }
 }

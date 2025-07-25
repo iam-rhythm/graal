@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2014, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -49,7 +49,7 @@ import java.lang.annotation.Target;
  * Provides additional properties for a field (i.e., an enumeration value) of Java enumeration
  * annotated with {@link CEnum}.
  *
- * @since 1.0
+ * @since 19.0
  */
 @Retention(RetentionPolicy.RUNTIME)
 @Target({ElementType.FIELD})
@@ -58,7 +58,7 @@ public @interface CEnumConstant {
     /**
      * Specifies the name of the imported C enum constant.
      *
-     * @since 1.0
+     * @since 19.0
      */
     String value() default "";
 
@@ -66,7 +66,7 @@ public @interface CEnumConstant {
      * Specifies whether the annotated enumeration value is returned by the lookup method annotated
      * with {@link CEnumLookup}.
      *
-     * @since 1.0
+     * @since 19.0
      */
     boolean includeInLookup() default true;
 }

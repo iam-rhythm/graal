@@ -27,9 +27,9 @@ package com.oracle.svm.hosted.cenum;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+import org.graalvm.nativeimage.AnnotationAccess;
 import org.graalvm.nativeimage.c.constant.CEnumLookup;
 import org.graalvm.nativeimage.c.constant.CEnumValue;
-import org.graalvm.util.GuardedAnnotationAccess;
 
 import com.oracle.graal.pointsto.infrastructure.SubstitutionProcessor;
 import com.oracle.svm.hosted.c.NativeLibraries;
@@ -38,7 +38,7 @@ import jdk.vm.ci.meta.ResolvedJavaMethod;
 
 /**
  * Substitutes methods declared as {@code native} with {@link CEnumLookup} annotation with a
- * synthetic graph that calls the appropriate EnumRuntimeData.convertCToJava(long) method.
+ * synthetic graph (see {@link CEnumCallWrapperMethod}).
  */
 public class CEnumCallWrapperSubstitutionProcessor extends SubstitutionProcessor {
 
@@ -51,20 +51,12 @@ public class CEnumCallWrapperSubstitutionProcessor extends SubstitutionProcessor
 
     @Override
     public ResolvedJavaMethod lookup(ResolvedJavaMethod method) {
-        if (GuardedAnnotationAccess.isAnnotationPresent(method, CEnumLookup.class) ||
-                        GuardedAnnotationAccess.isAnnotationPresent(method, CEnumValue.class)) {
+        if (AnnotationAccess.isAnnotationPresent(method, CEnumLookup.class) ||
+                        AnnotationAccess.isAnnotationPresent(method, CEnumValue.class)) {
             return callWrappers.computeIfAbsent(method, v -> new CEnumCallWrapperMethod(nativeLibraries, v));
         } else {
             return method;
         }
-    }
-
-    @Override
-    public ResolvedJavaMethod resolve(ResolvedJavaMethod method) {
-        if (method instanceof CEnumCallWrapperMethod) {
-            return ((CEnumCallWrapperMethod) method).getOriginal();
-        }
-        return method;
     }
 
     public void setNativeLibraries(NativeLibraries nativeLibs) {

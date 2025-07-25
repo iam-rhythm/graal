@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -74,9 +74,11 @@ public final class CompilerDirectives {
      * @since 0.8 or earlier
      */
     public static void transferToInterpreter() {
-        if (inInterpreter()) {
-            Truffle.getRuntime().notifyTransferToInterpreter();
-        }
+        /*
+         * We unconditionally call into the runtime as the runtime needs to know where these
+         * transferToInterpreter calls happen e.g. for analysis during host compilation.
+         */
+        Truffle.getRuntime().notifyTransferToInterpreter();
     }
 
     /**
@@ -86,9 +88,11 @@ public final class CompilerDirectives {
      * @since 0.8 or earlier
      */
     public static void transferToInterpreterAndInvalidate() {
-        if (inInterpreter()) {
-            Truffle.getRuntime().notifyTransferToInterpreter();
-        }
+        /*
+         * We unconditionally call into the runtime as the runtime needs to know where these
+         * transferToInterpreter calls happen e.g. for analysis during host compilation.
+         */
+        Truffle.getRuntime().notifyTransferToInterpreter();
     }
 
     /**
@@ -98,6 +102,19 @@ public final class CompilerDirectives {
      * @since 0.8 or earlier
      */
     public static boolean inInterpreter() {
+        return true;
+    }
+
+    /**
+     * Returns a boolean value indicating whether the method is executed in a compilation tier which
+     * can be replaced with a higher tier (e.g. interpretation tier can be replaced by a first tier,
+     * a first tier by a second tier compilation).
+     *
+     * @return {@code true} when executed in the first tier Truffle compilation, {@code false}
+     *         otherwise.
+     * @since 22.0.0
+     */
+    public static boolean hasNextTier() {
         return true;
     }
 
@@ -265,8 +282,9 @@ public final class CompilerDirectives {
     public @interface TruffleBoundary {
 
         /**
-         * Determines whether execution should be transferred to the interpreter in the case that an
-         * exception is thrown across this boundary.
+         * Determines whether execution should be transferred to the interpreter if an exception is
+         * thrown across this boundary, in which case the caller's compiled code is invalidated and
+         * will not transfer to the interpreter on exceptions for this method again.
          *
          * @since 0.28
          */
@@ -304,6 +322,35 @@ public final class CompilerDirectives {
     }
 
     /**
+     * Prevents the compiler from moving an allocation, enabling precise {@link OutOfMemoryError}
+     * exception locations. This intrinsic ensures the allocation's immobility and guarantees that
+     * the compiler's optimizations do not eliminate the allocation. Imposing such a restriction can
+     * hinder certain compiler optimizations, potentially degrading performance. If the intrinsic
+     * does not find an allocation as its argument, it causes a runtime compilation failure,
+     * invoking {@link CompilerDirectives#bailout(String)}.
+     *
+     * <b>Example usage:</b>
+     *
+     * <pre>{@code
+     * int[] tryAllocateArray() {
+     *     int[] array;
+     *     try {
+     *         array = CompilerDirectives.ensureAllocatedHere(new int[42]);
+     *     } catch (OutOfMemoryError e) {
+     *         // handle out of memory errors to maintain consistency
+     *         array = null;
+     *     }
+     *     return array;
+     * }
+     * }</pre>
+     *
+     * @since 24.1.0
+     */
+    public static <T> T ensureAllocatedHere(T object) {
+        return object;
+    }
+
+    /**
      * Ensures that the given object will be virtual (escape analyzed) at all points that are
      * dominated by the current position.
      *
@@ -318,6 +365,96 @@ public final class CompilerDirectives {
      * @since 0.8 or earlier
      */
     public static void ensureVirtualizedHere(@SuppressWarnings("unused") Object object) {
+    }
+
+    /**
+     * Consume a value, making sure the compiler doesn't optimize away the computation of this
+     * value, even if it is otherwise unused. This should only be used for benchmarking purposes.
+     *
+     * @since 21.2
+     */
+    @SuppressWarnings("unused")
+    public static void blackhole(boolean value) {
+    }
+
+    /**
+     * Consume a value, making sure the compiler doesn't optimize away the computation of this
+     * value, even if it is otherwise unused. This should only be used for benchmarking purposes.
+     *
+     * @since 21.2
+     */
+    @SuppressWarnings("unused")
+    public static void blackhole(byte value) {
+    }
+
+    /**
+     * Consume a value, making sure the compiler doesn't optimize away the computation of this
+     * value, even if it is otherwise unused. This should only be used for benchmarking purposes.
+     *
+     * @since 21.2
+     */
+    @SuppressWarnings("unused")
+    public static void blackhole(short value) {
+    }
+
+    /**
+     * Consume a value, making sure the compiler doesn't optimize away the computation of this
+     * value, even if it is otherwise unused. This should only be used for benchmarking purposes.
+     *
+     * @since 21.2
+     */
+    @SuppressWarnings("unused")
+    public static void blackhole(char value) {
+    }
+
+    /**
+     * Consume a value, making sure the compiler doesn't optimize away the computation of this
+     * value, even if it is otherwise unused. This should only be used for benchmarking purposes.
+     *
+     * @since 21.2
+     */
+    @SuppressWarnings("unused")
+    public static void blackhole(int value) {
+    }
+
+    /**
+     * Consume a value, making sure the compiler doesn't optimize away the computation of this
+     * value, even if it is otherwise unused. This should only be used for benchmarking purposes.
+     *
+     * @since 21.2
+     */
+    @SuppressWarnings("unused")
+    public static void blackhole(long value) {
+    }
+
+    /**
+     * Consume a value, making sure the compiler doesn't optimize away the computation of this
+     * value, even if it is otherwise unused. This should only be used for benchmarking purposes.
+     *
+     * @since 21.2
+     */
+    @SuppressWarnings("unused")
+    public static void blackhole(float value) {
+    }
+
+    /**
+     * Consume a value, making sure the compiler doesn't optimize away the computation of this
+     * value, even if it is otherwise unused. This should only be used for benchmarking purposes.
+     *
+     * @since 21.2
+     */
+    @SuppressWarnings("unused")
+    public static void blackhole(double value) {
+    }
+
+    /**
+     * Consume a value, making sure the compiler doesn't optimize away the computation of this
+     * value, even if it is otherwise unused. This should only be used for benchmarking purposes.
+     *
+     * @since 21.2
+     */
+    @SuppressWarnings("unused")
+    public static void blackhole(Object value) {
     }
 
     /**
@@ -341,4 +478,138 @@ public final class CompilerDirectives {
             throw new ClassCastException();
         }
     }
+
+    /**
+     * Checks the given object to the exact class represented by {@code clazz}. The method returns
+     * <code>true</code> only if {@code object != null && object.getClass() == clazz} and thus fails
+     * for any subclass.
+     *
+     * @param object the object to be cast
+     * @param clazz the class to check against, must not be null
+     * @throws NullPointerException if the class argument is null
+     *
+     * @since 21.1
+     */
+    public static boolean isExact(Object object, Class<?> clazz) {
+        Objects.requireNonNull(clazz);
+        if (object == null) {
+            return false;
+        }
+        return object.getClass() == clazz;
+    }
+
+    /**
+     * Indicates a code path that is not supposed to be reached during compilation or
+     * interpretation. Reaching this method is considered a fatal internal error and execution
+     * should not continue. Transfers to interpreter and
+     * {@link CompilerDirectives#transferToInterpreterAndInvalidate() invalidates} the compiled code
+     * and always throws an {@link AssertionError} when invoked.
+     * <p>
+     * This method returns a runtime exception to be conveniently used in combination with Java
+     * throw statements, for example:
+     *
+     * <pre>
+     * if (expectedCondition) {
+     *     return 42;
+     * } else {
+     *     throw shouldNotReachHere();
+     * }
+     * </pre>
+     *
+     * @since 20.2
+     */
+    public static RuntimeException shouldNotReachHere() {
+        transferToInterpreterAndInvalidate();
+        throw shouldNotReachHere(null, null);
+    }
+
+    /**
+     * Indicates a code path that is not supposed to be reached during compilation or
+     * interpretation. Reaching this method is considered a fatal internal error and execution
+     * should not continue. Transfers to interpreter and
+     * {@link CompilerDirectives#transferToInterpreterAndInvalidate() invalidates} the compiled code
+     * and always throws an {@link AssertionError} when invoked.
+     * <p>
+     * This method returns a runtime exception to be conveniently used in combination with Java
+     * throw statements, for example:
+     *
+     * <pre>
+     * if (expectedCondition) {
+     *     return 42;
+     * } else {
+     *     throw shouldNotReachHere("Additional message");
+     * }
+     * </pre>
+     *
+     * @param message an additional message for the exception thrown.
+     * @since 20.2
+     */
+    public static RuntimeException shouldNotReachHere(String message) {
+        transferToInterpreterAndInvalidate();
+        throw shouldNotReachHere(message, null);
+    }
+
+    /**
+     * Indicates a code path that is not supposed to be reached during compilation or
+     * interpretation. Reaching this method is considered a fatal internal error and execution
+     * should not continue. Transfers to interpreter and
+     * {@link CompilerDirectives#transferToInterpreterAndInvalidate() invalidates} the compiled code
+     * and always throws an {@link AssertionError} when invoked.
+     * <p>
+     * This method returns a runtime exception to be conveniently used in combination with Java
+     * throw statements, for example:
+     *
+     * <pre>
+     * if (expectedCondition) {
+     *     return 42;
+     * } else {
+     *     throw shouldNotReachHere("Additional message");
+     * }
+     * </pre>
+     *
+     * @param cause the cause if an exception was responsible for the unexpected case.
+     * @since 20.2
+     */
+    public static RuntimeException shouldNotReachHere(Throwable cause) {
+        transferToInterpreterAndInvalidate();
+        throw shouldNotReachHere(null, cause);
+    }
+
+    /**
+     * Indicates a code path that is not supposed to be reached during compilation or
+     * interpretation. Reaching this method is considered a fatal internal error and execution
+     * should not continue. Transfers to interpreter and
+     * {@link CompilerDirectives#transferToInterpreterAndInvalidate() invalidates} the compiled code
+     * and always throws an {@link AssertionError} when invoked.
+     * <p>
+     * This method returns a runtime exception to be conveniently used in combination with Java
+     * throw statements, for example:
+     *
+     * <pre>
+     * if (expectedCondition) {
+     *     return 42;
+     * } else {
+     *     throw shouldNotReachHere("Additional message");
+     * }
+     * </pre>
+     *
+     * @param message an additional message for the exception thrown.
+     * @param cause the cause if an exception was responsible for the unexpected case.
+     *
+     * @since 20.2
+     */
+    public static RuntimeException shouldNotReachHere(String message, Throwable cause) {
+        transferToInterpreterAndInvalidate();
+        throw new ShouldNotReachHere(message, cause);
+    }
+
+    @SuppressWarnings("serial")
+    static final class ShouldNotReachHere extends AssertionError {
+
+        ShouldNotReachHere(String message, Throwable cause) {
+            super(message, cause);
+        }
+
+    }
+
 }

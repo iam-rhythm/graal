@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -28,22 +28,22 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.function.BooleanSupplier;
 
-import org.graalvm.nativeimage.Feature;
 import org.graalvm.nativeimage.ImageSingletons;
+import org.graalvm.nativeimage.hosted.Feature;
 
-import com.oracle.svm.truffle.TruffleFeature;
-import com.oracle.truffle.nfi.NFILanguage;
+import com.oracle.svm.core.feature.InternalFeature;
+import com.oracle.svm.truffle.TruffleBaseFeature;
 
 /**
- * Support for the default (trufflenfi/native) backend of the {@link NFILanguage} on SVM. This is
- * re-using most of the code of the default (libffi based) implementation from the Truffle
- * repository. All substitutions in this package (unless noted otherwise in a separate comment) are
- * direct re-implementations of the original NFI functions with the C interface of Substrate VM. If
- * this feature is enabled, the image is statically linked with libffi.
+ * Support for the default (trufflenfi/native) backend of the Truffle NFI on SVM. This is re-using
+ * most of the code of the default (libffi based) implementation from the Truffle repository. All
+ * substitutions in this package (unless noted otherwise in a separate comment) are direct
+ * re-implementations of the original NFI functions with the C interface of Substrate VM. If this
+ * feature is enabled, the image is statically linked with libffi.
  */
-public final class TruffleNFIFeature implements Feature {
+public final class TruffleNFIFeature implements InternalFeature {
 
-    static class IsEnabled implements BooleanSupplier {
+    public static class IsEnabled implements BooleanSupplier {
         @Override
         public boolean getAsBoolean() {
             return ImageSingletons.contains(TruffleNFIFeature.class);
@@ -51,13 +51,17 @@ public final class TruffleNFIFeature implements Feature {
     }
 
     @Override
+    public boolean isInConfiguration(IsInConfigurationAccess access) {
+        return access.findClassByName("com.oracle.truffle.nfi.backend.libffi.LibFFILanguage") != null;
+    }
+
+    @Override
     public List<Class<? extends Feature>> getRequiredFeatures() {
-        return Arrays.asList(TruffleFeature.class);
+        return Arrays.asList(TruffleBaseFeature.class);
     }
 
     @Override
     public void duringSetup(DuringSetupAccess access) {
-        ImageSingletons.add(TruffleNFISupport.class, new TruffleNFISupport());
         access.registerObjectReplacer(new NativeObjectReplacer(access));
     }
 }

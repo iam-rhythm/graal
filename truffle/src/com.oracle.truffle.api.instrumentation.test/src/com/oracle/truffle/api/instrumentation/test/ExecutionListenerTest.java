@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -43,11 +43,11 @@ package com.oracle.truffle.api.instrumentation.test;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.fail;
 import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -65,11 +65,15 @@ import org.graalvm.polyglot.Value;
 import org.graalvm.polyglot.management.ExecutionEvent;
 import org.graalvm.polyglot.management.ExecutionListener;
 import org.junit.After;
+import org.junit.Assert;
 import org.junit.Assume;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
+import com.oracle.truffle.api.instrumentation.SourceFilter;
+import com.oracle.truffle.api.instrumentation.SourceSectionFilter;
 import com.oracle.truffle.api.test.polyglot.AbstractPolyglotTest;
+import com.oracle.truffle.api.test.polyglot.ProxyLanguage;
 
 public class ExecutionListenerTest extends AbstractPolyglotTest {
 
@@ -79,6 +83,10 @@ public class ExecutionListenerTest extends AbstractPolyglotTest {
     }
 
     final Deque<ExecutionEvent> events = new ArrayDeque<>();
+
+    public ExecutionListenerTest() {
+        needsInstrumentEnv = true;
+    }
 
     private void add(ExecutionEvent event) {
         assertNotNull(event.toString()); // does not crash
@@ -260,7 +268,7 @@ public class ExecutionListenerTest extends AbstractPolyglotTest {
     public void testOnErrorExpressions() {
         ExecutionEvent event;
         setupListener(ExecutionListener.newBuilder().onReturn(this::add).expressions(true));
-        eval("TRY(EXPRESSION(THROW(error, message)), CATCH(error))");
+        eval("TRY(EXPRESSION(THROW(error, message)), CATCH(error, ex))");
 
         event = events.pop();
         assertNull(event.getException());
@@ -271,9 +279,9 @@ public class ExecutionListenerTest extends AbstractPolyglotTest {
         assertTrue(event.isExpression());
         assertEquals("EXPRESSION(THROW(error, message))", event.getLocation().getCharacters());
 
-        String s = "EXPRESSION(TRY(EXPRESSION(THROW(error0, message)), CATCH(error0)), " +
-                        "TRY(STATEMENT(THROW(error1, message)), CATCH(error1)), " +
-                        "TRY(EXPRESSION(THROW(error2, message)), CATCH(error2)))";
+        String s = "EXPRESSION(TRY(EXPRESSION(THROW(error0, message)), CATCH(error0, ex)), " +
+                        "TRY(STATEMENT(THROW(error1, message)), CATCH(error1, ex)), " +
+                        "TRY(EXPRESSION(THROW(error2, message)), CATCH(error2, ex)))";
         eval(s);
 
         assertEquals("EXPRESSION(THROW(error0, message))", events.pop().getLocation().getCharacters());
@@ -285,7 +293,7 @@ public class ExecutionListenerTest extends AbstractPolyglotTest {
     public void testOnErrorStatements() {
         ExecutionEvent event;
         setupListener(ExecutionListener.newBuilder().onReturn(this::add).statements(true));
-        eval("TRY(STATEMENT(THROW(error, message)), CATCH(error))");
+        eval("TRY(STATEMENT(THROW(error, message)), CATCH(error, ex))");
 
         event = events.pop();
         assertNull(event.getException());
@@ -296,9 +304,9 @@ public class ExecutionListenerTest extends AbstractPolyglotTest {
         assertFalse(event.isExpression());
         assertEquals("STATEMENT(THROW(error, message))", event.getLocation().getCharacters());
 
-        eval("EXPRESSION(TRY(STATEMENT(THROW(error0, message)), CATCH(error0)), " +
-                        "TRY(EXPRESSION(THROW(error1, message)), CATCH(error1)), " +
-                        "TRY(STATEMENT(THROW(error2, message)), CATCH(error2)))");
+        eval("EXPRESSION(TRY(STATEMENT(THROW(error0, message)), CATCH(error0, ex)), " +
+                        "TRY(EXPRESSION(THROW(error1, message)), CATCH(error1, ex)), " +
+                        "TRY(STATEMENT(THROW(error2, message)), CATCH(error2, ex)))");
 
         assertEquals("STATEMENT(THROW(error0, message))", events.pop().getLocation().getCharacters());
         assertEquals("STATEMENT(THROW(error2, message))", events.pop().getLocation().getCharacters());
@@ -309,7 +317,7 @@ public class ExecutionListenerTest extends AbstractPolyglotTest {
     public void testOnErrorRoots() {
         ExecutionEvent event;
         setupListener(ExecutionListener.newBuilder().onReturn(this::add).roots(true));
-        eval("TRY(ROOT(THROW(error, message)), CATCH(error))");
+        eval("TRY(ROOT(THROW(error, message)), CATCH(error, ex))");
 
         event = events.pop();
         assertNull(event.getException());
@@ -319,11 +327,11 @@ public class ExecutionListenerTest extends AbstractPolyglotTest {
         assertFalse(event.isStatement());
         assertFalse(event.isExpression());
         assertEquals("ROOT(THROW(error, message))", event.getLocation().getCharacters());
-        assertEquals("TRY(ROOT(THROW(error, message)), CATCH(error))", events.pop().getLocation().getCharacters());
+        assertEquals("TRY(ROOT(THROW(error, message)), CATCH(error, ex))", events.pop().getLocation().getCharacters());
 
-        String s = "EXPRESSION(TRY(ROOT(THROW(error0, message)), CATCH(error0)), " +
-                        "TRY(EXPRESSION(THROW(error1, message)), CATCH(error1)), " +
-                        "TRY(ROOT(THROW(error2, message)), CATCH(error2)))";
+        String s = "EXPRESSION(TRY(ROOT(THROW(error0, message)), CATCH(error0, ex)), " +
+                        "TRY(EXPRESSION(THROW(error1, message)), CATCH(error1, ex)), " +
+                        "TRY(ROOT(THROW(error2, message)), CATCH(error2, ex)))";
         eval(s);
 
         assertEquals("ROOT(THROW(error0, message))", events.pop().getLocation().getCharacters());
@@ -483,7 +491,6 @@ public class ExecutionListenerTest extends AbstractPolyglotTest {
         assertEquals(event.getException(), thrownError);
         assertNull(event.getException().getCause());
         assertTrue(event.getException().isInternalError());
-        assertEquals("internal: msg", event.getException().getGuestObject().asString());
     }
 
     @Test
@@ -759,7 +766,7 @@ public class ExecutionListenerTest extends AbstractPolyglotTest {
         }).expressions(true));
 
         try {
-            eval("TRY(EXPRESSION(THROW(error, message)), CATCH(error))");
+            eval("TRY(EXPRESSION(THROW(error, message)), CATCH(error, ex))");
             fail();
         } catch (PolyglotException e) {
             assertTrue(e.asHostException() instanceof RuntimeException);
@@ -770,7 +777,7 @@ public class ExecutionListenerTest extends AbstractPolyglotTest {
         }).expressions(true).collectExceptions(true).collectInputValues(true).collectReturnValue(true));
 
         try {
-            eval("TRY(EXPRESSION(THROW(error, message)), CATCH(error))");
+            eval("TRY(EXPRESSION(THROW(error, message)), CATCH(error, ex))");
             fail();
         } catch (PolyglotException e) {
             assertTrue(e.asHostException() instanceof RuntimeException);
@@ -812,6 +819,41 @@ public class ExecutionListenerTest extends AbstractPolyglotTest {
         } catch (IllegalArgumentException e) {
         }
         ctx.close();
+    }
+
+    @Test
+    public void testDifferentSourcesInAST() {
+        setupEnv(Context.create(), new SourceListenerTest.MultiSourceASTLanguage());
+        String code = "abcd";
+        StringBuilder loadedCode = new StringBuilder();
+        instrumentEnv.getInstrumenter().attachExecuteSourceListener(SourceFilter.ANY, s -> loadedCode.append(s.getSource().getCharacters()), true);
+        context.eval(Source.create(ProxyLanguage.ID, code));
+        Assert.assertEquals(code + code, loadedCode.toString());
+    }
+
+    @Test
+    public void testMaterializedSourcesInAST() {
+        setupEnv(Context.create(), new SourceListenerTest.MultiSourceASTLanguage());
+        String code = "Mabcd";
+        StringBuilder loadedCode = new StringBuilder();
+        instrumentEnv.getInstrumenter().attachExecuteSourceListener(SourceFilter.ANY, s -> loadedCode.append(s.getSource().getCharacters()), true);
+        context.eval(Source.create(ProxyLanguage.ID, code));
+        // Not materialized yet:
+        Assert.assertEquals(code + "M", loadedCode.toString());
+        // Force materialization:
+        instrumentEnv.getInstrumenter().attachLoadSourceSectionListener(SourceSectionFilter.ANY, e -> {
+        }, true);
+        Assert.assertEquals(code + code, loadedCode.toString());
+    }
+
+    @Test
+    public void testInsertedSourcesInAST() {
+        setupEnv(Context.create(), new SourceListenerTest.MultiSourceASTLanguage());
+        String code = "Iabcd";
+        StringBuilder loadedCode = new StringBuilder();
+        instrumentEnv.getInstrumenter().attachExecuteSourceListener(SourceFilter.ANY, s -> loadedCode.append(s.getSource().getCharacters()), true);
+        context.eval(Source.create(ProxyLanguage.ID, code));
+        Assert.assertEquals(code + code, loadedCode.toString());
     }
 
     private Source eval(String code) {

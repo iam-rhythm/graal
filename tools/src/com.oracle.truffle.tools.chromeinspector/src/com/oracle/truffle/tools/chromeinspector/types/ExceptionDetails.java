@@ -24,15 +24,18 @@
  */
 package com.oracle.truffle.tools.chromeinspector.types;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 
-import com.oracle.truffle.tools.utils.json.JSONObject;
-
 import com.oracle.truffle.api.debug.DebugException;
+import com.oracle.truffle.api.debug.DebugStackTraceElement;
 import com.oracle.truffle.api.debug.DebugValue;
 import com.oracle.truffle.api.source.SourceSection;
 import com.oracle.truffle.tools.chromeinspector.InspectorExecutionContext;
 import com.oracle.truffle.tools.chromeinspector.ScriptsHandler;
+import org.graalvm.shadowed.org.json.JSONObject;
 
 public final class ExceptionDetails {
 
@@ -76,26 +79,86 @@ public final class ExceptionDetails {
             if (scriptId >= 0) {
                 json.put("scriptId", Integer.toString(scriptId));
             } else {
-                json.put("url", ScriptsHandler.getNiceStringFromURI(throwLocation.getSource().getURI()));
+                ScriptsHandler scriptsHandler = context.acquireScriptsHandler();
+                try {
+                    json.put("url", scriptsHandler.getSourceURL(throwLocation.getSource()));
+                } finally {
+                    context.releaseScriptsHandler();
+                }
             }
         }
         if (debugException != null) {
-            StackTrace stackTrace = new StackTrace(context, debugException.getDebugStackTrace());
+            List<DebugStackTraceElement> stack = debugException.getDebugStackTrace();
+            List<List<DebugStackTraceElement>> asyncStacks = debugException.getDebugAsynchronousStacks();
+            List<List<DebugStackTraceElement>> stacks;
+            if (asyncStacks.isEmpty()) {
+                stacks = Collections.singletonList(stack);
+            } else {
+                stacks = new ArrayList<>();
+                stacks.add(stack);
+                stacks.addAll(asyncStacks);
+            }
+            StackTrace stackTrace = new StackTrace(context, stacks);
             json.put("stackTrace", stackTrace.toJSON());
         }
         DebugValue exceptionObject = (debugException != null) ? debugException.getExceptionObject() : null;
+        String description = createDescriptionWithStackTrace(context, errorMessage, debugException != null ? debugException.getDebugStackTrace() : null);
         if (exceptionObject != null) {
-            RemoteObject ro = context.createAndRegister(exceptionObject);
-            json.put("exception", ro.toJSON());
+            RemoteObject ro = context.createAndRegister(exceptionObject, false);
+            JSONObject exc = ro.toJSON();
+            exc.put("description", description);
+            exc.put("subtype", "error");
+            json.put("exception", exc);
         } else {
             JSONObject ex = new JSONObject();
-            ex.put("description", errorMessage);
+            ex.put("description", description);
             ex.put("value", errorMessage);
             ex.put("type", "string");
             json.put("exception", ex);
         }
         json.put("executionContextId", context.getId());
         return json;
+    }
+
+    private static String createDescriptionWithStackTrace(InspectorExecutionContext context, String message, List<DebugStackTraceElement> stack) {
+        if (stack == null) {
+            return message;
+        }
+        StringBuilder b = new StringBuilder(message == null ? "null" : message);
+        for (DebugStackTraceElement element : stack) {
+            if (!context.isInspectInternal() && element.isInternal()) {
+                continue;
+            }
+            b.append("\n    at ");
+            String name = element.getName();
+            if (name != null) {
+                b.append(name);
+                b.append(' ');
+            }
+            b.append('(');
+            SourceSection sourceSection = element.getSourceSection();
+            if (sourceSection != null && sourceSection.getSource() != null) {
+                String path = sourceSection.getSource().getPath();
+                if (path == null) {
+                    path = sourceSection.getSource().getName();
+                }
+                b.append(path);
+                b.append(':');
+                if (sourceSection.hasLines()) {
+                    b.append(sourceSection.getStartLine());
+                    if (sourceSection.hasColumns()) {
+                        b.append(':');
+                        b.append(sourceSection.getStartColumn());
+                    }
+                } else {
+                    b.append('?');
+                }
+            } else {
+                b.append("Unknown");
+            }
+            b.append(')');
+        }
+        return b.toString();
     }
 
     /**

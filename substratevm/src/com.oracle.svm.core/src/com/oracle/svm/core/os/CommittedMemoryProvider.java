@@ -24,28 +24,22 @@
  */
 package com.oracle.svm.core.os;
 
-import org.graalvm.compiler.api.replacements.Fold;
 import org.graalvm.nativeimage.ImageSingletons;
 import org.graalvm.nativeimage.c.type.WordPointer;
 import org.graalvm.word.Pointer;
 import org.graalvm.word.PointerBase;
 import org.graalvm.word.UnsignedWord;
-import org.graalvm.word.WordFactory;
 
-import com.oracle.svm.core.annotate.Uninterruptible;
-import com.oracle.svm.core.c.function.CEntryPointCreateIsolateParameters;
+import com.oracle.svm.core.IsolateArguments;
+import com.oracle.svm.core.Uninterruptible;
+
+import jdk.graal.compiler.api.replacements.Fold;
 
 /**
  * A provider of ranges of committed memory, which is virtual memory that is backed by physical
  * memory or swap space.
  */
 public interface CommittedMemoryProvider {
-    /**
-     * Value for alignment parameters that indicates that no specific alignment is required (other
-     * than the {@linkplain #getGranularity() granularity} usually).
-     */
-    UnsignedWord UNALIGNED = WordFactory.unsigned(1);
-
     @Fold
     static CommittedMemoryProvider get() {
         return ImageSingletons.lookup(CommittedMemoryProvider.class);
@@ -58,7 +52,7 @@ public interface CommittedMemoryProvider {
      * @return zero in case of success, non-zero in case of an error.
      */
     @Uninterruptible(reason = "Still being initialized.")
-    int initialize(WordPointer isolatePointer, CEntryPointCreateIsolateParameters parameters);
+    int initialize(WordPointer heapBasePointer, IsolateArguments arguments);
 
     /**
      * Tear down <em>for the current isolate</em>. This must be the last method of this interface
@@ -73,49 +67,20 @@ public interface CommittedMemoryProvider {
      * Returns the granularity of committed memory management, which is typically the same as that
      * of {@linkplain VirtualMemoryProvider#getGranularity() virtual memory management}.
      */
-    @Uninterruptible(reason = "Still being initialized.", mayBeInlined = true)
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     default UnsignedWord getGranularity() {
         return VirtualMemoryProvider.get().getGranularity();
     }
 
     /**
-     * Allocate a block of committed memory.
-     *
-     * @param nbytes The number of bytes to allocate, which is rounded up to the next multiple of
-     *            the {@linkplain #getGranularity() granularity} if required.
-     * @param alignment The required alignment of the block start, which should be a multiple of the
-     *            {@linkplain #getGranularity() granularity}, or {@link #UNALIGNED}.
-     * @param executable Whether the block must be executable.
-     * @return the start of the allocated block.
+     * Returns the size of the address space that is reserved for the collected Java heap (i.e.,
+     * this explicitly excludes all heap parts that are not collected, such as the image heap or the
+     * protected memory before the image heap).
      */
-    Pointer allocate(UnsignedWord nbytes, UnsignedWord alignment, boolean executable);
+    UnsignedWord getCollectedHeapAddressSpaceSize();
 
-    /**
-     * Release a block of committed memory that was allocated with {@link #allocate}, requiring the
-     * exact same parameter values that were originally passed to {@link #allocate}.
-     *
-     * @param start The start of the memory block, as returned by {@link #allocate}.
-     * @param nbytes The originally requested size in bytes.
-     * @param alignment The originally requested alignment.
-     * @param executable Whether the block was requested to be executable.
-     * @return true on success, or false otherwise.
-     */
+    Pointer allocateExecutableMemory(UnsignedWord nbytes, UnsignedWord alignment);
+
     @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
-    boolean free(PointerBase start, UnsignedWord nbytes, UnsignedWord alignment, boolean executable);
-
-    /**
-     * Called by the garbage collector before a collection is started, as an opportunity to perform
-     * lazy operations, sanity checks or clean-ups.
-     */
-    default void beforeGarbageCollection() {
-    }
-
-    /**
-     * Called by the garbage collector after a collection has ended, as an opportunity to perform
-     * lazy operations, sanity checks or clean-ups.
-     *
-     * @param completeCollection Whether the garbage collector has performed a full collection.
-     */
-    default void afterGarbageCollection(boolean completeCollection) {
-    }
+    void freeExecutableMemory(PointerBase start, UnsignedWord nbytes, UnsignedWord alignment);
 }

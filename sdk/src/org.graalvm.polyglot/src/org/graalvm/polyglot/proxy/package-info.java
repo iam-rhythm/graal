@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,20 +40,20 @@
  */
 /*
  @ApiInfo(
- group="Graal SDK"
+ group="Polyglot"
  )
  */
 /**
- * The Graal SDK proxy interfaces allow to mimic guest language objects, arrays, executables,
+ * The GraalVM SDK proxy interfaces allow to mimic guest language objects, arrays, executables,
  * primitives and native objects in Graal languages. Every Graal language will treat instances of
  * proxies like an object of that particular language. Multiple proxy interfaces can be implemented
  * at the same time. For example, it is useful to provide proxy values that are objects with members
  * and arrays at the same time.
  * <p>
- * See <link <a href="http://www.graalvm.org/docs/embed">graalvm.org</a> for more examples on how to
- * use this API.
+ * See <a href="http://www.graalvm.org/docs/embed">graalvm.org</a> for more examples on how to use
+ * this API.
  *
  * @see org.graalvm.polyglot.proxy.Proxy for more an overview over all available proxy interfaces.
- * @since 1.0
+ * @since 19.0
  */
 package org.graalvm.polyglot.proxy;

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -41,16 +41,17 @@
 package com.oracle.truffle.api.nodes;
 
 import com.oracle.truffle.api.CallTarget;
-import com.oracle.truffle.api.Truffle;
+import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
 
 /**
  * Represents an indirect call to a {@link CallTarget}. Indirect calls are calls for which the
  * {@link CallTarget} may change dynamically for each consecutive call. This part of the Truffle API
  * enables the runtime system to perform additional optimizations on indirect calls.
- *
+ * <p>
  * Please note: This class is not intended to be sub classed by guest language implementations.
- *
- * @see DirectCallNode for faster calls with a constantly known {@link CallTarget}.
+ * <p>
+ * See {@link DirectCallNode} for faster calls with a constantly known {@link CallTarget}.
+ * 
  * @since 0.8 or earlier
  */
 public abstract class IndirectCallNode extends Node {
@@ -61,6 +62,7 @@ public abstract class IndirectCallNode extends Node {
      * @since 0.8 or earlier
      */
     protected IndirectCallNode() {
+        super();
     }
 
     /**
@@ -73,9 +75,37 @@ public abstract class IndirectCallNode extends Node {
      */
     public abstract Object call(CallTarget target, Object... arguments);
 
-    /** @since 0.8 or earlier */
+    /**
+     * Creates cached indirect call node using bytecode index <code>-1</code>.
+     *
+     * @since 0.8 or earlier
+     */
     public static IndirectCallNode create() {
-        return Truffle.getRuntime().createIndirectCallNode();
+        return NodeAccessor.RUNTIME.createIndirectCallNode();
+    }
+
+    private static final IndirectCallNode UNCACHED = new IndirectCallNode() {
+        @Override
+        public boolean isAdoptable() {
+            return false;
+        }
+
+        @Override
+        @TruffleBoundary
+        public Object call(CallTarget target, Object... arguments) {
+            return target.call(arguments);
+        }
+    };
+
+    /**
+     * Returns an uncached version of an indirect call node. Uncached versions of an indirect call
+     * node use the {@link EncapsulatingNodeReference#get() current encapsulating node} as source
+     * location.
+     *
+     * @since 19.0
+     */
+    public static IndirectCallNode getUncached() {
+        return UNCACHED;
     }
 
 }

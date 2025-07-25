@@ -1,5 +1,6 @@
 /*
- * Copyright (c) 2007, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2007, 2024, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2020, 2020, Red Hat Inc. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,104 +25,103 @@
  */
 package com.oracle.svm.core.jdk;
 
+import static com.oracle.svm.core.Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_CODE;
 import static com.oracle.svm.core.annotate.RecomputeFieldValue.Kind.Reset;
 import static com.oracle.svm.core.snippets.KnownIntrinsics.readHub;
-import static com.oracle.svm.core.snippets.KnownIntrinsics.unsafeCast;
 
 import java.io.File;
 import java.io.InputStream;
 import java.io.PrintStream;
 import java.net.URL;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.IdentityHashMap;
-import java.util.List;
+import java.util.Enumeration;
 import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.locks.ReentrantLock;
-import java.util.function.Predicate;
+import java.util.function.BooleanSupplier;
+import java.util.stream.Stream;
 
-import org.graalvm.compiler.api.replacements.Fold;
-import org.graalvm.compiler.core.common.SuppressFBWarnings;
-import org.graalvm.compiler.word.ObjectAccess;
-import org.graalvm.compiler.word.Word;
-import org.graalvm.nativeimage.ImageSingletons;
 import org.graalvm.nativeimage.Platform;
 import org.graalvm.nativeimage.Platforms;
-import org.graalvm.nativeimage.c.function.CFunction;
-import org.graalvm.nativeimage.c.function.CLibrary;
-import org.graalvm.nativeimage.c.function.CodePointer;
-import org.graalvm.word.Pointer;
-import org.graalvm.word.UnsignedWord;
-import org.graalvm.word.WordFactory;
+import org.graalvm.nativeimage.hosted.FieldValueTransformer;
+import org.graalvm.nativeimage.impl.InternalPlatform;
 
-import com.oracle.svm.core.MonitorSupport;
+import com.oracle.svm.core.AnalyzeJavaHomeAccessEnabled;
+import com.oracle.svm.core.BuildPhaseProvider;
+import com.oracle.svm.core.NeverInline;
+import com.oracle.svm.core.NeverInlineTrivial;
 import com.oracle.svm.core.SubstrateOptions;
-import com.oracle.svm.core.UnsafeAccess;
+import com.oracle.svm.core.SubstrateUtil;
+import com.oracle.svm.core.Uninterruptible;
 import com.oracle.svm.core.annotate.Alias;
+import com.oracle.svm.core.annotate.AnnotateOriginal;
 import com.oracle.svm.core.annotate.Delete;
 import com.oracle.svm.core.annotate.KeepOriginal;
-import com.oracle.svm.core.annotate.NeverInline;
 import com.oracle.svm.core.annotate.RecomputeFieldValue;
-import com.oracle.svm.core.annotate.RecomputeFieldValue.CustomFieldValueComputer;
+import com.oracle.svm.core.annotate.RecomputeFieldValue.Kind;
 import com.oracle.svm.core.annotate.Substitute;
 import com.oracle.svm.core.annotate.TargetClass;
 import com.oracle.svm.core.annotate.TargetElement;
+import com.oracle.svm.core.container.Container;
+import com.oracle.svm.core.container.OperatingSystem;
+import com.oracle.svm.core.fieldvaluetransformer.FieldValueTransformerWithAvailability;
+import com.oracle.svm.core.hub.ClassForNameSupport;
 import com.oracle.svm.core.hub.DynamicHub;
-import com.oracle.svm.core.log.Log;
-import com.oracle.svm.core.snippets.KnownIntrinsics;
-import com.oracle.svm.core.stack.JavaStackWalker;
+import com.oracle.svm.core.hub.registry.ClassRegistries;
+import com.oracle.svm.core.monitor.MonitorSupport;
+import com.oracle.svm.core.snippets.SubstrateForeignCallTarget;
+import com.oracle.svm.core.thread.JavaThreads;
+import com.oracle.svm.core.thread.VMOperation;
+import com.oracle.svm.core.util.BasedOnJDKFile;
 import com.oracle.svm.core.util.VMError;
+import com.oracle.svm.util.ReflectionUtil;
 
-import jdk.vm.ci.meta.MetaAccessProvider;
-import jdk.vm.ci.meta.ResolvedJavaField;
+import jdk.graal.compiler.replacements.nodes.BinaryMathIntrinsicNode;
+import jdk.graal.compiler.replacements.nodes.BinaryMathIntrinsicNode.BinaryOperation;
+import jdk.graal.compiler.replacements.nodes.UnaryMathIntrinsicNode;
+import jdk.graal.compiler.replacements.nodes.UnaryMathIntrinsicNode.UnaryOperation;
+import jdk.internal.loader.ClassLoaderValue;
 
 @TargetClass(java.lang.Object.class)
+@SuppressWarnings("static-method")
 final class Target_java_lang_Object {
 
     @Substitute
     @TargetElement(name = "getClass")
-    private Object getClassSubst() {
+    private DynamicHub getClassSubst() {
         return readHub(this);
     }
 
     @Substitute
     @TargetElement(name = "hashCode")
     private int hashCodeSubst() {
-        return System.identityHashCode(this);
-    }
-
-    @Substitute
-    @TargetElement(name = "toString")
-    private String toStringSubst() {
-        return getClass().getName() + "@" + Long.toHexString(Word.objectToUntrackedPointer(this).rawValue());
+        throw VMError.shouldNotReachHere("Intrinsified in SubstrateGraphBuilderPlugins");
     }
 
     @Substitute
     @TargetElement(name = "wait")
     private void waitSubst(long timeoutMillis) throws InterruptedException {
-        ImageSingletons.lookup(MonitorSupport.class).wait(this, timeoutMillis);
+        MonitorSupport.singleton().wait(this, timeoutMillis);
     }
+
+    @Delete
+    private native void wait0(long timeoutMillis);
 
     @Substitute
     @TargetElement(name = "notify")
     private void notifySubst() {
-        ImageSingletons.lookup(MonitorSupport.class).notify(this, false);
+        MonitorSupport.singleton().notify(this, false);
     }
 
     @Substitute
     @TargetElement(name = "notifyAll")
     private void notifyAllSubst() {
-        ImageSingletons.lookup(MonitorSupport.class).notify(this, true);
+        MonitorSupport.singleton().notify(this, true);
     }
 }
 
-@TargetClass(className = "java.lang.ClassLoaderHelper")
-final class Target_java_lang_ClassLoaderHelper {
+@TargetClass(className = "jdk.internal.loader.ClassLoaderHelper")
+final class Target_jdk_internal_loader_ClassLoaderHelper {
     @Alias
     static native File mapAlternativeName(File lib);
 }
@@ -135,7 +135,12 @@ final class Target_java_lang_Enum {
          * The original implementation creates and caches a HashMap to make the lookup faster. For
          * simplicity, we do a linear search for now.
          */
-        for (Enum<?> e : unsafeCast(enumType, DynamicHub.class).getEnumConstantsShared()) {
+        Object[] enumConstants = DynamicHub.fromClass(enumType).getEnumConstantsShared();
+        if (enumConstants == null) {
+            throw new IllegalArgumentException(enumType.getName() + " is not an enum type");
+        }
+        for (Object o : enumConstants) {
+            Enum<?> e = (Enum<?>) o;
             if (e.name().equals(name)) {
                 return e;
             }
@@ -146,80 +151,194 @@ final class Target_java_lang_Enum {
             throw new IllegalArgumentException("No enum constant " + enumType.getName() + "." + name);
         }
     }
+
+    @AnnotateOriginal
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public native int ordinal();
 }
 
 @TargetClass(java.lang.String.class)
 final class Target_java_lang_String {
 
+    // Checkstyle: stop
+    @Alias //
+    @RecomputeFieldValue(kind = RecomputeFieldValue.Kind.None, isFinal = true) //
+    public static boolean COMPACT_STRINGS;
+    // Checkstyle: resume
+
+    @Alias //
+    @RecomputeFieldValue(kind = RecomputeFieldValue.Kind.None, isFinal = true) //
+    public static byte LATIN1;
+
     @Substitute
     public String intern() {
-        String thisStr = unsafeCast(this, String.class);
-        return ImageSingletons.lookup(StringInternSupport.class).intern(thisStr);
+        String thisStr = SubstrateUtil.cast(this, String.class);
+        return StringInternSupport.intern(thisStr);
     }
+
+    @AnnotateOriginal
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    native boolean isLatin1();
+
+    @AnnotateOriginal
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public native boolean isEmpty();
+
+    @AnnotateOriginal
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public native int length();
+
+    @AnnotateOriginal
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    native byte coder();
+
+    @Alias @RecomputeFieldValue(kind = Kind.None, isFinal = true) //
+    public byte[] value;
+}
+
+@TargetClass(className = "java.lang.StringLatin1")
+final class Target_java_lang_StringLatin1 {
+
+    @AnnotateOriginal
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    static native char getChar(byte[] val, int index);
+}
+
+@TargetClass(className = "java.lang.StringUTF16")
+final class Target_java_lang_StringUTF16 {
+
+    @AnnotateOriginal
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    static native char getChar(byte[] val, int index);
 }
 
 @TargetClass(java.lang.Throwable.class)
+@Platforms(InternalPlatform.NATIVE_ONLY.class)
 @SuppressWarnings({"unused"})
 final class Target_java_lang_Throwable {
 
-    @Alias @RecomputeFieldValue(kind = Reset)//
-    private Object backtrace;
+    @Alias //
+    @RecomputeFieldValue(kind = Kind.FromAlias, isFinal = true) //
+    static boolean jfrTracing = false;
 
     @Alias @RecomputeFieldValue(kind = Reset)//
+    Object backtrace;
+
+    @Alias//
+    Throwable cause;
+
+    @Alias @RecomputeFieldValue(kind = Kind.Custom, declClass = ThrowableStackTraceFieldValueTransformer.class)//
     StackTraceElement[] stackTrace;
 
     @Alias String detailMessage;
 
-    /*
-     * Suppressed exception handling is disabled for now.
+    // Checkstyle: stop
+    @Alias//
+    static StackTraceElement[] UNASSIGNED_STACK;
+    // Checkstyle: resume
+
+    /**
+     * Fills in the execution stack trace. Our {@link Throwable#fillInStackTrace()} cannot be
+     * declared {@code synchronized} because it might be called in a {@link VMOperation} (via one of
+     * the {@link Throwable} constructors), where we are not allowed to block. We work around that
+     * in {@link #fillInStackTrace(int)}.
      */
     @Substitute
-    private void addSuppressed(Throwable exception) {
-        /*
-         * This method is called frequently from try-with-resource blocks. The original
-         * implementation performs allocations, which are problematic when allocations are disabled.
-         * For now, we just do nothing until someone needs suppressed exception handling.
-         */
+    public Target_java_lang_Throwable fillInStackTrace() {
+        return fillInStackTrace(0);
     }
 
+    /**
+     * Records the execution stack in an internal format. The information is transformed into a
+     * {@link StackTraceElement} array in
+     * {@link Target_java_lang_StackTraceElement#of(Object, int)}.
+     *
+     * @param dummy to change signature
+     */
     @Substitute
-    @NeverInline("Prevent inlining in Truffle compilations")
-    private Object fillInStackTrace() {
-        Pointer sp = KnownIntrinsics.readCallerStackPointer();
-        CodePointer ip = KnownIntrinsics.readReturnAddress();
+    @NeverInline("Starting a stack walk in the caller frame")
+    Target_java_lang_Throwable fillInStackTrace(int dummy) {
+        if (VMOperation.isInProgress()) {
+            if (MonitorSupport.singleton().isLockedByAnyThread(this)) {
+                /*
+                 * The Throwable is locked. We cannot safely fill in the stack trace. Do nothing and
+                 * accept that we will not get a stack trace.
+                 */
+            } else {
+                /*
+                 * The Throwable is not locked. We can safely fill the stack trace without
+                 * synchronization because we VMOperation is single threaded.
+                 */
 
-        StackTraceBuilder stackTraceBuilder = new StackTraceBuilder(true);
-        JavaStackWalker.walkCurrentThread(sp, ip, stackTraceBuilder);
-        this.stackTrace = stackTraceBuilder.getTrace();
+                if (stackTrace != null || backtrace != null) {
+                    backtrace = null;
 
+                    BacktraceVisitor visitor = new BacktraceVisitor();
+                    JavaThreads.visitCurrentStackFrames(visitor);
+                    backtrace = visitor.getArray();
+
+                    stackTrace = UNASSIGNED_STACK;
+                }
+            }
+        } else {
+            /* Execute with synchronization. This is the default case. */
+            synchronized (this) {
+                if (stackTrace != null || backtrace != null) {
+                    backtrace = null;
+
+                    BacktraceVisitor visitor = new BacktraceVisitor();
+                    JavaThreads.visitCurrentStackFrames(visitor);
+                    backtrace = visitor.getArray();
+
+                    stackTrace = UNASSIGNED_STACK;
+                }
+            }
+        }
         return this;
     }
+}
 
-    @Substitute
-    private StackTraceElement[] getOurStackTrace() {
-        if (stackTrace != null) {
-            return stackTrace;
-        } else {
-            return new StackTraceElement[0];
+final class ThrowableStackTraceFieldValueTransformer implements FieldValueTransformer {
+
+    private static final StackTraceElement[] UNASSIGNED_STACK = ReflectionUtil.readStaticField(Throwable.class, "UNASSIGNED_STACK");
+
+    @Override
+    public Object transform(Object receiver, Object originalValue) {
+        if (originalValue == null) { // Immutable stack
+            return null;
         }
+        return UNASSIGNED_STACK;
     }
+}
 
-    @Substitute
-    @TargetElement(onlyWith = JDK8OrEarlier.class)
-    int getStackTraceDepth() {
-        if (stackTrace != null) {
-            return stackTrace.length;
-        }
-        return 0;
-    }
+@TargetClass(java.lang.StackTraceElement.class)
+@Platforms(InternalPlatform.NATIVE_ONLY.class)
+final class Target_java_lang_StackTraceElement {
+    @AnnotateOriginal
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
+    public native String getMethodName();
 
+    @AnnotateOriginal
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
+    public native String getClassName();
+
+    @AnnotateOriginal
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
+    public native String getFileName();
+
+    @AnnotateOriginal
+    @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
+    public native int getLineNumber();
+
+    /**
+     * Constructs the {@link StackTraceElement} array from a backtrace.
+     *
+     * @param x backtrace stored in {@link Target_java_lang_Throwable#backtrace}
+     * @param depth ignored
+     */
     @Substitute
-    @TargetElement(onlyWith = JDK8OrEarlier.class)
-    StackTraceElement getStackTraceElement(int index) {
-        if (stackTrace == null) {
-            throw new IndexOutOfBoundsException();
-        }
-        return stackTrace[index];
+    static StackTraceElement[] of(Object x, int depth) {
+        return StackTraceBuilder.build((long[]) x);
     }
 }
 
@@ -228,46 +347,39 @@ final class Target_java_lang_Throwable {
 final class Target_java_lang_Runtime {
 
     @Substitute
-    public void loadLibrary(String libname) {
-        // Substituted because the original is caller-sensitive, which we don't support
-        loadLibrary0(null, libname);
-    }
-
-    @Substitute
-    public void load(String filename) {
-        // Substituted because the original is caller-sensitive, which we don't support
-        load0(null, filename);
-    }
-
-    @Substitute
     public void runFinalization() {
     }
 
     @Substitute
-    @Platforms({Platform.LINUX_AND_JNI.class, Platform.DARWIN_AND_JNI.class, Platform.WINDOWS.class})
+    @Platforms(InternalPlatform.PLATFORM_JNI.class)
     private int availableProcessors() {
-        if (SubstrateOptions.MultiThreaded.getValue()) {
-            return Jvm.JVM_ActiveProcessorCount();
-        } else {
-            return 1;
+        int optionValue = SubstrateOptions.ActiveProcessorCount.getValue();
+        if (optionValue > 0) {
+            return optionValue;
         }
+
+        if (Container.singleton().isContainerized()) {
+            return Container.singleton().getActiveProcessorCount();
+        }
+        return OperatingSystem.singleton().getActiveProcessorCount();
     }
-
-    // Checkstyle: stop
-    @Alias
-    synchronized native void loadLibrary0(Class<?> fromClass, String libname);
-
-    @Alias
-    synchronized native void load0(Class<?> fromClass, String libname);
-    // Checkstyle: resume
 }
 
 @TargetClass(java.lang.System.class)
+@SuppressWarnings("unused")
 final class Target_java_lang_System {
 
     @Alias private static PrintStream out;
     @Alias private static PrintStream err;
     @Alias private static InputStream in;
+
+    /**
+     * Pulls in a native library unnecessarily. All natives are already substituted.
+     */
+    @Substitute
+    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25+20/src/java.base/share/native/libjava/System.c#L39-L53")
+    private static void registerNatives() {
+    }
 
     @Substitute
     private static void setIn(InputStream is) {
@@ -286,29 +398,7 @@ final class Target_java_lang_System {
 
     @Substitute
     private static int identityHashCode(Object obj) {
-        if (obj == null) {
-            return 0;
-        }
-        DynamicHub hub = KnownIntrinsics.readHub(obj);
-        int hashCodeOffset = hub.getHashCodeOffset();
-        if (hashCodeOffset == 0) {
-            throw VMError.shouldNotReachHere("identityHashCode called on illegal object");
-        }
-        UnsignedWord hashCodeOffsetWord = WordFactory.unsigned(hashCodeOffset);
-        int hashCode = ObjectAccess.readInt(obj, hashCodeOffsetWord);
-        if (hashCode != 0) {
-            return hashCode;
-        }
-
-        /* On the first invocation for an object create a new hash code. */
-        hashCode = IdentityHashCodeSupport.generateHashCode();
-
-        if (!UnsafeAccess.UNSAFE.compareAndSwapInt(obj, hashCodeOffset, 0, hashCode)) {
-            /* We lost the race, so there now must be a hash code installed from another thread. */
-            hashCode = ObjectAccess.readInt(obj, hashCodeOffsetWord);
-        }
-        VMError.guarantee(hashCode != 0, "Missing identity hash code");
-        return hashCode;
+        throw VMError.shouldNotReachHere("Intrinsified in SubstrateGraphBuilderPlugins");
     }
 
     /* Ensure that we do not leak the full set of properties from the image generator. */
@@ -317,152 +407,121 @@ final class Target_java_lang_System {
 
     @Substitute
     private static Properties getProperties() {
-        return ImageSingletons.lookup(SystemPropertiesSupport.class).getProperties();
+        return SystemPropertiesSupport.singleton().getCurrentProperties();
+    }
+
+    @Substitute
+    private static void setProperties(Properties props) {
+        SystemPropertiesSupport.singleton().setCurrentProperties(props);
     }
 
     @Substitute
     public static String setProperty(String key, String value) {
         checkKey(key);
-        return ImageSingletons.lookup(SystemPropertiesSupport.class).setProperty(key, value);
+        return SystemPropertiesSupport.singleton().setCurrentProperty(key, value);
     }
 
     @Substitute
+    @NeverInlineTrivial(reason = "Used in 'java.home' access analysis: AnalyzeJavaHomeAccessPhase", onlyWith = AnalyzeJavaHomeAccessEnabled.class)
     private static String getProperty(String key) {
         checkKey(key);
-        return ImageSingletons.lookup(SystemPropertiesSupport.class).getProperty(key);
+        return SystemPropertiesSupport.singleton().getCurrentProperty(key);
     }
 
     @Substitute
     public static String clearProperty(String key) {
         checkKey(key);
-        return ImageSingletons.lookup(SystemPropertiesSupport.class).clearProperty(key);
+        return SystemPropertiesSupport.singleton().clearCurrentProperty(key);
     }
 
     @Substitute
+    @NeverInlineTrivial(reason = "Used in 'java.home' access analysis: AnalyzeJavaHomeAccessPhase", onlyWith = AnalyzeJavaHomeAccessEnabled.class)
     private static String getProperty(String key, String def) {
-        String result = getProperty(key);
-        return result != null ? result : def;
+        checkKey(key);
+        return SystemPropertiesSupport.singleton().getCurrentProperty(key, def);
     }
 
     @Alias
     private static native void checkKey(String key);
-
-    @Substitute
-    public static void loadLibrary(String libname) {
-        // Substituted because the original is caller-sensitive, which we don't support
-        Runtime.getRuntime().loadLibrary(libname);
-    }
-
-    @Substitute
-    public static void load(String filename) {
-        // Substituted because the original is caller-sensitive, which we don't support
-        Runtime.getRuntime().load(filename);
-    }
-
-    /*
-     * Note that there is no substitution for getSecurityManager, but instead getSecurityManager it
-     * is intrinsified in SubstrateGraphBuilderPlugins to always return null. This allows better
-     * constant folding of SecurityManager code already during static analysis.
-     */
-    @Substitute
-    private static void setSecurityManager(SecurityManager s) {
-        if (s != null) {
-            /*
-             * We deliberately treat this as a non-recoverable fatal error. We want to prevent bugs
-             * where an exception is silently ignored by an application and then necessary security
-             * checks are not in place.
-             */
-            throw VMError.shouldNotReachHere("Installing a SecurityManager is not yet supported");
-        }
-    }
-
 }
 
-@TargetClass(java.lang.StrictMath.class)
-@CLibrary("strictmath")
-final class Target_java_lang_StrictMath {
-    // Checkstyle: stop
+final class NotAArch64 implements BooleanSupplier {
+    @Override
+    public boolean getAsBoolean() {
+        return !Platform.includedIn(Platform.AARCH64.class);
+    }
+}
+
+final class IsAMD64 implements BooleanSupplier {
+    @Override
+    public boolean getAsBoolean() {
+        return Platform.includedIn(Platform.AMD64.class);
+    }
+}
+
+/**
+ * When the intrinsics below are used outside of {@link java.lang.Math}, they are lowered to a
+ * foreign call. This foreign call must be uninterruptible as it results from lowering a floating
+ * node. Otherwise, we would introduce a safepoint in places where no safepoint is allowed.
+ */
+@TargetClass(value = java.lang.Math.class, onlyWith = NotAArch64.class)
+final class Target_java_lang_Math {
+    @Substitute
+    @Uninterruptible(reason = "Must not contain a safepoint.")
+    @SubstrateForeignCallTarget(fullyUninterruptible = true, stubCallingConvention = false)
+    public static double sin(double a) {
+        return UnaryMathIntrinsicNode.compute(a, UnaryOperation.SIN);
+    }
 
     @Substitute
-    @CFunction(value = "StrictMath_sin", transition = CFunction.Transition.NO_TRANSITION)
-    private static native double sin(double a);
+    @Uninterruptible(reason = "Must not contain a safepoint.")
+    @SubstrateForeignCallTarget(fullyUninterruptible = true, stubCallingConvention = false)
+    public static double cos(double a) {
+        return UnaryMathIntrinsicNode.compute(a, UnaryOperation.COS);
+    }
 
     @Substitute
-    @CFunction(value = "StrictMath_cos", transition = CFunction.Transition.NO_TRANSITION)
-    private static native double cos(double a);
+    @Uninterruptible(reason = "Must not contain a safepoint.")
+    @SubstrateForeignCallTarget(fullyUninterruptible = true, stubCallingConvention = false)
+    public static double tan(double a) {
+        return UnaryMathIntrinsicNode.compute(a, UnaryOperation.TAN);
+    }
 
     @Substitute
-    @CFunction(value = "StrictMath_tan", transition = CFunction.Transition.NO_TRANSITION)
-    private static native double tan(double a);
+    @Uninterruptible(reason = "Must not contain a safepoint.")
+    @SubstrateForeignCallTarget(fullyUninterruptible = true, stubCallingConvention = false)
+    @TargetElement(onlyWith = IsAMD64.class)
+    public static double tanh(double a) {
+        return UnaryMathIntrinsicNode.compute(a, UnaryOperation.TANH);
+    }
 
     @Substitute
-    @CFunction(value = "StrictMath_asin", transition = CFunction.Transition.NO_TRANSITION)
-    private static native double asin(double a);
+    @Uninterruptible(reason = "Must not contain a safepoint.")
+    @SubstrateForeignCallTarget(fullyUninterruptible = true, stubCallingConvention = false)
+    public static double log(double a) {
+        return UnaryMathIntrinsicNode.compute(a, UnaryOperation.LOG);
+    }
 
     @Substitute
-    @CFunction(value = "StrictMath_acos", transition = CFunction.Transition.NO_TRANSITION)
-    private static native double acos(double a);
+    @Uninterruptible(reason = "Must not contain a safepoint.")
+    @SubstrateForeignCallTarget(fullyUninterruptible = true, stubCallingConvention = false)
+    public static double log10(double a) {
+        return UnaryMathIntrinsicNode.compute(a, UnaryOperation.LOG10);
+    }
 
     @Substitute
-    @CFunction(value = "StrictMath_atan", transition = CFunction.Transition.NO_TRANSITION)
-    private static native double atan(double a);
+    @Uninterruptible(reason = "Must not contain a safepoint.")
+    @SubstrateForeignCallTarget(fullyUninterruptible = true, stubCallingConvention = false)
+    public static double exp(double a) {
+        return UnaryMathIntrinsicNode.compute(a, UnaryOperation.EXP);
+    }
 
     @Substitute
-    @CFunction(value = "StrictMath_exp", transition = CFunction.Transition.NO_TRANSITION)
-    private static native double exp(double a);
-
-    @Substitute
-    @CFunction(value = "StrictMath_log", transition = CFunction.Transition.NO_TRANSITION)
-    private static native double log(double a);
-
-    @Substitute
-    @CFunction(value = "StrictMath_log10", transition = CFunction.Transition.NO_TRANSITION)
-    private static native double log10(double a);
-
-    @Substitute
-    @CFunction(value = "StrictMath_sqrt", transition = CFunction.Transition.NO_TRANSITION)
-    private static native double sqrt(double a);
-
-    @Substitute
-    @CFunction(value = "StrictMath_cbrt", transition = CFunction.Transition.NO_TRANSITION)
-    private static native double cbrt(double a);
-
-    @Substitute
-    @CFunction(value = "StrictMath_IEEEremainder", transition = CFunction.Transition.NO_TRANSITION)
-    private static native double IEEEremainder(double f1, double f2);
-
-    @Substitute
-    @CFunction(value = "StrictMath_atan2", transition = CFunction.Transition.NO_TRANSITION)
-    private static native double atan2(double y, double x);
-
-    @Substitute
-    @CFunction(value = "StrictMath_pow", transition = CFunction.Transition.NO_TRANSITION)
-    private static native double pow(double a, double b);
-
-    @Substitute
-    @CFunction(value = "StrictMath_sinh", transition = CFunction.Transition.NO_TRANSITION)
-    private static native double sinh(double x);
-
-    @Substitute
-    @CFunction(value = "StrictMath_cosh", transition = CFunction.Transition.NO_TRANSITION)
-    private static native double cosh(double x);
-
-    @Substitute
-    @CFunction(value = "StrictMath_tanh", transition = CFunction.Transition.NO_TRANSITION)
-    private static native double tanh(double x);
-
-    @Substitute
-    @CFunction(value = "StrictMath_hypot", transition = CFunction.Transition.NO_TRANSITION)
-    private static native double hypot(double x, double y);
-
-    @Substitute
-    @CFunction(value = "StrictMath_expm1", transition = CFunction.Transition.NO_TRANSITION)
-    private static native double expm1(double x);
-
-    @Substitute
-    @CFunction(value = "StrictMath_log1p", transition = CFunction.Transition.NO_TRANSITION)
-    private static native double log1p(double x);
-    // Checkstyle: resume
+    @Uninterruptible(reason = "Must not contain a safepoint.")
+    @SubstrateForeignCallTarget(fullyUninterruptible = true, stubCallingConvention = false)
+    public static double pow(double a, double b) {
+        return BinaryMathIntrinsicNode.compute(a, b, BinaryOperation.POW);
+    }
 }
 
 /**
@@ -478,7 +537,7 @@ final class Target_java_lang_StrictMath {
 @Substitute
 final class Target_java_lang_ClassValue {
 
-    @RecomputeFieldValue(kind = RecomputeFieldValue.Kind.Custom, declClass = JavaLangSubstitutions.ClassValueInitializer.class)//
+    @RecomputeFieldValue(kind = RecomputeFieldValue.Kind.Custom, declClass = ClassValueInitializer.class)//
     private final ConcurrentMap<Class<?>, Object> values;
 
     @Substitute
@@ -498,8 +557,16 @@ final class Target_java_lang_ClassValue {
         Object result = values.get(type);
         if (result == null) {
             Object newValue = computeValue(type);
+            if (newValue == null) {
+                /* values can't store null, replace with NULL_MARKER */
+                newValue = ClassValueSupport.NULL_MARKER;
+            }
             Object oldValue = values.putIfAbsent(type, newValue);
             result = oldValue != null ? oldValue : newValue;
+        }
+        if (result == ClassValueSupport.NULL_MARKER) {
+            /* replace NULL_MARKER back to real null */
+            result = null;
         }
         return result;
     }
@@ -510,255 +577,150 @@ final class Target_java_lang_ClassValue {
     }
 }
 
-@SuppressWarnings("deprecation")
-@TargetClass(java.lang.Compiler.class)
-final class Target_java_lang_Compiler {
-    @Substitute
-    static Object command(Object arg) {
-        if (arg instanceof Object[]) {
-            Object[] args = (Object[]) arg;
-            if (args.length > 0) {
-                Object arg0 = args[0];
-                if (arg0 instanceof String) {
-                    String cmd = (String) arg0;
-                    Object[] cmdargs = Arrays.copyOfRange(args, 1, args.length);
-                    RuntimeSupport rs = RuntimeSupport.getRuntimeSupport();
-                    return rs.runCommand(cmd, cmdargs);
-                }
-            }
-        }
-        throw new IllegalArgumentException("Argument to java.lang.Compiler.command(Object) must be an Object[] " +
-                        "with the first element being a String providing the name of the SVM command to run " +
-                        "and subsequent elements being the arguments to the command");
-    }
-}
-
-final class IsSingleThreaded implements Predicate<Class<?>> {
+class ClassValueInitializer implements FieldValueTransformerWithAvailability {
     @Override
-    public boolean test(Class<?> t) {
-        return !SubstrateOptions.MultiThreaded.getValue();
+    public Object transform(Object receiver, Object originalValue) {
+        ClassValue<?> v = (ClassValue<?>) receiver;
+        Map<Class<?>, Object> map = ClassValueSupport.getValues().get(v);
+        assert map != null;
+        return map;
     }
-}
 
-final class IsMultiThreaded implements Predicate<Class<?>> {
+    /*
+     * We want to wait to constant fold this value until all possible HotSpot initialization code
+     * has run.
+     */
     @Override
-    public boolean test(Class<?> t) {
-        return SubstrateOptions.MultiThreaded.getValue();
+    public boolean isAvailable() {
+        return BuildPhaseProvider.isHostedUniverseBuilt();
     }
 }
 
-@TargetClass(className = "java.lang.ApplicationShutdownHooks")
-final class Target_java_lang_ApplicationShutdownHooks {
+@TargetClass(java.lang.NullPointerException.class)
+final class Target_java_lang_NullPointerException {
 
     /**
-     * Re-initialize the map of registered hooks, because any hooks registered during native image
-     * construction can not survive into the running image. But `hooks` must be initialized to an
-     * IdentityHashMap, because 'null' means I am in the middle of shutting down.
-     */
-    @Alias @RecomputeFieldValue(kind = RecomputeFieldValue.Kind.NewInstance, declClass = IdentityHashMap.class)//
-    private static IdentityHashMap<Thread, Thread> hooks;
-
-    /**
-     * Instead of starting all the threads in {@link #hooks}, just run the {@link Runnable}s one
-     * after another.
-     *
-     * We need this substitution in single-threaded mode, where we cannot start new threads but
-     * still want to support shutdown hooks. In multi-threaded mode, this substitution is not
-     * present, i.e., the original JDK code runs the shutdown hooks in separate threads.
+     * {@link NullPointerException} overrides {@link Throwable#fillInStackTrace()} with a
+     * {@code synchronized} method which is not permitted in a {@link VMOperation}. We hand over to
+     * {@link Target_java_lang_Throwable#fillInStackTrace(int)} which already handles this properly.
      */
     @Substitute
-    @TargetElement(name = "runHooks", onlyWith = IsSingleThreaded.class)
-    static void runHooksSingleThreaded() {
-        /* Claim all the hooks. */
-        final Collection<Thread> threads;
-        /* Checkstyle: allow synchronization. */
-        synchronized (Target_java_lang_ApplicationShutdownHooks.class) {
-            threads = hooks.keySet();
-            hooks = null;
-        }
-        /* Checkstyle: disallow synchronization. */
-
-        /* Run all the hooks, catching anything that is thrown. */
-        final List<Throwable> hookExceptions = new ArrayList<>();
-        for (Thread hook : threads) {
-            try {
-                Util_java_lang_ApplicationShutdownHooks.callRunnableOfThread(hook);
-            } catch (Throwable ex) {
-                hookExceptions.add(ex);
-            }
-        }
-        /* Report any hook exceptions, but do not re-throw them. */
-        if (hookExceptions.size() > 0) {
-            for (Throwable ex : hookExceptions) {
-                ex.printStackTrace(Log.logStream());
-            }
-        }
+    @Platforms(InternalPlatform.NATIVE_ONLY.class)
+    Target_java_lang_Throwable fillInStackTrace() {
+        return SubstrateUtil.cast(this, Target_java_lang_Throwable.class).fillInStackTrace(0);
     }
+
+    @Substitute
+    @SuppressWarnings("static-method")
+    private String getExtendedNPEMessage() {
+        return null;
+    }
+}
+
+@TargetClass(value = jdk.internal.loader.ClassLoaders.class)
+final class Target_jdk_internal_loader_ClassLoaders {
+    @Alias
+    static native Target_jdk_internal_loader_BuiltinClassLoader bootLoader();
 
     @Alias
-    @TargetElement(name = "runHooks", onlyWith = IsMultiThreaded.class)
-    static native void runHooksMultiThreaded();
-
-    /**
-     * Interpose so that the first time someone adds an ApplicationShutdownHook, I set up a shutdown
-     * hook to run all the ApplicationShutdownHooks. Then the rest of this method is copied from
-     * {@code ApplicationShutdownHook.add(Thread)}.
-     */
-    @Substitute
-    /* Checkstyle: allow synchronization */
-    static synchronized void add(Thread hook) {
-        Util_java_lang_ApplicationShutdownHooks.initializeOnce();
-        if (hooks == null) {
-            throw new IllegalStateException("Shutdown in progress");
-        }
-        if (hook.isAlive()) {
-            throw new IllegalArgumentException("Hook already running");
-        }
-        if (hooks.containsKey(hook)) {
-            throw new IllegalArgumentException("Hook previously registered");
-        }
-        hooks.put(hook, hook);
-    }
-    /* Checkstyle: disallow synchronization */
+    public static native ClassLoader platformClassLoader();
 }
 
-class Util_java_lang_ApplicationShutdownHooks {
-
-    /** An initialization flag. */
-    private static volatile boolean initialized = false;
-
-    /** A lock to protect the initialization flag. */
-    private static ReentrantLock lock = new ReentrantLock();
-
-    public static void initializeOnce() {
-        if (!initialized) {
-            lock.lock();
-            try {
-                if (!initialized) {
-                    try {
-                        /*
-                         * Register a shutdown hook.
-                         *
-                         * Compare this code to the static initializations done in {@link
-                         * ApplicationShutdownHooks}.
-                         */
-                        Target_java_lang_Shutdown.add(1 /* shutdown hook invocation order */,
-                                        false /* not registered if shutdown in progress */,
-                                        new Runnable() {
-                                            @Override
-                                            public void run() {
-                                                if (SubstrateOptions.MultiThreaded.getValue()) {
-                                                    Target_java_lang_ApplicationShutdownHooks.runHooksMultiThreaded();
-                                                } else {
-                                                    Target_java_lang_ApplicationShutdownHooks.runHooksSingleThreaded();
-                                                }
-                                            }
-                                        });
-                    } catch (InternalError ie) {
-                        /* Someone else has registered the shutdown hook at slot 2. */
-                    } catch (IllegalStateException ise) {
-                        /* Too late to register this shutdown hook. */
-                    }
-                    /* Announce that initialization is complete. */
-                    initialized = true;
-                }
-            } finally {
-                lock.unlock();
-            }
-        }
-    }
-
-    @SuppressFBWarnings(value = {"RU_INVOKE_RUN"}, justification = "Do not start a new thread, just call the run method.")
-    static void callRunnableOfThread(Thread thread) {
-        thread.run();
-    }
-}
-
-@TargetClass(java.lang.Package.class)
-final class Target_java_lang_Package {
-
-    @Alias
-    @SuppressWarnings({"unused"})
-    Target_java_lang_Package(String name,
-                    String spectitle, String specversion, String specvendor,
-                    String impltitle, String implversion, String implvendor,
-                    URL sealbase, ClassLoader loader) {
-    }
+@TargetClass(value = jdk.internal.loader.BootLoader.class)
+final class Target_jdk_internal_loader_BootLoader {
+    // Checkstyle: stop
+    @Delete //
+    static String JAVA_HOME;
+    // Checkstyle: resume
 
     @Substitute
-    @TargetElement(onlyWith = JDK8OrEarlier.class)
-    static Package getPackage(Class<?> c) {
-        if (c.isPrimitive() || c.isArray()) {
-            /* Arrays and primitives don't have a package. */
-            return null;
-        }
-
-        /* Logic copied from java.lang.Package.getPackage(java.lang.Class). */
-        String name = c.getName();
-        int i = name.lastIndexOf('.');
-        if (i != -1) {
-            name = name.substring(0, i);
+    static Package getDefinedPackage(String name) {
+        if (name != null) {
             Target_java_lang_Package pkg = new Target_java_lang_Package(name, null, null, null,
                             null, null, null, null, null);
-            return KnownIntrinsics.unsafeCast(pkg, Package.class);
+            return SubstrateUtil.cast(pkg, Package.class);
         } else {
             return null;
         }
+    }
+
+    @Substitute
+    @TargetElement(onlyWith = ClassForNameSupport.IgnoresClassLoader.class)
+    public static Stream<Package> packages() {
+        Target_jdk_internal_loader_BuiltinClassLoader bootClassLoader = Target_jdk_internal_loader_ClassLoaders.bootLoader();
+        Target_java_lang_ClassLoader systemClassLoader = SubstrateUtil.cast(bootClassLoader, Target_java_lang_ClassLoader.class);
+        return systemClassLoader.packages();
+    }
+
+    @Delete("only used by #packages()")
+    @TargetElement(name = "getSystemPackageNames", onlyWith = ClassForNameSupport.IgnoresClassLoader.class)
+    private static native String[] getSystemPackageNamesDeleted();
+
+    @Substitute
+    @TargetElement(onlyWith = ClassForNameSupport.RespectsClassLoader.class)
+    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25+16/src/java.base/share/native/libjava/BootLoader.c#L37-L41")
+    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25+16/src/hotspot/share/prims/jvm.cpp#L3003-L3007")
+    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-25+16/src/hotspot/share/classfile/classLoader.cpp#L907-L924")
+    private static String[] getSystemPackageNames() {
+        return ClassRegistries.getSystemPackageNames();
+    }
+
+    @Substitute
+    @TargetElement(onlyWith = ClassForNameSupport.IgnoresClassLoader.class)
+    private static Class<?> loadClassOrNull(String name) {
+        return ClassForNameSupport.forNameOrNull(name, null);
+    }
+
+    @SuppressWarnings("unused")
+    @Substitute
+    @TargetElement(onlyWith = ClassForNameSupport.IgnoresClassLoader.class)
+    private static Class<?> loadClass(Module module, String name) {
+        /* The module system is not supported for now, therefore the module parameter is ignored. */
+        return ClassForNameSupport.forNameOrNull(name, null);
+    }
+
+    @SuppressWarnings({"unused", "restricted"})
+    @Substitute
+    private static void loadLibrary(String name) {
+        System.loadLibrary(name);
+    }
+
+    @Substitute
+    private static boolean hasClassPath() {
+        return true;
+    }
+
+    @Substitute
+    public static URL findResource(String name) {
+        return ResourcesHelper.nameToResourceURL(name);
+    }
+
+    @Substitute
+    public static Enumeration<URL> findResources(String name) {
+        return ResourcesHelper.nameToResourceEnumerationURLs(name);
+    }
+
+    /**
+     * Most {@link ClassLoaderValue}s are reset. For the list of preserved transformers see
+     * {@link ClassLoaderValueMapFieldValueTransformer}.
+     */
+    // Checkstyle: stop
+    @Alias @RecomputeFieldValue(kind = RecomputeFieldValue.Kind.Custom, declClass = ClassLoaderValueMapFieldValueTransformer.class, isFinal = true)//
+    static ConcurrentHashMap<?, ?> CLASS_LOADER_VALUE_MAP;
+    // Checkstyle: resume
+}
+
+final class ClassLoaderValueMapFieldValueTransformer implements FieldValueTransformer {
+    @Override
+    public Object transform(Object receiver, Object originalValue) {
+        if (originalValue == null) {
+            return null;
+        }
+        return RuntimeClassLoaderValueSupport.instance().getClassLoaderValueMapForLoader((ClassLoader) receiver);
     }
 }
 
 /** Dummy class to have a class with the file's name. */
 public final class JavaLangSubstitutions {
 
-    public static class ClassLoaderSupport {
-        public Target_java_lang_ClassLoader systemClassLoader;
-
-        @Platforms(Platform.HOSTED_ONLY.class) public Map<ClassLoader, Target_java_lang_ClassLoader> classLoaders = Collections.synchronizedMap(new IdentityHashMap<>());
-
-        @Fold
-        public static ClassLoaderSupport getInstance() {
-            return ImageSingletons.lookup(ClassLoaderSupport.class);
-        }
-
-        public Target_java_lang_ClassLoader getOrCreate(ClassLoader classLoader) {
-            createClassLoaders(classLoader);
-            return classLoaders.get(classLoader);
-        }
-
-        public void createClassLoaders(ClassLoader loader) {
-            if (loader == null) {
-                return;
-            }
-            Map<ClassLoader, Target_java_lang_ClassLoader> loaders = ClassLoaderSupport.getInstance().classLoaders;
-            if (!loaders.containsKey(loader)) {
-                ClassLoader parent = loader.getParent();
-                if (parent != null) {
-                    createClassLoaders(parent);
-                    loaders.put(loader, new Target_java_lang_ClassLoader(loaders.get(parent)));
-                } else {
-                    loaders.put(loader, new Target_java_lang_ClassLoader());
-                }
-            }
-        }
-    }
-
-    @Platforms(Platform.HOSTED_ONLY.class)//
-    public static final class ClassValueSupport {
-        final Map<ClassValue<?>, Map<Class<?>, Object>> values;
-
-        public ClassValueSupport(Map<ClassValue<?>, Map<Class<?>, Object>> map) {
-            values = map;
-        }
-    }
-
-    static class ClassValueInitializer implements CustomFieldValueComputer {
-        @Override
-        public Object compute(MetaAccessProvider metaAccess, ResolvedJavaField original, ResolvedJavaField annotated, Object receiver) {
-            ClassValueSupport support = ImageSingletons.lookup(ClassValueSupport.class);
-            ClassValue<?> v = (ClassValue<?>) receiver;
-            Map<Class<?>, Object> map = support.values.get(v);
-            assert map != null;
-            return map;
-        }
-    }
 }

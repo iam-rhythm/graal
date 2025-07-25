@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -50,6 +50,7 @@ import javax.lang.model.element.ElementKind;
 import javax.lang.model.type.TypeMirror;
 
 import com.oracle.truffle.dsl.processor.ProcessorContext;
+import com.oracle.truffle.dsl.processor.expression.DSLExpression;
 
 public class NodeChildData extends MessageContainer {
 
@@ -75,12 +76,18 @@ public class NodeChildData extends MessageContainer {
     private final Cardinality cardinality;
     private final AnnotationValue executeWithValue;
 
+    private final String implicitCreate;
+    private DSLExpression implicitCreateExpression;
+
+    private final String uncached;
+    private DSLExpression uncachedExpression;
+
     private List<NodeExecutionData> executeWith = Collections.emptyList();
 
     private NodeData childNode;
 
     public NodeChildData(Element sourceElement, AnnotationMirror sourceMirror, String name, TypeMirror nodeType, TypeMirror originalNodeType, Element accessElement, Cardinality cardinality,
-                    AnnotationValue executeWithValue) {
+                    AnnotationValue executeWithValue, String implicitCreate, String uncached) {
         this.sourceElement = sourceElement;
         this.sourceAnnotationMirror = sourceMirror;
         this.name = name;
@@ -89,6 +96,8 @@ public class NodeChildData extends MessageContainer {
         this.accessElement = accessElement;
         this.cardinality = cardinality;
         this.executeWithValue = executeWithValue;
+        this.implicitCreate = implicitCreate;
+        this.uncached = uncached;
     }
 
     public boolean needsGeneratedField() {
@@ -103,6 +112,42 @@ public class NodeChildData extends MessageContainer {
         return executeWith;
     }
 
+    public boolean isImplicit() {
+        return implicitCreate != null;
+    }
+
+    public String getImplicitCreate() {
+        return implicitCreate;
+    }
+
+    public DSLExpression getImplicitCreateExpression() {
+        assert isImplicit();
+        return implicitCreateExpression;
+    }
+
+    public void setImplicitCreateExpression(DSLExpression implicitCreateExpression) {
+        assert isImplicit();
+        this.implicitCreateExpression = implicitCreateExpression;
+    }
+
+    public boolean isAllowUncached() {
+        return uncached != null;
+    }
+
+    public String getUncached() {
+        return uncached;
+    }
+
+    public DSLExpression getUncachedExpression() {
+        assert isAllowUncached();
+        return uncachedExpression;
+    }
+
+    public void setUncachedExpression(DSLExpression uncachedExpression) {
+        assert isAllowUncached();
+        this.uncachedExpression = uncachedExpression;
+    }
+
     public void setExecuteWith(List<NodeExecutionData> executeWith) {
         this.executeWith = executeWith;
     }
@@ -111,8 +156,8 @@ public class NodeChildData extends MessageContainer {
         return childNode.findExecutableType(targetType, getExecuteWith().size());
     }
 
-    public List<ExecutableTypeData> findGenericExecutableTypes(ProcessorContext context) {
-        return childNode.findGenericExecutableTypes(context, getExecuteWith().size());
+    public List<ExecutableTypeData> findGenericExecutableTypes() {
+        return childNode.findGenericExecutableTypes(getExecuteWith().size());
     }
 
     public ExecutableTypeData findAnyGenericExecutableType(ProcessorContext context) {
@@ -136,7 +181,7 @@ public class NodeChildData extends MessageContainer {
     public void setNode(NodeData nodeData) {
         this.childNode = nodeData;
         if (nodeData != null) {
-            getMessages().addAll(nodeData.collectMessages());
+            getMessagesForModification().addAll(nodeData.collectMessages());
         }
     }
 

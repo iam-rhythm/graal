@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,43 +40,113 @@
  */
 package com.oracle.truffle.nfi.test.parser;
 
-import com.oracle.truffle.nfi.types.Parser;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.junit.Assert.assertThrows;
+
+import org.hamcrest.Description;
+import org.hamcrest.TypeSafeDiagnosingMatcher;
 import org.junit.Test;
 
-public class ErrorParseSignatureTest {
+import com.oracle.truffle.api.exception.AbstractTruffleException;
+import com.oracle.truffle.api.interop.ExceptionType;
+import com.oracle.truffle.api.interop.InteropLibrary;
+import com.oracle.truffle.api.interop.UnsupportedMessageException;
+import com.oracle.truffle.api.source.Source;
 
-    @Test(expected = IllegalArgumentException.class)
+public class ErrorParseSignatureTest extends ParseSignatureTest {
+
+    protected static void tryParseSignature(String signature) {
+        Source source = Source.newBuilder("nfi", signature, "signature").build();
+        runWithPolyglot.getTruffleTestEnv().parseInternal(source);
+    }
+
+    static class ParserExceptionMatcher extends TypeSafeDiagnosingMatcher<AbstractTruffleException> {
+
+        private final ExceptionType expectedExceptionType;
+        private final boolean expectedIncomplete;
+
+        static final ParserExceptionMatcher PARSER = new ParserExceptionMatcher(ExceptionType.PARSE_ERROR, false);
+        static final ParserExceptionMatcher INCOMPLETE = new ParserExceptionMatcher(ExceptionType.PARSE_ERROR, true);
+
+        ParserExceptionMatcher(ExceptionType expectedExceptionType, boolean expectedIncomplete) {
+            super(AbstractTruffleException.class);
+            this.expectedExceptionType = expectedExceptionType;
+            this.expectedIncomplete = expectedIncomplete;
+        }
+
+        @Override
+        protected boolean matchesSafely(AbstractTruffleException item, Description mismatchDescription) {
+            try {
+                ExceptionType actualExceptionType = InteropLibrary.getUncached().getExceptionType(item);
+                boolean actualIncomplete = InteropLibrary.getUncached().isExceptionIncompleteSource(item);
+                if (actualExceptionType == expectedExceptionType && actualIncomplete == expectedIncomplete) {
+                    return true;
+                } else {
+                    mismatchDescription.appendValue(actualExceptionType);
+                    if (actualIncomplete) {
+                        mismatchDescription.appendText(" (incomplete)");
+                    }
+                    return false;
+                }
+            } catch (UnsupportedMessageException ex) {
+                throw new AssertionError(ex);
+            }
+        }
+
+        @Override
+        public void describeTo(Description description) {
+            description.appendValue(expectedExceptionType);
+            if (expectedIncomplete) {
+                description.appendText(" (incomplete)");
+            }
+        }
+    }
+
+    @Test
     public void parseEmpty() {
-        Parser.parseSignature("");
+        AbstractTruffleException truffleException = assertThrows(AbstractTruffleException.class, () -> tryParseSignature(""));
+        assertThat(truffleException, ParserExceptionMatcher.INCOMPLETE);
     }
 
-    @Test(expected = IllegalArgumentException.class)
+    @Test
     public void parseUnknownToken() {
-        Parser.parseSignature("..");
+        AbstractTruffleException truffleException = assertThrows(AbstractTruffleException.class, () -> tryParseSignature(".."));
+        assertThat(truffleException, ParserExceptionMatcher.PARSER);
     }
 
-    @Test(expected = IllegalArgumentException.class)
+    @Test
     public void parseMissingParen() {
-        Parser.parseSignature("(sint32 : void");
+        AbstractTruffleException truffleException = assertThrows(AbstractTruffleException.class, () -> tryParseSignature("(sint32 : void"));
+        assertThat(truffleException, ParserExceptionMatcher.PARSER);
     }
 
-    @Test(expected = IllegalArgumentException.class)
+    @Test
     public void parseMissingComma() {
-        Parser.parseSignature("(sint32 float) : void");
+        AbstractTruffleException truffleException = assertThrows(AbstractTruffleException.class, () -> tryParseSignature("(sint32 float) : void"));
+        assertThat(truffleException, ParserExceptionMatcher.PARSER);
     }
 
-    @Test(expected = IllegalArgumentException.class)
+    @Test
     public void parseMissingColon() {
-        Parser.parseSignature("(sint32) void");
+        AbstractTruffleException truffleException = assertThrows(AbstractTruffleException.class, () -> tryParseSignature("(sint32) void"));
+        assertThat(truffleException, ParserExceptionMatcher.PARSER);
     }
 
-    @Test(expected = IllegalArgumentException.class)
+    @Test
     public void parseMissingRetType() {
-        Parser.parseSignature("() : ");
+        AbstractTruffleException truffleException = assertThrows(AbstractTruffleException.class, () -> tryParseSignature("() : "));
+        assertThat(truffleException, ParserExceptionMatcher.INCOMPLETE);
     }
 
-    @Test(expected = IllegalArgumentException.class)
+    @Test
     public void parseMissingVararg() {
-        Parser.parseSignature("(float, ...) : void");
+        AbstractTruffleException truffleException = assertThrows(AbstractTruffleException.class, () -> tryParseSignature("(float, ...) : void"));
+        assertThat(truffleException, ParserExceptionMatcher.PARSER);
+    }
+
+    @Test
+    public void parseMissingVararg2() {
+        AbstractTruffleException truffleException = assertThrows(AbstractTruffleException.class, () -> tryParseSignature("(...) : void"));
+        assertThat(truffleException, ParserExceptionMatcher.PARSER);
     }
 }

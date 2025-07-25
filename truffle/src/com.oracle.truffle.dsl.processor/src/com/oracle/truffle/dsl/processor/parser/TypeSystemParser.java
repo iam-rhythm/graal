@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,7 +40,6 @@
  */
 package com.oracle.truffle.dsl.processor.parser;
 
-import java.lang.annotation.Annotation;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -53,15 +52,14 @@ import javax.lang.model.element.Element;
 import javax.lang.model.element.ExecutableElement;
 import javax.lang.model.element.Modifier;
 import javax.lang.model.element.TypeElement;
+import javax.lang.model.type.DeclaredType;
 import javax.lang.model.type.TypeKind;
 import javax.lang.model.type.TypeMirror;
 import javax.lang.model.util.ElementFilter;
 import javax.lang.model.util.Types;
 
-import com.oracle.truffle.api.dsl.TypeCast;
-import com.oracle.truffle.api.dsl.TypeCheck;
-import com.oracle.truffle.api.dsl.TypeSystem;
 import com.oracle.truffle.dsl.processor.java.ElementUtils;
+import com.oracle.truffle.dsl.processor.java.compiler.CompilerFactory;
 import com.oracle.truffle.dsl.processor.model.ImplicitCastData;
 import com.oracle.truffle.dsl.processor.model.Template;
 import com.oracle.truffle.dsl.processor.model.TypeCastData;
@@ -71,8 +69,8 @@ import com.oracle.truffle.dsl.processor.model.TypeSystemData;
 public class TypeSystemParser extends AbstractParser<TypeSystemData> {
 
     @Override
-    public Class<? extends Annotation> getAnnotationType() {
-        return TypeSystem.class;
+    public DeclaredType getAnnotationType() {
+        return types.TypeSystem;
     }
 
     /**
@@ -85,23 +83,19 @@ public class TypeSystemParser extends AbstractParser<TypeSystemData> {
     }
 
     @Override
-    protected TypeSystemData parse(Element element, AnnotationMirror mirror) {
+    protected TypeSystemData parse(Element element, List<AnnotationMirror> mirror) {
         TypeElement templateType = (TypeElement) element;
-        AnnotationMirror templateTypeAnnotation = mirror;
+        AnnotationMirror templateTypeAnnotation = mirror.iterator().next();
 
         TypeSystemData typeSystem = new TypeSystemData(context, templateType, templateTypeAnnotation, false);
 
         // annotation type on class path!?
-        TypeElement annotationTypeElement = ElementUtils.getTypeElement(processingEnv, getAnnotationType().getCanonicalName());
-        if (annotationTypeElement == null) {
-            typeSystem.addError("Required class %s is not on the classpath.", getAnnotationType().getName());
-        }
         if (templateType.getModifiers().contains(Modifier.PRIVATE)) {
-            typeSystem.addError("A @%s must have at least package protected visibility.", getAnnotationType().getName());
+            typeSystem.addError("A @%s must have at least package protected visibility.", getAnnotationType().asElement().getSimpleName().toString());
         }
 
         if (templateType.getModifiers().contains(Modifier.FINAL)) {
-            typeSystem.addError("The @%s must not be final.", getAnnotationType().getName());
+            typeSystem.addError("The @%s must not be final.", getAnnotationType().asElement().getSimpleName().toString());
         }
         if (typeSystem.hasErrors()) {
             return typeSystem;
@@ -111,9 +105,9 @@ public class TypeSystemParser extends AbstractParser<TypeSystemData> {
             return typeSystem;
         }
 
-        verifyExclusiveMethodAnnotation(typeSystem, TypeCast.class, TypeCheck.class);
+        verifyExclusiveMethodAnnotation(typeSystem, types.TypeCast, types.TypeCheck);
 
-        List<Element> elements = newElementList(context.getEnvironment().getElementUtils().getAllMembers(templateType));
+        List<Element> elements = newElementList(CompilerFactory.getCompiler(templateType).getAllMembersInDeclarationOrder(context.getEnvironment(), templateType));
         List<ImplicitCastData> implicitCasts = new ImplicitCastParser(context, typeSystem).parse(elements);
         List<TypeCastData> casts = new TypeCastParser(context, typeSystem).parse(elements);
         List<TypeCheckData> checks = new TypeCheckParser(context, typeSystem).parse(elements);
@@ -143,13 +137,13 @@ public class TypeSystemParser extends AbstractParser<TypeSystemData> {
         return typeSystem;
     }
 
-    private void verifyExclusiveMethodAnnotation(Template template, Class<?>... annotationTypes) {
+    private static void verifyExclusiveMethodAnnotation(Template template, DeclaredType... annotationTypes) {
         List<ExecutableElement> methods = ElementFilter.methodsIn(template.getTemplateType().getEnclosedElements());
         for (ExecutableElement method : methods) {
             List<AnnotationMirror> foundAnnotations = new ArrayList<>();
             for (int i = 0; i < annotationTypes.length; i++) {
-                Class<?> annotationType = annotationTypes[i];
-                AnnotationMirror mirror = ElementUtils.findAnnotationMirror(context.getEnvironment(), method, annotationType);
+                DeclaredType annotationType = annotationTypes[i];
+                AnnotationMirror mirror = ElementUtils.findAnnotationMirror(method, annotationType);
                 if (mirror != null) {
                     foundAnnotations.add(mirror);
                 }
@@ -210,12 +204,12 @@ public class TypeSystemParser extends AbstractParser<TypeSystemData> {
     private static final TypeKind[] TYPE_KIND_VALUES = TypeKind.values();
 
     private boolean isPrimitiveWrapper(TypeMirror type) {
-        Types types = context.getEnvironment().getTypeUtils();
+        Types typeUtils = context.getEnvironment().getTypeUtils();
         for (TypeKind kind : TYPE_KIND_VALUES) {
             if (!kind.isPrimitive()) {
                 continue;
             }
-            if (ElementUtils.typeEquals(type, types.boxedClass(types.getPrimitiveType(kind)).asType())) {
+            if (ElementUtils.typeEquals(type, typeUtils.boxedClass(typeUtils.getPrimitiveType(kind)).asType())) {
                 return true;
             }
         }

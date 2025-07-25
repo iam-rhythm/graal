@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,11 +24,11 @@
  */
 package com.oracle.truffle.tools.chromeinspector.types;
 
-import com.oracle.truffle.tools.utils.json.JSONObject;
-
+import com.oracle.truffle.api.debug.DebugException;
 import com.oracle.truffle.api.debug.DebugStackFrame;
 import com.oracle.truffle.api.debug.SuspendAnchor;
 import com.oracle.truffle.api.source.SourceSection;
+import org.graalvm.shadowed.org.json.JSONObject;
 
 public final class CallFrame {
 
@@ -48,7 +48,7 @@ public final class CallFrame {
         if (anchor == SuspendAnchor.BEFORE) {
             this.location = new Location(script.getId(), sourceSection.getStartLine(), sourceSection.getStartColumn());
         } else {
-            this.location = new Location(script.getId(), sourceSection.getEndLine(), sourceSection.getEndColumn());
+            this.location = new Location(script.getId(), sourceSection.getEndLine(), sourceSection.getEndColumn() + 1);
         }
         if (functionSourceSection != null) {
             this.functionLocation = new Location(script.getId(), functionSourceSection.getStartLine(), functionSourceSection.getStartColumn());
@@ -81,15 +81,31 @@ public final class CallFrame {
         return thisObject;
     }
 
+    public RemoteObject getReturnValue() {
+        return returnObject;
+    }
+
     private JSONObject createJSON() {
         JSONObject json = new JSONObject();
         json.put("callFrameId", Integer.toString(depth));
-        json.put("functionName", frame.getName());
+        try {
+            String functionName = frame.getName();
+            if (functionName == null) {
+                functionName = "";
+            }
+            json.put("functionName", functionName);
+        } catch (DebugException ex) {
+            json.put("functionName", ex.getLocalizedMessage());
+        }
         json.put("location", location.toJSON());
         json.putOpt("functionLocation", (functionLocation != null) ? functionLocation.toJSON() : null);
         json.put("url", url);
         json.put("scopeChain", Scope.createScopesJSON(scopes));
-        json.put("this", thisObject.toJSON());
+        if (thisObject != null) {
+            json.put("this", thisObject.toJSON());
+        } else {
+            json.put("this", JSONObject.NULL);
+        }
         if (returnObject != null) {
             json.put("returnValue", returnObject.toJSON());
         }

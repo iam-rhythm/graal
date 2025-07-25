@@ -28,7 +28,7 @@ import org.graalvm.word.Pointer;
 import org.graalvm.word.PointerBase;
 import org.graalvm.word.UnsignedWord;
 
-import com.oracle.svm.core.annotate.Uninterruptible;
+import com.oracle.svm.core.Uninterruptible;
 
 /**
  * Utility methods on Pointers.
@@ -46,7 +46,7 @@ public final class PointerUtils {
      * @param multiple The multiple to which that Pointer should be decreased.
      * @return That Pointer, but rounded down.
      */
-    @Uninterruptible(reason = "Used in uninterruptible code.", mayBeInlined = true)
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     public static Pointer roundDown(PointerBase that, UnsignedWord multiple) {
         return (Pointer) UnsignedUtils.roundDown((UnsignedWord) that, multiple);
     }
@@ -58,7 +58,7 @@ public final class PointerUtils {
      * @param multiple The multiple to which that Pointer should be increased.
      * @return That Pointer, but rounded up.
      */
-    @Uninterruptible(reason = "Used in uninterruptible code.", mayBeInlined = true)
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     public static Pointer roundUp(PointerBase that, UnsignedWord multiple) {
         return (Pointer) UnsignedUtils.roundUp((UnsignedWord) that, multiple);
     }
@@ -70,8 +70,9 @@ public final class PointerUtils {
      * @param multiple The multiple against which the Pointer should be verified.
      * @return true if that Pointer is a multiple, false otherwise.
      */
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     public static boolean isAMultiple(PointerBase that, UnsignedWord multiple) {
-        return that.equal(PointerUtils.roundDown(that, multiple));
+        return UnsignedUtils.isAMultiple((UnsignedWord) that, multiple);
     }
 
     /**
@@ -100,6 +101,7 @@ public final class PointerUtils {
      * @param y Another Pointer.
      * @return The whichever Pointer is smaller.
      */
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     public static <T extends PointerBase> T min(T x, T y) {
         return (((Pointer) x).belowOrEqual((Pointer) y)) ? x : y;
     }
@@ -111,6 +113,7 @@ public final class PointerUtils {
      * @param y Another Pointer.
      * @return The whichever Pointer is larger.
      */
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     public static <T extends PointerBase> T max(T x, T y) {
         return (((Pointer) x).aboveOrEqual((Pointer) y)) ? x : y;
     }

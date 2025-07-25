@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2016, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,12 +40,14 @@
  */
 package com.oracle.truffle.api.instrumentation;
 
-import java.io.PrintStream;
+import java.lang.ref.WeakReference;
 import java.util.Collection;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.NoSuchElementException;
 import java.util.Set;
 import java.util.concurrent.locks.Lock;
+import java.util.logging.Level;
 
 import com.oracle.truffle.api.Assumption;
 import com.oracle.truffle.api.CompilerAsserts;
@@ -53,28 +55,26 @@ import com.oracle.truffle.api.CompilerDirectives;
 import com.oracle.truffle.api.CompilerDirectives.CompilationFinal;
 import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
 import com.oracle.truffle.api.Truffle;
+import com.oracle.truffle.api.TruffleLogger;
+import com.oracle.truffle.api.frame.Frame;
 import com.oracle.truffle.api.frame.FrameDescriptor;
-import com.oracle.truffle.api.frame.FrameSlot;
-import com.oracle.truffle.api.frame.FrameSlotTypeException;
 import com.oracle.truffle.api.frame.VirtualFrame;
-import com.oracle.truffle.api.instrumentation.InstrumentationHandler.AccessorInstrumentHandler;
-import com.oracle.truffle.api.instrumentation.InstrumentationHandler.EngineInstrumenter;
+import com.oracle.truffle.api.instrumentation.InstrumentableNode.WrapperNode;
 import com.oracle.truffle.api.instrumentation.InstrumentationHandler.InstrumentClientInstrumenter;
 import com.oracle.truffle.api.nodes.ExplodeLoop;
 import com.oracle.truffle.api.nodes.Node;
-import com.oracle.truffle.api.nodes.NodeCost;
 import com.oracle.truffle.api.nodes.NodeUtil;
 import com.oracle.truffle.api.nodes.NodeVisitor;
 import com.oracle.truffle.api.nodes.RootNode;
-import com.oracle.truffle.api.profiles.BranchProfile;
 import com.oracle.truffle.api.source.SourceSection;
+import com.oracle.truffle.api.strings.TruffleString;
 
 /**
  * <p>
  * Represents an event sink for instrumentation events that is embedded in the AST using wrappers if
  * needed. Instances of this class are provided by
- * {@link InstrumentableFactory#createWrapper(Node, ProbeNode)} to notify the instrumentation API
- * about execution events.
+ * {@link InstrumentableNode#createWrapper(ProbeNode)} to notify the instrumentation API about
+ * execution events.
  * </p>
  *
  * It is strongly recommended to use {@link GenerateWrapper} to generate implementations of wrapper
@@ -112,6 +112,11 @@ import com.oracle.truffle.api.source.SourceSection;
  */
 public final class ProbeNode extends Node {
 
+    private static final int SEEN_UNWIND = 0b1;
+    private static final int SEEN_UNWIND_NEXT = 0b10;
+    private static final int SEEN_RETURN = 0b100;
+    private static final int SEEN_REENTER = 0b1000;
+
     /**
      * A constant that performs reenter of the current node when returned from
      * {@link ExecutionEventListener#onUnwind(EventContext, VirtualFrame, Object)} or
@@ -124,7 +129,24 @@ public final class ProbeNode extends Node {
     // returned from chain nodes whose bindings ignore the unwind
     private static final Object UNWIND_ACTION_IGNORED = new Object();
 
+    static class RetiredNodeReference {
+        private final WeakReference<Node> node;
+        private final Set<Class<? extends Tag>> materializeTags;
+        final RetiredNodeReference next;
+
+        RetiredNodeReference(Node node, Set<Class<? extends Tag>> materializeTags, RetiredNodeReference next) {
+            this.node = new WeakReference<>(node);
+            this.materializeTags = materializeTags;
+            this.next = next;
+        }
+
+        Node getNode() {
+            return node.get();
+        }
+    }
+
     private final InstrumentationHandler handler;
+    private volatile RetiredNodeReference retiredNodeReference;
     @CompilationFinal private volatile EventContext context;
 
     @Child private volatile ProbeNode.EventChainNode chain;
@@ -134,14 +156,79 @@ public final class ProbeNode extends Node {
      * final for listeners and factories.
      */
     @CompilationFinal private volatile Assumption version;
+    @CompilationFinal private volatile int seen = 0;
 
-    @CompilationFinal private volatile byte seen = 0;
-    private final BranchProfile unwindHasNext = BranchProfile.create();
+    private final boolean eagerProbe;
+
+    private static final boolean ASSERT_ENTER_RETURN_PARITY;
+
+    static {
+        boolean assertsOn = false;
+        assert !!(assertsOn = true);
+        ASSERT_ENTER_RETURN_PARITY = assertsOn;
+    }
+
+    /**
+     * Constructor for eager probes.
+     */
+    ProbeNode(InstrumentableNode node, SourceSection sourceSection) {
+        this.handler = findInstrumentationHandler(node);
+        this.context = new EventContext(this, sourceSection);
+        this.eagerProbe = true;
+    }
+
+    private static InstrumentationHandler findInstrumentationHandler(InstrumentableNode node) {
+        RootNode root = ((Node) node).getRootNode();
+        if (root == null) {
+            throw new IllegalArgumentException("Unadopted nodes cannot be used to create probes.");
+        }
+        return (InstrumentationHandler) InstrumentAccessor.ENGINE.getInstrumentationHandler(root);
+    }
 
     /** Instantiated by the instrumentation framework. */
     ProbeNode(InstrumentationHandler handler, SourceSection sourceSection) {
         this.handler = handler;
         this.context = new EventContext(this, sourceSection);
+        this.eagerProbe = false;
+    }
+
+    RetiredNodeReference getRetiredNodeReference() {
+        return retiredNodeReference;
+    }
+
+    void clearRetiredNodeReference() {
+        retiredNodeReference = null;
+    }
+
+    private boolean hasNewTags(Node retiredNode, Set<Class<? extends Tag>> materializeTags) {
+        Set<Class<? extends Tag>> allSeenMaterializeTags = retiredNodeReference.next == null ? retiredNodeReference.materializeTags : new HashSet<>(retiredNodeReference.materializeTags);
+
+        RetiredNodeReference nodeRef = retiredNodeReference;
+        while (nodeRef != null) {
+            if (allSeenMaterializeTags != nodeRef.materializeTags) {
+                allSeenMaterializeTags.addAll(nodeRef.materializeTags);
+            }
+            Node nodeRefNode = nodeRef.getNode();
+            assert nodeRefNode == null || nodeRefNode != retiredNode : "The same retired node must not be set more than once!";
+            assert !nodeRef.materializeTags.equals(materializeTags) : "Retired node must be set at most once for the same set of tags!";
+            nodeRef = nodeRef.next;
+        }
+        return !allSeenMaterializeTags.containsAll(materializeTags);
+    }
+
+    void setRetiredNode(Node retiredNode, Set<Class<? extends Tag>> materializeTags) {
+        if (retiredNodeReference == null) {
+            retiredNodeReference = new RetiredNodeReference(retiredNode, materializeTags, null);
+        } else {
+            /*
+             * The following check does not check all illegal materializations, because seen
+             * materialize tags are not recorded before the AST is first executed.
+             */
+            assert hasNewTags(retiredNode, materializeTags) : "There should always be some new materialize tag!";
+            RetiredNodeReference previousRetiredNodeReference = retiredNodeReference;
+            RetiredNodeReference newRetiredNodeReference = new RetiredNodeReference(retiredNode, materializeTags, previousRetiredNodeReference);
+            retiredNodeReference = newRetiredNodeReference;
+        }
     }
 
     /**
@@ -151,9 +238,12 @@ public final class ProbeNode extends Node {
      * @since 0.12
      */
     public void onEnter(VirtualFrame frame) {
+        if (ASSERT_ENTER_RETURN_PARITY && !eagerProbe) {
+            InstrumentAccessor.ENGINE.assertReturnParityEnter(this, handler.getEngine());
+        }
         EventChainNode localChain = lazyUpdate(frame);
         if (localChain != null) {
-            localChain.onEnter(context, frame);
+            EventChainNode.onEnter(localChain, context, frame);
         }
     }
 
@@ -166,43 +256,34 @@ public final class ProbeNode extends Node {
      * @since 0.12
      */
     public void onReturnValue(VirtualFrame frame, Object result) {
+        if (ASSERT_ENTER_RETURN_PARITY && !eagerProbe) {
+            InstrumentAccessor.ENGINE.assertReturnParityLeave(this, handler.getEngine());
+        }
         EventChainNode localChain = lazyUpdate(frame);
         assert isNullOrInteropValue(result);
         if (localChain != null) {
-            localChain.onReturnValue(context, frame, result);
+            EventChainNode.onReturnValue(localChain, context, frame, result);
         }
     }
 
+    @SuppressWarnings("unchecked")
     private boolean isNullOrInteropValue(Object result) {
         if (!(context.getInstrumentedNode() instanceof InstrumentableNode)) {
             // legacy support
             return true;
         }
+        InstrumentableNode node = (InstrumentableNode) context.getInstrumentedNode();
         if (result == null) {
             return true;
         }
-        AccessorInstrumentHandler.interopAccess().checkInteropType(result);
+        for (Class<?> tag : StandardTags.ALL_TAGS) {
+            if (node.hasTag((Class<? extends Tag>) tag)) {
+                // for standard tags we must always return an interop type
+                InstrumentAccessor.interopAccess().checkInteropType(result);
+                return true;
+            }
+        }
         return true;
-    }
-
-    /**
-     * Should get invoked if the node did not complete successfully.
-     *
-     * @param exception the exception that occurred during the execution
-     * @param frame the current frame of the execution.
-     * @since 0.12
-     * @deprecated Use {@link #onReturnExceptionalOrUnwind(VirtualFrame, Throwable, boolean)}
-     *             instead and adjust the wrapper node implementation accordingly.
-     */
-    @Deprecated
-    public void onReturnExceptional(VirtualFrame frame, Throwable exception) {
-        if (exception instanceof ThreadDeath) {
-            throw (ThreadDeath) exception;
-        }
-        EventChainNode localChain = lazyUpdate(frame);
-        if (localChain != null) {
-            localChain.onReturnExceptional(context, frame, exception);
-        }
     }
 
     /**
@@ -235,12 +316,21 @@ public final class ProbeNode extends Node {
      * @since 0.31
      */
     public Object onReturnExceptionalOrUnwind(VirtualFrame frame, Throwable exception, boolean isReturnCalled) {
+        if (ASSERT_ENTER_RETURN_PARITY && !eagerProbe && !isReturnCalled) {
+            try {
+                InstrumentAccessor.ENGINE.assertReturnParityLeave(this, handler.getEngine());
+            } catch (Throwable t) {
+                CompilerDirectives.transferToInterpreterAndInvalidate();
+                // exception shouldn't be null but avoid incurring further exceptions
+                if (exception != null) {
+                    t.addSuppressed(exception);
+                }
+                throw t;
+            }
+        }
         UnwindException unwind = null;
         if (exception instanceof UnwindException) {
-            if (!isSeenUnwind()) {
-                CompilerDirectives.transferToInterpreterAndInvalidate();
-                setSeenUnwind();
-            }
+            profileBranch(SEEN_UNWIND);
             unwind = (UnwindException) exception;
         } else if (exception instanceof ThreadDeath) {
             throw (ThreadDeath) exception;
@@ -249,14 +339,11 @@ public final class ProbeNode extends Node {
         if (localChain != null) {
             if (!isReturnCalled) {
                 try {
-                    localChain.onReturnExceptional(context, frame, exception);
+                    EventChainNode.onReturnExceptional(localChain, context, frame, exception);
                 } catch (UnwindException ex) {
-                    if (!isSeenUnwind()) {
-                        CompilerDirectives.transferToInterpreterAndInvalidate();
-                        setSeenUnwind();
-                    }
+                    profileBranch(SEEN_UNWIND);
                     if (unwind != null && unwind != ex) {
-                        unwindHasNext.enter();
+                        profileBranch(SEEN_UNWIND_NEXT);
                         unwind.addNext(ex);
                     } else {
                         unwind = ex;
@@ -264,18 +351,12 @@ public final class ProbeNode extends Node {
                 }
             }
             if (unwind != null) { // seenUnwind must be true here
-                Object ret = localChain.onUnwind(context, frame, unwind);
+                Object ret = EventChainNode.onUnwind(localChain, context, frame, unwind);
                 if (ret == UNWIND_ACTION_REENTER) {
-                    if (!isSeenReenter()) {
-                        CompilerDirectives.transferToInterpreterAndInvalidate();
-                        setSeenReenter();
-                    }
+                    profileBranch(SEEN_REENTER);
                     return UNWIND_ACTION_REENTER;
                 } else if (ret != null && ret != UNWIND_ACTION_IGNORED) {
-                    if (!isSeenReturn()) {
-                        CompilerDirectives.transferToInterpreterAndInvalidate();
-                        setSeenReturn();
-                    }
+                    profileBranch(SEEN_RETURN);
                     assert isNullOrInteropValue(ret);
                     return ret;
                 }
@@ -285,37 +366,59 @@ public final class ProbeNode extends Node {
         return null;
     }
 
-    private boolean isSeenUnwind() {
-        return (seen & 0b1) != 0;
-    }
-
-    private void setSeenUnwind() {
-        CompilerAsserts.neverPartOfCompilation();
-        seen = (byte) (seen | 0b1);
-    }
-
-    private boolean isSeenReenter() {
-        return (seen & 0b10) != 0;
-    }
-
-    private void setSeenReenter() {
-        CompilerAsserts.neverPartOfCompilation();
-        seen = (byte) (seen | 0b10);
-    }
-
-    private boolean isSeenReturn() {
-        return (seen & 0b100) != 0;
-    }
-
-    private void setSeenReturn() {
-        CompilerAsserts.neverPartOfCompilation();
-        seen = (byte) (seen | 0b100);
+    private void profileBranch(int flag) {
+        if ((seen & flag) == 0) { // if not seen
+            CompilerDirectives.transferToInterpreterAndInvalidate();
+            seen = seen | flag;
+        }
     }
 
     void onInputValue(VirtualFrame frame, EventBinding<?> targetBinding, EventContext inputContext, int inputIndex, Object inputValue) {
         EventChainNode localChain = lazyUpdate(frame);
         if (localChain != null) {
-            localChain.onInputValue(context, frame, targetBinding, inputContext, inputIndex, inputValue);
+            EventChainNode.onInputValue(localChain, context, frame, targetBinding, inputContext, inputIndex, inputValue);
+        }
+    }
+
+    /**
+     * Should be invoked when the node yields execution. Use
+     * {@link GenerateWrapper#yieldExceptions()} when possible, to have <code>onYield()</code>
+     * called automatically.
+     * <p>
+     * When the yielded execution is resumed, call {@link #onResume(VirtualFrame)}, or use
+     * {@link GenerateWrapper#resumeMethodPrefix()}.
+     *
+     * @param frame the current frame of the execution.
+     * @since 24.0
+     */
+    public void onYield(VirtualFrame frame, Object result) {
+        if (ASSERT_ENTER_RETURN_PARITY && !eagerProbe) {
+            InstrumentAccessor.ENGINE.assertReturnParityLeave(this, handler.getEngine());
+        }
+        EventChainNode localChain = lazyUpdate(frame);
+        if (localChain != null) {
+            EventChainNode.onYield(localChain, context, frame, result);
+        }
+    }
+
+    /**
+     * Should be invoked when execution is resumed after a {@link #onYield(VirtualFrame, Object)
+     * yield}. Use {@link GenerateWrapper#resumeMethodPrefix()} when possible, to have this method
+     * called automatically by the wrapper node.
+     * <p>
+     * Override {@link RootNode#isSameFrame(Frame, Frame)} if necessary, to be able to match the
+     * yielded and resumed executions.
+     *
+     * @param frame the current frame of the execution.
+     * @since 24.0
+     */
+    public void onResume(VirtualFrame frame) {
+        if (ASSERT_ENTER_RETURN_PARITY && !eagerProbe) {
+            InstrumentAccessor.ENGINE.assertReturnParityEnter(this, handler.getEngine());
+        }
+        EventChainNode localChain = lazyUpdate(frame);
+        if (localChain != null) {
+            EventChainNode.onResume(localChain, context, frame);
         }
     }
 
@@ -323,17 +426,30 @@ public final class ProbeNode extends Node {
         return context;
     }
 
-    @SuppressWarnings("deprecation")
-    com.oracle.truffle.api.instrumentation.InstrumentableFactory.WrapperNode findWrapper() throws AssertionError {
+    WrapperNode findWrapper() throws AssertionError {
         Node parent = getParent();
-        if (!(parent instanceof com.oracle.truffle.api.instrumentation.InstrumentableFactory.WrapperNode)) {
+        if (!(parent instanceof WrapperNode wrapper)) {
+            CompilerDirectives.transferToInterpreterAndInvalidate();
             if (parent == null) {
                 throw new AssertionError("Probe node disconnected from AST.");
             } else {
                 throw new AssertionError("ProbeNodes must have a parent Node that implements NodeWrapper.");
             }
         }
-        return (com.oracle.truffle.api.instrumentation.InstrumentableFactory.WrapperNode) parent;
+        return wrapper;
+    }
+
+    InstrumentableNode findInstrumentableNode() throws AssertionError {
+        Node parent = getParent();
+        while (parent != null) {
+            if (parent instanceof WrapperNode n) {
+                return (InstrumentableNode) n.getDelegateNode();
+            } else if (parent instanceof InstrumentableNode n) {
+                return n;
+            }
+            parent = parent.getParent();
+        }
+        throw CompilerDirectives.shouldNotReachHere("Instrumentable node not found.");
     }
 
     synchronized void invalidate() {
@@ -363,23 +479,41 @@ public final class ProbeNode extends Node {
             if (localVersion != null && localVersion.isValid()) {
                 return this.chain;
             }
-            nextChain = handler.createBindings(frame, ProbeNode.this);
-            if (nextChain == null) {
-                // chain is null -> remove wrapper;
-                // Note: never set child nodes to null, can cause races
-                InstrumentationHandler.removeWrapper(ProbeNode.this);
-                return null;
-            }
+            EventBinding.Source<?>[] executionBindingsSnapshot;
+            do {
+                executionBindingsSnapshot = handler.getExecutionBindingsSnapshot();
+                nextChain = handler.createBindings(frame, ProbeNode.this, executionBindingsSnapshot);
+                if (nextChain == null) {
+                    // chain is null -> remove wrapper;
+                    // Note: never set child nodes to null, can cause races
+                    if (retiredNodeReference == null) {
+                        if (eagerProbe) {
+                            // eager probes cannot be removed
+                            oldChain = this.chain;
+                            this.chain = null;
+                        } else {
+                            // wrappers can just be removed for the next exection
+                            InstrumentationHandler.removeWrapper(ProbeNode.this);
+                            return null;
+                        }
+                    } else {
+                        oldChain = this.chain;
+                        this.chain = null;
+                    }
+                } else {
+                    oldChain = this.chain;
+                    this.chain = insert(nextChain);
+                }
+                this.version = Truffle.getRuntime().createAssumption("Instruments unchanged");
+            } while (executionBindingsSnapshot != handler.getExecutionBindingsSnapshot());
 
-            oldChain = this.chain;
-            this.chain = insert(nextChain);
-            this.version = Truffle.getRuntime().createAssumption("Instruments unchanged");
+            assert context.validEventContextOnLazyUpdate();
         } finally {
             lock.unlock();
         }
 
         if (oldChain != null) {
-            oldChain.onDispose(context, frame);
+            EventChainNode.onDispose(oldChain, context, frame);
         }
 
         return nextChain;
@@ -402,7 +536,7 @@ public final class ProbeNode extends Node {
     }
 
     Iterator<ExecutionEventNode> lookupExecutionEventNodes(Collection<EventBinding<? extends ExecutionEventNodeFactory>> bindings) {
-        return new Iterator<ExecutionEventNode>() {
+        return new Iterator<>() {
 
             private EventChainNode chainNode = ProbeNode.this.chain;
             private EventProviderChainNode nextNode;
@@ -454,7 +588,6 @@ public final class ProbeNode extends Node {
         return new InputValueChainNode(binding, probe, context, index);
     }
 
-    @SuppressWarnings("deprecation")
     private static boolean throwIllegalASTAssertion(EventProviderWithInputChainNode parentChain, EventContext parentContext, EventBinding.Source<?> binding, RootNode rootNode,
                     Set<Class<?>> providedTags, int index) {
         StringBuilder msg = new StringBuilder();
@@ -496,7 +629,7 @@ public final class ProbeNode extends Node {
                     if (node.getParent() == null) {
                         msg.append("null parent = ");
                     } else {
-                        String fieldName = NodeUtil.findChildField(node.getParent(), node).getName();
+                        String fieldName = NodeUtil.findChildFieldName(node.getParent(), node);
                         msg.append(node.getParent().getClass().getSimpleName() + "." + fieldName + " = ");
                     }
 
@@ -576,28 +709,39 @@ public final class ProbeNode extends Node {
         return visitor.index;
     }
 
-    @SuppressWarnings("deprecation")
-    private EventChainNode findParentChain(VirtualFrame frame, EventBinding<?> binding) {
+    ProbeNode findParentProbe() {
         Node node = getParent().getParent();
         while (node != null) {
-            // TODO we should avoid materializing the source section here
-            if (node instanceof com.oracle.truffle.api.instrumentation.InstrumentableFactory.WrapperNode) {
-                ProbeNode probe = ((com.oracle.truffle.api.instrumentation.InstrumentableFactory.WrapperNode) node).getProbeNode();
-                EventChainNode c = probe.lazyUpdate(frame);
-                if (c != null) {
-                    c = c.find(binding);
-                }
-                if (c != null) {
-                    return c;
+            ProbeNode probe = null;
+            if (node instanceof WrapperNode wrapper) {
+                return wrapper.getProbeNode();
+            } else if (node instanceof InstrumentableNode instrumentable) {
+                probe = instrumentable.findProbe();
+                if (probe != null && probe.eagerProbe && probe != this) {
+                    assert probe != this;
+                    return probe;
                 }
             } else if (node instanceof RootNode) {
-                break;
+                return null;
             }
             node = node.getParent();
         }
-        if (node == null) {
-            throw new IllegalStateException("The AST node is not yet adopted. ");
+        throw new IllegalStateException("The AST node is not yet adopted. ");
+    }
+
+    private EventChainNode findParentChain(VirtualFrame frame, EventBinding<?> binding) {
+        ProbeNode probe = this;
+        while ((probe = probe.findParentProbe()) != null) {
+            assert probe != this;
+            EventChainNode c = probe.lazyUpdate(frame);
+            if (c != null) {
+                c = c.find(binding);
+            }
+            if (c != null) {
+                return c;
+            }
         }
+
         return null;
 
     }
@@ -610,56 +754,41 @@ public final class ProbeNode extends Node {
                 throw new IllegalStateException(String.format("Returned EventNode %s was already adopted by another AST.", eventNode));
             }
         } catch (Throwable t) {
-            if (binding.isLanguageBinding()) {
-                /* Language bindings can just throw exceptions directly into the AST. */
-                throw t;
-            } else {
-                /*
-                 * Client Instruments are not allowed to disrupt program execution by throwing
-                 * exceptions into the AST.
-                 */
-                exceptionEventForClientInstrument(binding, "ProbeNodeFactory.create", t);
-                return null;
-            }
+            exceptionEventForClientInstrument(binding, "ProbeNodeFactory.create", t);
+            return null;
         }
         return eventNode;
     }
 
     /**
-     * Handles exceptions from non-language instrumentation code that must not be allowed to alter
-     * guest language execution semantics. Normal response is to log and continue.
+     * Previously, by default, all instruments did log their exceptions. They now by default throw,
+     * but we still want to respect if engine.InstrumentExceptionsAreThrown is explicitly set to
+     * false. This can be a workaround if an instrument fails but the execution should continue.
      */
     @TruffleBoundary
     static void exceptionEventForClientInstrument(EventBinding.Source<?> b, String eventName, Throwable t) {
-        assert !b.isLanguageBinding();
         if (t instanceof ThreadDeath) {
             // Terminates guest language execution immediately
             throw (ThreadDeath) t;
         }
-        final Object currentVm = AccessorInstrumentHandler.engineAccess().getCurrentVM();
-        if (b.getInstrumenter() instanceof EngineInstrumenter || (currentVm != null && AccessorInstrumentHandler.engineAccess().isInstrumentExceptionsAreThrown(currentVm))) {
+        // we only want to ever log for probes of instruments
+        if (!(b.getInstrumenter() instanceof InstrumentClientInstrumenter)) {
             throw sthrow(RuntimeException.class, t);
         }
-        // Exception is a failure in (non-language) instrumentation code; log and continue
         InstrumentClientInstrumenter instrumenter = (InstrumentClientInstrumenter) b.getInstrumenter();
-        Class<?> instrumentClass = instrumenter.getInstrumentClass();
-
+        Object probeInstrument = instrumenter.getEnv().getPolyglotInstrument();
+        if (InstrumentAccessor.engineAccess().isInstrumentExceptionsAreThrown(probeInstrument)) {
+            throw sthrow(RuntimeException.class, t);
+        }
+        // fetch default logger for instrument of the current probe
+        TruffleLogger logger = InstrumentAccessor.engineAccess().getLogger(probeInstrument, null);
         String message = String.format("Event %s failed for instrument class %s and listener/factory %s.", //
-                        eventName, instrumentClass.getName(), b.getElement());
-
-        Exception exception = new Exception(message, t);
-        PrintStream stream = new PrintStream(instrumenter.getEnv().err());
-        exception.printStackTrace(stream);
-    }
-
-    /** @since 0.12 */
-    @Override
-    public NodeCost getCost() {
-        return NodeCost.NONE;
+                        eventName, instrumenter.getInstrumentClassName(), b.getElement());
+        logger.log(Level.SEVERE, message, t);
     }
 
     private static boolean checkInteropType(Object value, EventBinding.Source<?> binding) {
-        if (value != null && value != UNWIND_ACTION_REENTER && value != UNWIND_ACTION_IGNORED && !InstrumentationHandler.ACCESSOR.isTruffleObject(value)) {
+        if (value != null && value != UNWIND_ACTION_REENTER && value != UNWIND_ACTION_IGNORED && !InstrumentAccessor.ACCESSOR.isTruffleObject(value)) {
             Class<?> clazz = value.getClass();
             if (!(clazz == Byte.class ||
                             clazz == Short.class ||
@@ -669,8 +798,9 @@ public final class ProbeNode extends Node {
                             clazz == Double.class ||
                             clazz == Character.class ||
                             clazz == Boolean.class ||
-                            clazz == String.class)) {
-                CompilerDirectives.transferToInterpreter();
+                            clazz == String.class ||
+                            clazz == TruffleString.class)) {
+                CompilerDirectives.transferToInterpreterAndInvalidate();
                 ClassCastException ccex = new ClassCastException(clazz.getName() + " isn't allowed Truffle interop type!");
                 if (binding.isLanguageBinding()) {
                     throw ccex;
@@ -716,12 +846,11 @@ public final class ProbeNode extends Node {
             this.foundContexts = new EventContext[childrenCount];
         }
 
-        @SuppressWarnings("deprecation")
         @Override
         protected boolean visitChild(Node child) {
             Node parent = child.getParent();
-            if (parent instanceof com.oracle.truffle.api.instrumentation.InstrumentableFactory.WrapperNode) {
-                ProbeNode probe = ((com.oracle.truffle.api.instrumentation.InstrumentableFactory.WrapperNode) parent).getProbeNode();
+            if (parent instanceof WrapperNode) {
+                ProbeNode probe = ((WrapperNode) parent).getProbeNode();
                 if (index < foundContexts.length) {
                     foundContexts[index] = probe.context;
                 } else {
@@ -784,7 +913,7 @@ public final class ProbeNode extends Node {
 
         public final boolean visit(Node node) {
             SourceSection sourceSection = node.getSourceSection();
-            if (InstrumentationHandler.isInstrumentableNode(node, sourceSection)) {
+            if (InstrumentationHandler.isInstrumentableNode(node)) {
                 if (binding.isChildInstrumentedFull(providedTags, rootNode, instrumentedNode, instrumentedNodeSourceSection, node, sourceSection)) {
                     if (!visitChild(node)) {
                         return false;
@@ -801,9 +930,24 @@ public final class ProbeNode extends Node {
 
     abstract static class EventChainNode extends Node {
 
-        @Child private ProbeNode.EventChainNode next;
+        private static final int SEEN_EXCEPTION_ON_ENTER = 0b1;
+        private static final int SEEN_EXCEPTION_ON_RETURN = 0b10;
+        private static final int SEEN_EXCEPTION_ON_RETURN_EXCEPTIONAL = 0b100;
+        private static final int SEEN_EXCEPTION_ON_INPUT_VALUE = 0b1000;
+        private static final int SEEN_EXCEPTION_ON_UNWIND = 0b10000;
+        private static final int SEEN_EXCEPTION_HAS_NEXT = 0b100000;
+        private static final int SEEN_EXCEPTION_OTHER = 0b10000000;
+
+        private static final int SEEN_UNWIND_ON_ENTER = 0b100000000;
+        private static final int SEEN_UNWIND_ON_RETURN = 0b1000000000;
+        private static final int SEEN_UNWIND_ON_RETURN_EXCEPTIONAL = 0b10000000000;
+        private static final int SEEN_UNWIND_ON_INPUT_VALUE = 0b100000000000;
+        private static final int SEEN_UNWIND_HAS_NEXT = 0b1000000000000;
+
         private final EventBinding.Source<?> binding;
-        @CompilationFinal private byte seen = 0;
+        @Child private ProbeNode.EventChainNode next; // effectively final
+        @CompilationFinal private ProbeNode.EventChainNode previous; // effectively final
+        @CompilationFinal private int seen;
 
         EventChainNode(EventBinding.Source<?> binding) {
             this.binding = binding;
@@ -819,6 +963,7 @@ public final class ProbeNode extends Node {
 
         final void setNext(ProbeNode.EventChainNode next) {
             this.next = insert(next);
+            next.previous = this;
         }
 
         EventBinding.Source<?> getBinding() {
@@ -829,109 +974,72 @@ public final class ProbeNode extends Node {
             return next;
         }
 
-        @Override
-        public final NodeCost getCost() {
-            return NodeCost.NONE;
-        }
-
-        private boolean isSeenException() {
-            return (seen & 0b1) != 0;
-        }
-
-        private void setSeenException() {
-            CompilerAsserts.neverPartOfCompilation();
-            seen = (byte) (seen | 0b1);
-        }
-
-        private boolean isSeenUnwind() {
-            return (seen & 0b10) != 0;
-        }
-
-        private void setSeenUnwind() {
-            CompilerAsserts.neverPartOfCompilation();
-            seen = (byte) (seen | 0b10);
-        }
-
-        private boolean isSeenUnwindOnInputValue() {
-            return (seen & 0b100) != 0;
-        }
-
-        private void setSeenUnwindOnInputValue() {
-            CompilerAsserts.neverPartOfCompilation();
-            seen = (byte) (seen | 0b100);
-        }
-
-        private boolean isSeenHasNext() {
-            return (seen & 0b1000) != 0;
-        }
-
-        private void setSeenHasNext() {
-            CompilerAsserts.neverPartOfCompilation();
-            seen = (byte) (seen | 0b1000);
-        }
-
-        final void onDispose(EventContext context, VirtualFrame frame) {
-            try {
-                innerOnDispose(context, frame);
-            } catch (Throwable t) {
-                if (!isSeenException()) {
-                    CompilerDirectives.transferToInterpreterAndInvalidate();
-                    setSeenException();
-                }
-                if (binding.isLanguageBinding()) {
-                    throw t;
-                } else {
-                    exceptionEventForClientInstrument(binding, "onEnter", t);
-                }
+        final void profileBranch(int flag) {
+            if ((seen & flag) == 0) { // if not seen
+                CompilerDirectives.transferToInterpreterAndInvalidate();
+                seen = seen | flag;
             }
-            if (next != null) {
-                next.onDispose(context, frame);
+        }
+
+        static void onDispose(EventChainNode eventChain, EventContext context, VirtualFrame frame) {
+            CompilerAsserts.neverPartOfCompilation();
+            EventChainNode chainNode = eventChain;
+            RuntimeException prevError = null;
+            while (chainNode != null) {
+                try {
+                    chainNode.innerOnDispose(context, frame);
+                } catch (Throwable t) {
+                    // no profiling necessary
+                    prevError = chainNode.handleError("onDispose", prevError, t);
+                }
+                chainNode = chainNode.next;
             }
+            if (prevError != null) {
+                throw prevError;
+            }
+        }
+
+        private RuntimeException handleError(String eventName, RuntimeException previousError, Throwable newError) {
+            if (binding.isLanguageBinding()) {
+                if (previousError != null) {
+                    profileBranch(SEEN_EXCEPTION_HAS_NEXT);
+                    addSuppressedException(previousError, newError);
+                    return previousError;
+                }
+                return (RuntimeException) newError;
+            } else {
+                profileBranch(SEEN_EXCEPTION_OTHER);
+                exceptionEventForClientInstrument(binding, eventName, newError);
+            }
+            return previousError;
+        }
+
+        @TruffleBoundary
+        private static void addSuppressedException(Throwable prev, Throwable t) {
+            prev.addSuppressed(t);
         }
 
         protected abstract void innerOnDispose(EventContext context, VirtualFrame frame);
 
-        final void onEnter(EventContext context, VirtualFrame frame) {
+        @ExplodeLoop
+        static void onEnter(EventChainNode eventChain, EventContext context, VirtualFrame frame) {
+            EventChainNode current = eventChain;
             UnwindException unwind = null;
-            try {
-                innerOnEnter(context, frame);
-            } catch (UnwindException ex) {
-                if (!isSeenUnwind()) {
-                    CompilerDirectives.transferToInterpreterAndInvalidate();
-                    setSeenUnwind();
-                }
-                ex.thrownFromBinding(binding);
-                unwind = ex;
-            } catch (Throwable t) {
-                if (!isSeenException()) {
-                    CompilerDirectives.transferToInterpreterAndInvalidate();
-                    setSeenException();
-                }
-                if (binding.isLanguageBinding()) {
-                    throw t;
-                } else {
-                    CompilerDirectives.transferToInterpreter();
-                    exceptionEventForClientInstrument(binding, "onEnter", t);
-                }
-            }
-            if (next != null) {
+            RuntimeException prevError = null;
+            while (current != null) {
                 try {
-                    next.onEnter(context, frame);
+                    current.innerOnEnter(context, frame);
                 } catch (UnwindException ex) {
-                    if (!isSeenUnwind()) {
-                        CompilerDirectives.transferToInterpreterAndInvalidate();
-                        setSeenUnwind();
-                    }
-                    if (unwind != null && unwind != ex) {
-                        if (!isSeenHasNext()) {
-                            CompilerDirectives.transferToInterpreterAndInvalidate();
-                            setSeenHasNext();
-                        }
-                        unwind.addNext(ex);
-                    } else {
-                        unwind = ex;
-                    }
+                    current.profileBranch(SEEN_UNWIND_ON_ENTER);
+                    unwind = handleUnwind(current, unwind, ex);
+                } catch (Throwable t) {
+                    current.profileBranch(SEEN_EXCEPTION_ON_ENTER);
+                    prevError = current.handleError("onEnter", prevError, t);
                 }
+                current = current.next;
+            }
+            if (prevError != null) {
+                throw prevError;
             }
             if (unwind != null) {
                 throw unwind;
@@ -940,53 +1048,42 @@ public final class ProbeNode extends Node {
 
         protected abstract void innerOnEnter(EventContext context, VirtualFrame frame);
 
-        final void onInputValue(EventContext context, VirtualFrame frame, EventBinding<?> inputBinding, EventContext inputContext, int inputIndex, Object inputValue) {
+        @ExplodeLoop
+        static void onInputValue(EventChainNode eventChain, EventContext context, VirtualFrame frame, EventBinding<?> inputBinding, EventContext inputContext, int inputIndex, Object inputValue) {
+            EventChainNode current = eventChain.getLast();
             UnwindException unwind = null;
-            if (next != null) {
+            RuntimeException prevError = null;
+            while (current != null) {
                 try {
-                    next.onInputValue(context, frame, inputBinding, inputContext, inputIndex, inputValue);
-                } catch (UnwindException ex) {
-                    if (!isSeenUnwindOnInputValue()) {
-                        CompilerDirectives.transferToInterpreterAndInvalidate();
-                        setSeenUnwindOnInputValue();
+                    if (current.binding == inputBinding) {
+                        current.innerOnInputValue(context, frame, current.binding, inputContext, inputIndex, inputValue);
                     }
-                    unwind = ex;
+                } catch (UnwindException ex) {
+                    current.profileBranch(SEEN_UNWIND_ON_INPUT_VALUE);
+                    unwind = handleUnwind(current, unwind, ex);
+                } catch (Throwable t) {
+                    current.profileBranch(SEEN_EXCEPTION_ON_INPUT_VALUE);
+                    prevError = current.handleError("onInputValue", prevError, t);
                 }
+                current = current.previous;
             }
-            try {
-                if (binding == inputBinding) {
-                    innerOnInputValue(context, frame, binding, inputContext, inputIndex, inputValue);
-                }
-            } catch (UnwindException ex) {
-                if (!isSeenUnwindOnInputValue()) {
-                    CompilerDirectives.transferToInterpreterAndInvalidate();
-                    setSeenUnwindOnInputValue();
-                }
-                ex.thrownFromBinding(binding);
-                unwind = mergeUnwind(unwind, ex);
-            } catch (Throwable t) {
-                if (!isSeenException()) {
-                    CompilerDirectives.transferToInterpreterAndInvalidate();
-                    setSeenException();
-                }
-                if (binding.isLanguageBinding()) {
-                    throw t;
-                } else {
-                    CompilerDirectives.transferToInterpreter();
-                    exceptionEventForClientInstrument(binding, "onInputValue", t);
-                }
+
+            if (prevError != null) {
+                throw prevError;
             }
             if (unwind != null) {
                 throw unwind;
             }
         }
 
+        private static UnwindException handleUnwind(EventChainNode current, UnwindException unwind, UnwindException ex) {
+            ex.thrownFromBinding(current.binding);
+            return current.mergeUnwind(unwind, ex);
+        }
+
         private UnwindException mergeUnwind(UnwindException unwind, UnwindException other) {
             if (unwind != null && unwind != other) {
-                if (!isSeenHasNext()) {
-                    CompilerDirectives.transferToInterpreterAndInvalidate();
-                    setSeenHasNext();
-                }
+                profileBranch(SEEN_UNWIND_HAS_NEXT);
                 unwind.addNext(other);
                 return unwind;
             } else {
@@ -996,40 +1093,37 @@ public final class ProbeNode extends Node {
 
         protected abstract void innerOnInputValue(EventContext context, VirtualFrame frame, EventBinding<?> targetBinding, EventContext inputContext, int inputIndex, Object inputValue);
 
-        final void onReturnValue(EventContext context, VirtualFrame frame, Object result) {
+        @ExplodeLoop
+        private EventChainNode getLast() {
+            EventChainNode current = this;
+            while (current.next != null) {
+                current = current.next;
+            }
+            CompilerAsserts.partialEvaluationConstant(current);
+            return current;
+        }
+
+        @ExplodeLoop
+        static void onReturnValue(EventChainNode chain, EventContext context, VirtualFrame frame, Object result) {
+            EventChainNode current = chain.getLast();
             UnwindException unwind = null;
-            if (next != null) {
+            RuntimeException prevError = null;
+            while (current != null) {
                 try {
-                    next.onReturnValue(context, frame, result);
+                    current.innerOnReturnValue(context, frame, result);
                 } catch (UnwindException ex) {
-                    if (!isSeenUnwind()) {
-                        CompilerDirectives.transferToInterpreterAndInvalidate();
-                        setSeenUnwind();
-                    }
-                    unwind = ex;
+                    current.profileBranch(SEEN_UNWIND_ON_RETURN);
+                    unwind = handleUnwind(current, unwind, ex);
+                } catch (Throwable t) {
+                    current.profileBranch(SEEN_EXCEPTION_ON_RETURN);
+                    prevError = current.handleError("onInputValue", prevError, t);
                 }
+                current = current.previous;
             }
-            try {
-                innerOnReturnValue(context, frame, result);
-            } catch (UnwindException ex) {
-                if (!isSeenUnwind()) {
-                    CompilerDirectives.transferToInterpreterAndInvalidate();
-                    setSeenUnwind();
-                }
-                ex.thrownFromBinding(binding);
-                unwind = mergeUnwind(unwind, ex);
-            } catch (Throwable t) {
-                if (!isSeenException()) {
-                    CompilerDirectives.transferToInterpreterAndInvalidate();
-                    setSeenException();
-                }
-                if (binding.isLanguageBinding()) {
-                    throw t;
-                } else {
-                    CompilerDirectives.transferToInterpreter();
-                    exceptionEventForClientInstrument(binding, "onReturnValue", t);
-                }
+            if (prevError != null) {
+                throw prevError;
             }
+
             if (unwind != null) {
                 throw unwind;
             }
@@ -1037,48 +1131,27 @@ public final class ProbeNode extends Node {
 
         protected abstract void innerOnReturnValue(EventContext context, VirtualFrame frame, Object result);
 
-        final void onReturnExceptional(EventContext context, VirtualFrame frame, Throwable exception) {
+        @ExplodeLoop
+        static void onReturnExceptional(EventChainNode chainNode, EventContext context, VirtualFrame frame, Throwable exception) {
             UnwindException unwind = null;
-            if (exception instanceof UnwindException) {
-                if (!isSeenUnwind()) {
-                    CompilerDirectives.transferToInterpreterAndInvalidate();
-                    setSeenUnwind();
-                }
-                unwind = (UnwindException) exception;
-                assert unwind.getBinding() != null;
-            }
-            if (next != null) {
+            EventChainNode current = chainNode.getLast();
+            RuntimeException prevError = null;
+            while (current != null) {
                 try {
-                    next.onReturnExceptional(context, frame, exception);
+                    current.innerOnReturnExceptional(context, frame, exception);
                 } catch (UnwindException ex) {
-                    if (!isSeenUnwind()) {
-                        CompilerDirectives.transferToInterpreterAndInvalidate();
-                        setSeenUnwind();
-                    }
-                    unwind = mergeUnwind(unwind, ex);
+                    current.profileBranch(SEEN_UNWIND_ON_RETURN_EXCEPTIONAL);
+                    unwind = handleUnwind(current, unwind, ex);
+                } catch (Throwable t) {
+                    current.profileBranch(SEEN_EXCEPTION_ON_RETURN_EXCEPTIONAL);
+                    prevError = current.handleError("onInputValue", prevError, t);
                 }
+                current = current.previous;
             }
-            try {
-                innerOnReturnExceptional(context, frame, exception);
-            } catch (UnwindException ex) {
-                if (!isSeenUnwind()) {
-                    CompilerDirectives.transferToInterpreterAndInvalidate();
-                    setSeenUnwind();
-                }
-                ex.thrownFromBinding(binding);
-                unwind = mergeUnwind(unwind, ex);
-            } catch (Throwable t) {
-                if (!isSeenException()) {
-                    CompilerDirectives.transferToInterpreterAndInvalidate();
-                    setSeenException();
-                }
-                if (binding.isLanguageBinding()) {
-                    exception.addSuppressed(t);
-                } else {
-                    CompilerDirectives.transferToInterpreter();
-                    exceptionEventForClientInstrument(binding, "onReturnExceptional", t);
-                }
+            if (prevError != null) {
+                throw prevError;
             }
+
             if (unwind != null) {
                 throw unwind;
             }
@@ -1092,10 +1165,7 @@ public final class ProbeNode extends Node {
             } else {
                 UnwindException nextUnwind = unwind.getNext();
                 if (nextUnwind != null) {
-                    if (!isSeenHasNext()) {
-                        CompilerDirectives.transferToInterpreterAndInvalidate();
-                        setSeenHasNext();
-                    }
+                    profileBranch(SEEN_UNWIND_HAS_NEXT);
                     return containsBindingBoundary(nextUnwind);
                 } else {
                     return false;
@@ -1114,10 +1184,7 @@ public final class ProbeNode extends Node {
             } else {
                 UnwindException nextUnwind = unwind.getNext();
                 if (nextUnwind != null) {
-                    if (!isSeenHasNext()) {
-                        CompilerDirectives.transferToInterpreterAndInvalidate();
-                        setSeenHasNext();
-                    }
+                    profileBranch(SEEN_UNWIND_HAS_NEXT);
                     return getInfoBoundary(nextUnwind);
                 } else {
                     return false;
@@ -1136,47 +1203,89 @@ public final class ProbeNode extends Node {
             } else {
                 UnwindException nextUnwind = unwind.getNext();
                 if (nextUnwind != null) {
-                    if (!isSeenHasNext()) {
-                        CompilerDirectives.transferToInterpreterAndInvalidate();
-                        setSeenHasNext();
-                    }
+                    profileBranch(SEEN_UNWIND_HAS_NEXT);
                     unwind.resetBoundary(binding);
                 }
             }
         }
 
-        final Object onUnwind(EventContext context, VirtualFrame frame, UnwindException unwind) {
+        @ExplodeLoop
+        static Object onUnwind(EventChainNode eventChain, EventContext context, VirtualFrame frame, UnwindException unwind) {
+            EventChainNode current = eventChain;
+            RuntimeException prevError = null;
             Object ret = null;
-            if (containsBinding(unwind)) {
-                try {
-                    ret = innerOnUnwind(context, frame, getInfo(unwind));
-                } catch (Throwable t) {
-                    if (!isSeenException()) {
-                        CompilerDirectives.transferToInterpreterAndInvalidate();
-                        setSeenException();
+            while (current != null) {
+                Object nextRet = null;
+                if (current.containsBinding(unwind)) {
+                    try {
+                        nextRet = current.innerOnUnwind(context, frame, current.getInfo(unwind));
+                    } catch (Throwable t) {
+                        current.profileBranch(SEEN_EXCEPTION_ON_UNWIND);
+                        prevError = current.handleError("onUnwind", prevError, t);
                     }
-                    if (binding.isLanguageBinding()) {
-                        throw t;
-                    } else {
-                        CompilerDirectives.transferToInterpreter();
-                        exceptionEventForClientInstrument(binding, "onUnwind", t);
+                    if (nextRet != null) {
+                        assert checkInteropType(nextRet, current.binding);
+                        current.reset(unwind);
                     }
+                } else {
+                    nextRet = UNWIND_ACTION_IGNORED;
                 }
-                if (ret != null) {
-                    assert checkInteropType(ret, binding);
-                    reset(unwind);
+                if (current == eventChain) {
+                    // first event chain
+                    ret = nextRet;
+                } else {
+                    ret = mergePostUnwindReturns(ret, nextRet);
                 }
-            } else {
-                ret = UNWIND_ACTION_IGNORED;
+                current = current.next;
             }
-            if (next != null) {
-                Object nextRet = next.onUnwind(context, frame, unwind);
-                ret = mergePostUnwindReturns(ret, nextRet);
+            if (prevError != null) {
+                throw prevError;
             }
+
             return ret;
         }
 
         protected abstract Object innerOnUnwind(EventContext context, VirtualFrame frame, Object info);
+
+        @ExplodeLoop
+        static void onYield(EventChainNode eventChain, EventContext context, VirtualFrame frame, Object value) {
+            EventChainNode current = eventChain;
+            RuntimeException prevError = null;
+            while (current != null) {
+                try {
+                    current.innerOnYield(context, frame, value);
+                } catch (Throwable t) {
+                    current.profileBranch(SEEN_EXCEPTION_ON_ENTER);
+                    prevError = current.handleError("onYield", prevError, t);
+                }
+                current = current.next;
+            }
+            if (prevError != null) {
+                throw prevError;
+            }
+        }
+
+        protected abstract void innerOnYield(EventContext context, VirtualFrame frame, Object value);
+
+        @ExplodeLoop
+        static void onResume(EventChainNode eventChain, EventContext context, VirtualFrame frame) {
+            EventChainNode current = eventChain;
+            RuntimeException prevError = null;
+            while (current != null) {
+                try {
+                    current.innerOnResume(context, frame);
+                } catch (Throwable t) {
+                    current.profileBranch(SEEN_EXCEPTION_ON_ENTER);
+                    prevError = current.handleError("onResume", prevError, t);
+                }
+                current = current.next;
+            }
+            if (prevError != null) {
+                throw prevError;
+            }
+        }
+
+        protected abstract void innerOnResume(EventContext context, VirtualFrame frame);
 
         EventChainNode find(EventBinding<?> b) {
             if (binding == b) {
@@ -1198,7 +1307,6 @@ public final class ProbeNode extends Node {
 
         @Override
         protected void innerOnInputValue(EventContext context, VirtualFrame frame, EventBinding<?> binding, EventContext inputContext, int inputIndex, Object inputValue) {
-            listener.onInputValue(context, frame, inputContext, inputIndex, inputValue);
         }
 
         @Override
@@ -1222,6 +1330,16 @@ public final class ProbeNode extends Node {
         }
 
         @Override
+        protected void innerOnYield(EventContext context, VirtualFrame frame, Object value) {
+            listener.onYield(context, frame, value);
+        }
+
+        @Override
+        protected void innerOnResume(EventContext context, VirtualFrame frame) {
+            listener.onResume(context, frame);
+        }
+
+        @Override
         protected void innerOnDispose(EventContext context, VirtualFrame frame) {
         }
 
@@ -1230,8 +1348,8 @@ public final class ProbeNode extends Node {
     static class EventProviderWithInputChainNode extends EventProviderChainNode {
 
         static final Object[] EMPTY_ARRAY = new Object[0];
-        @CompilationFinal(dimensions = 1) private volatile FrameSlot[] inputSlots;
-        private volatile FrameDescriptor sourceFrameDescriptor;
+        @CompilationFinal(dimensions = 1) private volatile int[] inputSlots;
+        @CompilationFinal private volatile FrameDescriptor sourceFrameDescriptor;
         final int inputBaseIndex;
         final int inputCount;
         @CompilationFinal(dimensions = 1) volatile EventContext[] inputContexts;
@@ -1270,7 +1388,7 @@ public final class ProbeNode extends Node {
                 initializeSlots(frame);
             }
             assert sourceFrameDescriptor == frame.getFrameDescriptor() : "Unstable frame descriptor used by the language.";
-            frame.setObject(inputSlots[inputIndex], value);
+            frame.setAuxiliarySlot(inputSlots[inputIndex], value);
         }
 
         private void initializeSlots(VirtualFrame frame) {
@@ -1282,10 +1400,10 @@ public final class ProbeNode extends Node {
                         InstrumentationHandler.trace("SLOTS: Adding %s save slots for binding %s%n", inputCount, getBinding().getElement());
                     }
                     FrameDescriptor frameDescriptor = frame.getFrameDescriptor();
-                    FrameSlot[] slots = new FrameSlot[inputCount];
+                    int[] slots = new int[inputCount];
                     for (int i = 0; i < inputCount; i++) {
                         int slotIndex = inputBaseIndex + i;
-                        slots[i] = frameDescriptor.findOrAddFrameSlot(new SavedInputValueID(getBinding(), slotIndex));
+                        slots[i] = frameDescriptor.findOrAddAuxiliarySlot(new SavedInputValueID(getBinding(), slotIndex));
                     }
                     this.sourceFrameDescriptor = frameDescriptor;
                     this.inputSlots = slots;
@@ -1308,7 +1426,6 @@ public final class ProbeNode extends Node {
             lock.lock();
             try {
                 if (inputSlots != null) {
-                    FrameSlot[] slots = inputSlots;
                     inputSlots = null;
 
                     RootNode rootNode = context.getInstrumentedNode().getRootNode();
@@ -1318,14 +1435,9 @@ public final class ProbeNode extends Node {
                     FrameDescriptor descriptor = rootNode.getFrameDescriptor();
                     assert descriptor != null;
 
-                    for (FrameSlot slot : slots) {
-                        FrameSlot resolvedSlot = descriptor.findFrameSlot(slot.getIdentifier());
-                        if (resolvedSlot != null) {
-                            descriptor.removeFrameSlot(slot.getIdentifier());
-                        } else {
-                            // slot might be shared and already removed by another event provider
-                            // node.
-                        }
+                    for (int i = 0; i < inputCount; i++) {
+                        int slotIndex = inputBaseIndex + i;
+                        descriptor.disableAuxiliarySlot(new SavedInputValueID(getBinding(), slotIndex));
                     }
                 }
             } finally {
@@ -1348,33 +1460,28 @@ public final class ProbeNode extends Node {
 
         @ExplodeLoop
         private void clearSlots(VirtualFrame frame) {
-            FrameSlot[] slots = inputSlots;
+            int[] slots = inputSlots;
             if (slots != null) {
                 if (frame.getFrameDescriptor() == sourceFrameDescriptor) {
-                    for (int i = 0; i < slots.length; i++) {
-                        frame.setObject(slots[i], null);
+                    for (int slot : slots) {
+                        frame.setAuxiliarySlot(slot, null);
                     }
                 }
             }
         }
 
         protected final Object getSavedInputValue(VirtualFrame frame, int inputIndex) {
-            try {
-                verifyIndex(inputIndex);
-                if (inputSlots == null) {
-                    // never saved any value
-                    return null;
-                }
-                return frame.getObject(inputSlots[inputIndex]);
-            } catch (FrameSlotTypeException e) {
-                CompilerDirectives.transferToInterpreter();
-                throw new AssertionError(e);
+            verifyIndex(inputIndex);
+            if (inputSlots == null) {
+                // never saved any value
+                return null;
             }
+            return frame.getAuxiliarySlot(inputSlots[inputIndex]);
         }
 
         @ExplodeLoop
         protected final Object[] getSavedInputValues(VirtualFrame frame) {
-            FrameSlot[] slots = inputSlots;
+            int[] slots = inputSlots;
             if (slots == null) {
                 return EMPTY_ARRAY;
             }
@@ -1382,12 +1489,7 @@ public final class ProbeNode extends Node {
             if (frame.getFrameDescriptor() == sourceFrameDescriptor) {
                 inputValues = new Object[slots.length];
                 for (int i = 0; i < slots.length; i++) {
-                    try {
-                        inputValues[i] = frame.getObject(slots[i]);
-                    } catch (FrameSlotTypeException e) {
-                        CompilerDirectives.transferToInterpreter();
-                        throw new AssertionError(e);
-                    }
+                    inputValues[i] = frame.getAuxiliarySlot(slots[i]);
                 }
             } else {
                 inputValues = new Object[inputSlots.length];
@@ -1464,6 +1566,16 @@ public final class ProbeNode extends Node {
         }
 
         @Override
+        protected void innerOnYield(EventContext context, VirtualFrame frame, Object value) {
+            eventNode.onYield(frame, value);
+        }
+
+        @Override
+        protected void innerOnResume(EventContext context, VirtualFrame frame) {
+            eventNode.onResume(frame);
+        }
+
+        @Override
         protected void innerOnDispose(EventContext context, VirtualFrame frame) {
             eventNode.onDispose(frame);
         }
@@ -1521,5 +1633,14 @@ public final class ProbeNode extends Node {
         @Override
         protected void innerOnReturnExceptional(EventContext context, VirtualFrame frame, Throwable exception) {
         }
+
+        @Override
+        protected void innerOnYield(EventContext context, VirtualFrame frame, Object value) {
+        }
+
+        @Override
+        protected void innerOnResume(EventContext context, VirtualFrame frame) {
+        }
+
     }
 }

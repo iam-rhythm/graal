@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -29,13 +29,15 @@ import java.io.PrintWriter;
 import java.nio.ByteBuffer;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReadWriteLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 import org.graalvm.polyglot.io.MessageEndpoint;
 
-import com.oracle.truffle.tools.utils.json.JSONArray;
-import com.oracle.truffle.tools.utils.json.JSONException;
-import com.oracle.truffle.tools.utils.json.JSONObject;
-
+import com.oracle.truffle.api.interop.ArityException;
+import com.oracle.truffle.api.interop.UnsupportedMessageException;
+import com.oracle.truffle.api.interop.UnsupportedTypeException;
 import com.oracle.truffle.tools.chromeinspector.InspectorDebugger;
 import com.oracle.truffle.tools.chromeinspector.InspectorExecutionContext;
 import com.oracle.truffle.tools.chromeinspector.InspectorProfiler;
@@ -45,64 +47,137 @@ import com.oracle.truffle.tools.chromeinspector.commands.ErrorResponse;
 import com.oracle.truffle.tools.chromeinspector.commands.Params;
 import com.oracle.truffle.tools.chromeinspector.commands.Result;
 import com.oracle.truffle.tools.chromeinspector.domains.DebuggerDomain;
+import com.oracle.truffle.tools.chromeinspector.domains.Domain;
 import com.oracle.truffle.tools.chromeinspector.domains.ProfilerDomain;
 import com.oracle.truffle.tools.chromeinspector.domains.RuntimeDomain;
 import com.oracle.truffle.tools.chromeinspector.events.Event;
 import com.oracle.truffle.tools.chromeinspector.events.EventHandler;
 import com.oracle.truffle.tools.chromeinspector.types.CallArgument;
 import com.oracle.truffle.tools.chromeinspector.types.Location;
+import com.oracle.truffle.tools.utils.java_websocket.exceptions.WebsocketNotConnectedException;
+import org.graalvm.shadowed.org.json.JSONArray;
+import org.graalvm.shadowed.org.json.JSONException;
+import org.graalvm.shadowed.org.json.JSONObject;
 
 public final class InspectServerSession implements MessageEndpoint {
 
     private final RuntimeDomain runtime;
     private final DebuggerDomain debugger;
     private final ProfilerDomain profiler;
+    private final ReadWriteLock domainLock;
     final InspectorExecutionContext context;
     private volatile MessageEndpoint messageEndpoint;
     private volatile JSONMessageListener jsonMessageListener;
-    private CommandProcessThread processThread;
+    private volatile CommandProcessThread processThread;
+    private volatile Runnable onClose;
 
     private InspectServerSession(RuntimeDomain runtime, DebuggerDomain debugger, ProfilerDomain profiler,
-                    InspectorExecutionContext context) {
+                    InspectorExecutionContext context, ReadWriteLock domainLock) {
         this.runtime = runtime;
         this.debugger = debugger;
         this.profiler = profiler;
         this.context = context;
+        this.domainLock = domainLock;
     }
 
-    public static InspectServerSession create(InspectorExecutionContext context, boolean debugBreak, ConnectionWatcher connectionWatcher) {
+    public static InspectServerSession create(InspectorExecutionContext context, boolean debugBreak, ConnectionWatcher connectionWatcher, Runnable sessionDisposal) {
+        ReadWriteLock domainLock = new ReentrantReadWriteLock();
         RuntimeDomain runtime = new InspectorRuntime(context);
-        DebuggerDomain debugger = new InspectorDebugger(context, debugBreak);
+        DebuggerDomain debugger = new InspectorDebugger(context, debugBreak, domainLock, sessionDisposal);
         ProfilerDomain profiler = new InspectorProfiler(context, connectionWatcher);
-        return new InspectServerSession(runtime, debugger, profiler, context);
+        return new InspectServerSession(runtime, debugger, profiler, context, domainLock);
+    }
+
+    public void onClose(Runnable onCloseTask) {
+        this.onClose = onCloseTask;
+    }
+
+    private static IOException createClosedException() {
+        return new IOException("The endpoint is closed.");
     }
 
     @Override
-    public void sendClose() {
-        runtime.disable();
-        debugger.disable();
-        profiler.disable();
+    public void sendClose() throws IOException {
+        if (isClosed()) {
+            throw createClosedException();
+        }
+        Runnable onCloseRunnable = onClose;
+        dispose();
+        if (onCloseRunnable != null) {
+            onCloseRunnable.run();
+        }
+    }
+
+    boolean isClosed() {
+        CommandProcessThread cmdProcessThread = processThread;
+        return cmdProcessThread == null || cmdProcessThread.isClosed();
+    }
+
+    // For tests only
+    public DebuggerDomain getDebugger() {
+        return debugger;
+    }
+
+    public void notifyClosing() {
+        runtime.notifyClosing();
+        debugger.notifyClosing();
+        profiler.notifyClosing();
+    }
+
+    public void dispose() {
+        Lock lock = domainLock.writeLock();
+        lock.lock();
+        try {
+            runtime.disable();
+            debugger.disable();
+            profiler.disable();
+        } finally {
+            lock.unlock();
+        }
         context.reset();
-        messageEndpoint = null;
-        processThread.dispose();
-        processThread = null;
-    }
-
-    public void setMessageListener(MessageEndpoint messageListener) {
-        this.messageEndpoint = messageListener;
-        if (messageListener != null && processThread == null) {
-            EventHandler eh = new EventHandlerImpl();
-            runtime.setEventHandler(eh);
-            debugger.setEventHandler(eh);
-            profiler.setEventHandler(eh);
-            processThread = new CommandProcessThread();
-            processThread.start();
+        CommandProcessThread cmdProcessThread;
+        synchronized (this) {
+            this.messageEndpoint = null;
+            this.onClose = null;
+            cmdProcessThread = processThread;
+            if (cmdProcessThread != null) {
+                cmdProcessThread.dispose();
+            }
+        }
+        if (cmdProcessThread != null) {
+            try {
+                cmdProcessThread.join();
+            } catch (InterruptedException e) {
+            }
         }
     }
 
-    public void setJSONMessageListener(JSONMessageListener messageListener) {
+    synchronized void clearMessageEndpoint() {
+        this.messageEndpoint = null;
+    }
+
+    /**
+     * Open the communication with a {@link MessageEndpoint}.
+     */
+    public synchronized void open(MessageEndpoint messageListener) {
+        assert messageListener != null : "Message listener must not be null";
+        this.messageEndpoint = messageListener;
+        startUp();
+    }
+
+    /**
+     * Open the communication with a {@link JSONMessageListener}.
+     */
+    public synchronized void open(JSONMessageListener messageListener) {
+        assert messageListener != null : "Message listener must not be null";
+        assert this.jsonMessageListener == null : "A message listener was set already.";
         this.jsonMessageListener = messageListener;
-        if (messageListener != null && processThread == null) {
+        startUp();
+    }
+
+    private void startUp() {
+        assert Thread.holdsLock(this);
+        if (processThread == null) {
             EventHandler eh = new EventHandlerImpl();
             runtime.setEventHandler(eh);
             debugger.setEventHandler(eh);
@@ -113,7 +188,10 @@ public final class InspectServerSession implements MessageEndpoint {
     }
 
     @Override
-    public void sendText(String message) {
+    public void sendText(String message) throws IOException {
+        if (isClosed()) {
+            throw createClosedException();
+        }
         Command cmd;
         try {
             cmd = new Command(message);
@@ -124,22 +202,103 @@ public final class InspectServerSession implements MessageEndpoint {
             }
             return;
         }
-        processThread.push(cmd);
+        CommandProcessThread pt = processThread;
+        if (pt != null) {
+            pt.push(cmd);
+        }
     }
 
     public void sendCommand(Command cmd) {
         if (context.isSynchronous()) {
             sendCommandSync(cmd);
         } else {
-            processThread.push(cmd);
+            CommandProcessThread pt = processThread;
+            if (pt != null) {
+                pt.push(cmd);
+            }
+        }
+    }
+
+    private static boolean isDomainEnabledChange(String domainMethod) {
+        switch (domainMethod) {
+            case "enable":
+            case "disable":
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private Domain getDomain(String name) throws CommandProcessException {
+        switch (name) {
+            case "Debugger":
+                return debugger;
+            case "Runtime":
+                return runtime;
+            case "Profiler":
+                return profiler;
+            case "Schema":
+                return null;
+            default:
+                throw new CommandProcessException("Unknown domain '" + name + "'.");
         }
     }
 
     private void sendCommandSync(Command cmd) {
         CommandPostProcessor postProcessor = new CommandPostProcessor();
+        JSONObject result = processCommand(cmd, postProcessor);
+        if (result != null) {
+            JSONMessageListener jsonListener = jsonMessageListener;
+            if (jsonListener != null) {
+                try {
+                    jsonListener.onMessage(result);
+                } catch (UnsupportedTypeException | ArityException | UnsupportedMessageException e) {
+                    context.logException(e);
+                }
+            }
+        }
+        postProcessor.run();
+    }
+
+    public void consoleAPICall(String type, Object text) {
+        runtime.notifyConsoleAPICalled(type, text);
+    }
+
+    @Override
+    public void sendBinary(ByteBuffer data) {
+        throw new UnsupportedOperationException("Binary messages are not supported.");
+    }
+
+    @Override
+    public void sendPing(ByteBuffer data) throws IOException {
+        if (isClosed()) {
+            throw createClosedException();
+        }
+    }
+
+    @Override
+    public void sendPong(ByteBuffer data) throws IOException {
+        if (isClosed()) {
+            throw createClosedException();
+        }
+    }
+
+    private JSONObject processCommand(Command cmd, CommandPostProcessor postProcessor) {
         JSONObject result;
+        String method = cmd.getMethod();
+        int dot = method.indexOf('.');
+        boolean isEnabledChange = isDomainEnabledChange(method.substring(dot + 1));
+        // Assure that domain enable/disable methods are called exclusively.
+        Lock lock = isEnabledChange ? domainLock.writeLock() : domainLock.readLock();
+        lock.lock();
         try {
-            Params resultParams = processCommand(cmd, postProcessor);
+            Domain domain = (dot > 0) ? getDomain(method.substring(0, dot)) : null;
+            if (domain != null && !isEnabledChange) {
+                if (!domain.isEnabled()) {
+                    throw new CommandProcessException("Domain " + method.substring(0, dot) + " is disabled.");
+                }
+            }
+            Params resultParams = doProcessCommand(cmd, postProcessor);
             if (resultParams == null) {
                 result = Result.emptyResult(cmd.getId());
             } else {
@@ -159,38 +318,20 @@ public final class InspectServerSession implements MessageEndpoint {
                 t.printStackTrace(err);
             }
             result = new ErrorResponse(cmd.getId(), -32601, "Processing of '" + cmd.getMethod() + "' has caused " + t.getLocalizedMessage()).toJSON();
+        } finally {
+            lock.unlock();
         }
-        if (result != null) {
-            JSONMessageListener jsonListener = jsonMessageListener;
-            if (jsonListener != null) {
-                jsonListener.onMessage(result);
-            }
-        }
-        postProcessor.run();
+        return result;
     }
 
-    public void consoleAPICall(String type, Object text) {
-        runtime.notifyConsoleAPICalled(type, text);
-    }
-
-    @Override
-    public void sendBinary(ByteBuffer data) {
-        throw new UnsupportedOperationException("Binary messages are not supported.");
-    }
-
-    @Override
-    public void sendPing(ByteBuffer data) {
-    }
-
-    @Override
-    public void sendPong(ByteBuffer data) {
-    }
-
-    private Params processCommand(Command cmd, CommandPostProcessor postProcessor) throws CommandProcessException {
+    private Params doProcessCommand(Command cmd, CommandPostProcessor postProcessor) throws CommandProcessException {
         Params resultParams = null;
         switch (cmd.getMethod()) {
             case "Runtime.enable":
                 runtime.enable();
+                break;
+            case "Runtime.disable":
+                runtime.disable();
                 break;
             case "Runtime.compileScript":
                 JSONObject json = cmd.getParams().getJSONObject();
@@ -209,6 +350,7 @@ public final class InspectServerSession implements MessageEndpoint {
                                 json.optBoolean("silent"),
                                 json.optInt("contextId", -1),
                                 json.optBoolean("returnByValue"),
+                                json.optBoolean("generatePreview"),
                                 json.optBoolean("awaitPromise"));
                 break;
             case "Runtime.runIfWaitingForDebugger":
@@ -218,9 +360,9 @@ public final class InspectServerSession implements MessageEndpoint {
                 json = cmd.getParams().getJSONObject();
                 resultParams = runtime.getProperties(
                                 json.optString("objectId"),
-                                json.optBoolean("ownProperties")
-                // Ignored additional experimental parameters
-                );
+                                json.optBoolean("ownProperties"),
+                                json.optBoolean("accessorPropertiesOnly"),
+                                json.optBoolean("generatePreview"));
                 break;
             case "Runtime.callFunctionOn":
                 json = cmd.getParams().getJSONObject();
@@ -230,9 +372,27 @@ public final class InspectServerSession implements MessageEndpoint {
                                 json.optJSONArray("arguments"),
                                 json.optBoolean("silent"),
                                 json.optBoolean("returnByValue"),
-                                json.optBoolean("awaitPromise"));
+                                json.optBoolean("generatePreview"),
+                                json.optBoolean("awaitPromise"),
+                                json.optInt("executionContextId", -1),
+                                json.optString("objectGroup"));
+                break;
+            case "Runtime.setCustomObjectFormatterEnabled":
+                json = cmd.getParams().getJSONObject();
+                runtime.setCustomObjectFormatterEnabled(json.optBoolean("enabled"));
+                break;
+            case "Runtime.releaseObject":
+                json = cmd.getParams().getJSONObject();
+                runtime.releaseObject(json.optString("objectId"));
+                break;
+            case "Runtime.releaseObjectGroup":
+                json = cmd.getParams().getJSONObject();
+                runtime.releaseObjectGroup(json.optString("objectGroup"));
                 break;
             case "Debugger.enable":
+                JSONObject dbgJson = new JSONObject();
+                dbgJson.put("debuggerId", debugger.getUniqueDebuggerId());
+                resultParams = new Params(dbgJson);
                 debugger.enable();
                 break;
             case "Debugger.disable":
@@ -275,6 +435,14 @@ public final class InspectServerSession implements MessageEndpoint {
             case "Debugger.stepOut":
                 debugger.stepOut(postProcessor);
                 break;
+            case "Debugger.searchInContent":
+                json = cmd.getParams().getJSONObject();
+                resultParams = debugger.searchInContent(
+                                json.optString("scriptId"),
+                                json.optString("query"),
+                                json.optBoolean("caseSensitive", false),
+                                json.optBoolean("isRegex", false));
+                break;
             case "Debugger.setAsyncCallStackDepth":
                 debugger.setAsyncCallStackDepth(cmd.getParams().getMaxDepth());
                 break;
@@ -303,6 +471,12 @@ public final class InspectServerSession implements MessageEndpoint {
                 json = cmd.getParams().getJSONObject();
                 resultParams = debugger.setBreakpoint(
                                 Location.create(json.getJSONObject("location")),
+                                json.optString("condition"));
+                break;
+            case "Debugger.setBreakpointOnFunctionCall":
+                json = cmd.getParams().getJSONObject();
+                resultParams = debugger.setBreakpointOnFunctionCall(
+                                json.optString("objectId"),
                                 json.optString("condition"));
                 break;
             case "Debugger.removeBreakpoint":
@@ -397,7 +571,7 @@ public final class InspectServerSession implements MessageEndpoint {
         return dom;
     }
 
-    private class EventHandlerImpl implements EventHandler {
+    private final class EventHandlerImpl implements EventHandler {
 
         @Override
         public void event(Event event) {
@@ -407,11 +581,17 @@ public final class InspectServerSession implements MessageEndpoint {
                     listener.sendText(event.toJSONString());
                 } catch (IOException ex) {
                     context.logException(ex);
+                } catch (WebsocketNotConnectedException ex) {
+                    // disconnected
                 }
             }
             JSONMessageListener jsonListener = jsonMessageListener;
             if (jsonListener != null) {
-                jsonListener.onMessage(event.toJSON());
+                try {
+                    jsonListener.onMessage(event.toJSON());
+                } catch (UnsupportedTypeException | ArityException | UnsupportedMessageException e) {
+                    context.logException(e);
+                }
             }
         }
 
@@ -438,14 +618,15 @@ public final class InspectServerSession implements MessageEndpoint {
         }
     }
 
-    private class CommandProcessThread extends Thread {
+    private class CommandProcessThread implements Runnable {
 
+        private final Thread thread;
         private volatile boolean disposed = false;
         private final BlockingQueue<Command> commands = new LinkedBlockingQueue<>();
 
         CommandProcessThread() {
-            super("chromeinspector.server.CommandProcessThread");
-            setDaemon(true);
+            thread = context.getEnv().createSystemThread(this);
+            thread.setName("chromeinspector.server.CommandProcessThread");
         }
 
         void push(Command cmd) {
@@ -459,9 +640,17 @@ public final class InspectServerSession implements MessageEndpoint {
             }
         }
 
+        void start() {
+            thread.start();
+        }
+
         void dispose() {
             disposed = true;
-            interrupt();
+            thread.interrupt();
+        }
+
+        boolean isClosed() {
+            return disposed && !thread.isAlive();
         }
 
         @Override
@@ -474,29 +663,7 @@ public final class InspectServerSession implements MessageEndpoint {
                     break;
                 }
                 CommandPostProcessor postProcessor = new CommandPostProcessor();
-                JSONObject result;
-                try {
-                    Params resultParams = processCommand(cmd, postProcessor);
-                    if (resultParams == null) {
-                        result = Result.emptyResult(cmd.getId());
-                    } else {
-                        if (resultParams.getJSONObject() != null) {
-                            result = new Result(resultParams).toJSON(cmd.getId());
-                        } else {
-                            result = null;
-                        }
-                    }
-                } catch (CommandProcessException cpex) {
-                    result = new ErrorResponse(cmd.getId(), -32601, cpex.getLocalizedMessage()).toJSON();
-                } catch (ThreadDeath td) {
-                    throw td;
-                } catch (Throwable t) {
-                    PrintWriter err = context.getErr();
-                    if (err != null) {
-                        t.printStackTrace(err);
-                    }
-                    result = new ErrorResponse(cmd.getId(), -32601, "Processing of '" + cmd.getMethod() + "' has caused " + t.getLocalizedMessage()).toJSON();
-                }
+                JSONObject result = processCommand(cmd, postProcessor);
                 if (result != null) {
                     MessageEndpoint listener = messageEndpoint;
                     if (listener != null) {
@@ -504,15 +671,26 @@ public final class InspectServerSession implements MessageEndpoint {
                             listener.sendText(result.toString());
                         } catch (IOException ex) {
                             context.logException(ex);
+                        } catch (WebsocketNotConnectedException ex) {
+                            // disconnected
                         }
                     }
                     JSONMessageListener jsonListener = jsonMessageListener;
                     if (jsonListener != null) {
-                        jsonListener.onMessage(result);
+                        try {
+                            jsonListener.onMessage(result);
+                        } catch (UnsupportedTypeException | ArityException | UnsupportedMessageException e) {
+                            context.logException(e);
+                        }
                     }
                 }
                 postProcessor.run();
             }
+        }
+
+        private void join() throws InterruptedException {
+            thread.join();
+            commands.clear();
         }
 
     }

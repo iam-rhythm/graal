@@ -1,46 +1,66 @@
 /*
- * Copyright (c) 2016, 2016, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2025, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
- * This code is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 only, as
- * published by the Free Software Foundation.  Oracle designates this
- * particular file as subject to the "Classpath" exception as provided
- * by Oracle in the LICENSE file that accompanied this code.
+ * The Universal Permissive License (UPL), Version 1.0
  *
- * This code is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
- * version 2 for more details (a copy is included in the LICENSE file that
- * accompanied this code).
+ * Subject to the condition set forth below, permission is hereby granted to any
+ * person obtaining a copy of this software, associated documentation and/or
+ * data (collectively the "Software"), free of charge and under any and all
+ * copyright rights in the Software, and any and all patent rights owned or
+ * freely licensable by each licensor hereunder covering either (i) the
+ * unmodified Software as contributed to or provided by such licensor, or (ii)
+ * the Larger Works (as defined below), to deal in both
  *
- * You should have received a copy of the GNU General Public License version
- * 2 along with this work; if not, write to the Free Software Foundation,
- * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+ * (a) the Software, and
  *
- * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
- * or visit www.oracle.com if you need additional information or have any
- * questions.
+ * (b) any piece of software and/or hardware listed in the lrgrwrks.txt file if
+ * one is included with the Software each a "Larger Work" to which the Software
+ * is contributed by such licensors),
+ *
+ * without restriction, including without limitation the rights to copy, create
+ * derivative works of, display, perform, and distribute the Software and make,
+ * use, sell, offer for sale, import, export, have made, and have sold the
+ * Software and the Larger Work(s), and to sublicense the foregoing rights on
+ * either these or other terms.
+ *
+ * This license is subject to the following condition:
+ *
+ * The above copyright notice and either this complete permission notice or at a
+ * minimum a reference to the UPL must be included in all copies or substantial
+ * portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 package com.oracle.truffle.regex.tregex.nfa;
 
-import com.oracle.truffle.regex.tregex.automaton.IndexedState;
-import com.oracle.truffle.regex.tregex.matchers.MatcherBuilder;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Objects;
+import java.util.Set;
+import java.util.stream.Collectors;
+
+import org.graalvm.collections.EconomicMap;
+
+import com.oracle.truffle.api.CompilerDirectives.CompilationFinal;
+import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
+import com.oracle.truffle.regex.tregex.TRegexOptions;
+import com.oracle.truffle.regex.tregex.automaton.BasicState;
+import com.oracle.truffle.regex.tregex.automaton.StateSet;
 import com.oracle.truffle.regex.tregex.parser.ast.LookBehindAssertion;
+import com.oracle.truffle.regex.tregex.parser.ast.RegexAST;
 import com.oracle.truffle.regex.tregex.parser.ast.RegexASTNode;
 import com.oracle.truffle.regex.tregex.util.json.Json;
 import com.oracle.truffle.regex.tregex.util.json.JsonArray;
 import com.oracle.truffle.regex.tregex.util.json.JsonConvertible;
 import com.oracle.truffle.regex.tregex.util.json.JsonObject;
-
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
-import java.util.Objects;
-import java.util.Set;
-import java.util.stream.Collectors;
-
-import static com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
+import com.oracle.truffle.regex.util.TBitSet;
 
 /**
  * Represents a single state in the NFA form of a regular expression. States may either be matcher
@@ -51,258 +71,304 @@ import static com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
  * matches both the 'a' in the lookahead assertion as well as following 'a' in the expression, and
  * therefore will have a state set containing two AST nodes.
  */
-public class NFAState implements IndexedState, JsonConvertible {
+public final class NFAState extends BasicState<NFAState, NFAStateTransition> implements JsonConvertible {
 
     private static final byte FLAGS_NONE = 0;
-    private static final byte FLAG_HAS_PREFIX_STATES = 1;
-    private static final byte FLAG_FORWARD_ANCHORED_FINAL_STATE = 1 << 1;
-    private static final byte FLAG_FORWARD_UN_ANCHORED_FINAL_STATE = 1 << 2;
-    private static final byte FLAG_REVERSE_ANCHORED_FINAL_STATE = 1 << 3;
-    private static final byte FLAG_REVERSE_UN_ANCHORED_FINAL_STATE = 1 << 4;
-    private static final byte MASK_FORWARD_FINAL_STATES = FLAG_FORWARD_ANCHORED_FINAL_STATE | FLAG_FORWARD_UN_ANCHORED_FINAL_STATE;
-    private static final byte MASK_REVERSE_FINAL_STATES = FLAG_REVERSE_ANCHORED_FINAL_STATE | FLAG_REVERSE_UN_ANCHORED_FINAL_STATE;
+    private static final byte FLAG_HAS_PREFIX_STATES = 1 << N_FLAGS;
+    private static final byte FLAG_MUST_ADVANCE = (byte) (1 << N_FLAGS + 1);
 
-    private final short id;
-    private final ASTNodeSet<? extends RegexASTNode> stateSet;
-    private byte flags;
-    private short transitionToAnchoredFinalState = -1;
-    private short transitionToUnAnchoredFinalState = -1;
-    private short revTransitionToAnchoredFinalState = -1;
-    private short revTransitionToUnAnchoredFinalState = -1;
-    private List<NFAStateTransition> next;
-    private List<NFAStateTransition> prev;
-    private List<Integer> possibleResults;
-    private final MatcherBuilder matcherBuilder;
+    private static final NFAStateTransition[] EMPTY_TRANSITIONS = new NFAStateTransition[0];
+
+    private final StateSet<RegexAST, ? extends RegexASTNode> stateSet;
+    @CompilationFinal private short transitionToAnchoredFinalState = -1;
+    @CompilationFinal private short transitionToUnAnchoredFinalState = -1;
+    @CompilationFinal private short revTransitionToAnchoredFinalState = -1;
+    @CompilationFinal private short revTransitionToUnAnchoredFinalState = -1;
+    @CompilationFinal private int numberOfGuardedUnAnchoredFinalTransitions = 0;
+    @CompilationFinal private int numberOfGuardedAnchoredFinalTransitions = 0;
+    private TBitSet possibleResults;
     private final Set<LookBehindAssertion> finishedLookBehinds;
+    private final EconomicMap<Integer, TBitSet> matchedConditionGroupsMap;
 
     public NFAState(short id,
-                    ASTNodeSet<? extends RegexASTNode> stateSet,
-                    MatcherBuilder matcherBuilder,
+                    StateSet<RegexAST, ? extends RegexASTNode> stateSet,
                     Set<LookBehindAssertion> finishedLookBehinds,
-                    boolean hasPrefixStates) {
-        this(id, stateSet, hasPrefixStates ? FLAG_HAS_PREFIX_STATES : FLAGS_NONE,
-                        new ArrayList<>(), new ArrayList<>(), null, matcherBuilder, finishedLookBehinds);
+                    boolean hasPrefixStates,
+                    boolean mustAdvance) {
+        this(id, stateSet, initFlags(hasPrefixStates, mustAdvance), null, finishedLookBehinds, initMatchedConditionGroupsMap(stateSet));
+    }
+
+    public NFAState(short id,
+                    StateSet<RegexAST, ? extends RegexASTNode> stateSet,
+                    Set<LookBehindAssertion> finishedLookBehinds,
+                    boolean hasPrefixStates,
+                    boolean mustAdvance,
+                    EconomicMap<Integer, TBitSet> matchedConditionGroupsMap) {
+        this(id, stateSet, initFlags(hasPrefixStates, mustAdvance), null, finishedLookBehinds, matchedConditionGroupsMap);
+    }
+
+    private static EconomicMap<Integer, TBitSet> initMatchedConditionGroupsMap(StateSet<RegexAST, ? extends RegexASTNode> stateSet) {
+        if (!stateSet.getStateIndex().getProperties().hasConditionalBackReferences()) {
+            return null;
+        }
+        EconomicMap<Integer, TBitSet> matchedConditionGroupsMap = EconomicMap.create();
+        for (RegexASTNode node : stateSet) {
+            matchedConditionGroupsMap.put(node.getId(), TBitSet.getEmptyInstance());
+        }
+        return matchedConditionGroupsMap;
+    }
+
+    private static byte initFlags(boolean hasPrefixStates, boolean mustAdvance) {
+        return (byte) ((hasPrefixStates ? FLAG_HAS_PREFIX_STATES : FLAGS_NONE) | (mustAdvance ? FLAG_MUST_ADVANCE : FLAGS_NONE));
     }
 
     private NFAState(short id,
-                    ASTNodeSet<? extends RegexASTNode> stateSet,
-                    byte flags,
-                    MatcherBuilder matcherBuilder,
-                    Set<LookBehindAssertion> finishedLookBehinds) {
-        this(id, stateSet, flags, new ArrayList<>(), new ArrayList<>(), null, matcherBuilder, finishedLookBehinds);
+                    StateSet<RegexAST, ? extends RegexASTNode> stateSet,
+                    short flags,
+                    Set<LookBehindAssertion> finishedLookBehinds,
+                    EconomicMap<Integer, TBitSet> matchedConditionGroupsMap) {
+        this(id, stateSet, flags, null, finishedLookBehinds, matchedConditionGroupsMap);
     }
 
     private NFAState(short id,
-                    ASTNodeSet<? extends RegexASTNode> stateSet,
-                    byte flags,
-                    List<NFAStateTransition> next,
-                    List<NFAStateTransition> prev,
-                    List<Integer> possibleResults,
-                    MatcherBuilder matcherBuilder,
-                    Set<LookBehindAssertion> finishedLookBehinds) {
-        this.id = id;
+                    StateSet<RegexAST, ? extends RegexASTNode> stateSet,
+                    short flags,
+                    TBitSet possibleResults,
+                    Set<LookBehindAssertion> finishedLookBehinds,
+                    EconomicMap<Integer, TBitSet> matchedConditionGroupsMap) {
+        super(id, EMPTY_TRANSITIONS);
+        setFlag(flags);
         this.stateSet = stateSet;
-        this.flags = flags;
-        this.next = next;
-        this.prev = prev;
         this.possibleResults = possibleResults;
-        this.matcherBuilder = matcherBuilder;
         this.finishedLookBehinds = finishedLookBehinds;
+        this.matchedConditionGroupsMap = matchedConditionGroupsMap;
     }
 
     public NFAState createTraceFinderCopy(short copyID) {
-        return new NFAState(copyID, getStateSet(), getFlags(), matcherBuilder, finishedLookBehinds);
-    }
-
-    public MatcherBuilder getMatcherBuilder() {
-        return matcherBuilder;
+        return new NFAState(copyID, getStateSet(), getFlags(), finishedLookBehinds, matchedConditionGroupsMap);
     }
 
     public Set<LookBehindAssertion> getFinishedLookBehinds() {
         return finishedLookBehinds;
     }
 
-    public ASTNodeSet<? extends RegexASTNode> getStateSet() {
+    public StateSet<RegexAST, ? extends RegexASTNode> getStateSet() {
         return stateSet;
     }
 
-    private boolean isFlagSet(byte flag) {
-        return (flags & flag) != 0;
-    }
-
-    private void setFlag(byte flag, boolean value) {
-        if (value) {
-            flags |= flag;
-        } else {
-            flags &= ~flag;
-        }
-    }
-
-    byte getFlags() {
-        return flags;
-    }
-
     public boolean hasPrefixStates() {
-        return isFlagSet(FLAG_HAS_PREFIX_STATES);
+        return getFlag(FLAG_HAS_PREFIX_STATES);
     }
 
     public void setHasPrefixStates(boolean value) {
         setFlag(FLAG_HAS_PREFIX_STATES, value);
     }
 
-    public boolean isFinalState(boolean forward) {
-        return forward ? isForwardFinalState() : isReverseFinalState();
+    public boolean isMustAdvance() {
+        return getFlag(FLAG_MUST_ADVANCE);
     }
 
-    public boolean isAnchoredFinalState(boolean forward) {
-        return isFlagSet(forward ? FLAG_FORWARD_ANCHORED_FINAL_STATE : FLAG_REVERSE_ANCHORED_FINAL_STATE);
+    public void setMustAdvance(boolean value) {
+        setFlag(FLAG_MUST_ADVANCE, value);
     }
 
-    public boolean isUnAnchoredFinalState(boolean forward) {
-        return isFlagSet(forward ? FLAG_FORWARD_UN_ANCHORED_FINAL_STATE : FLAG_REVERSE_UN_ANCHORED_FINAL_STATE);
+    public EconomicMap<Integer, TBitSet> getMatchedConditionGroupsMap() {
+        return matchedConditionGroupsMap;
     }
 
-    public boolean isForwardFinalState() {
-        return isFlagSet(MASK_FORWARD_FINAL_STATES);
+    public TBitSet getMatchedConditionGroups(RegexASTNode t) {
+        if (!stateSet.getStateIndex().getProperties().hasConditionalBackReferences()) {
+            return TBitSet.getEmptyInstance();
+        }
+        assert matchedConditionGroupsMap.containsKey(t.getId());
+        return matchedConditionGroupsMap.get(t.getId());
     }
 
-    public boolean isForwardAnchoredFinalState() {
-        return isFlagSet(FLAG_FORWARD_ANCHORED_FINAL_STATE);
+    public TBitSet getMatchedConditionGroupsDebug() {
+        if (!stateSet.getStateIndex().getProperties().hasConditionalBackReferences()) {
+            return TBitSet.getEmptyInstance();
+        }
+        TBitSet matchedConditionGroups = new TBitSet(Long.SIZE);
+        for (RegexASTNode t : stateSet) {
+            matchedConditionGroups.union(matchedConditionGroupsMap.get(t.getId()));
+        }
+        return matchedConditionGroups;
     }
 
-    public void setForwardAnchoredFinalState(boolean value) {
-        setFlag(FLAG_FORWARD_ANCHORED_FINAL_STATE, value);
+    public boolean hasUnGuardedTransitionToAnchoredFinalState(boolean forward) {
+        return getTransitionToAnchoredFinalStateId(forward) >= 0;
     }
 
-    public boolean isForwardUnAnchoredFinalState() {
-        return isFlagSet(FLAG_FORWARD_UN_ANCHORED_FINAL_STATE);
+    public boolean hasGuardedTransitionToAnchoredFinalState() {
+        return getTransitionToAnchoredFinalStateId(true) == -1 && numberOfGuardedAnchoredFinalTransitions > 0;
     }
 
-    public void setForwardUnAnchoredFinalState(boolean value) {
-        setFlag(FLAG_FORWARD_UN_ANCHORED_FINAL_STATE, value);
+    public long[][] getAnchoredFinalTransitionConstraints() {
+        long[][] result = new long[numberOfGuardedAnchoredFinalTransitions][];
+        int i = 0;
+        NFAStateTransition[] successors = getSuccessors();
+        for (NFAStateTransition transition : successors) {
+            if (transition.getTarget().isAnchoredFinalState() && transition.hasConstraints()) {
+                result[i] = transition.getConstraints();
+                i++;
+            }
+        }
+        return result;
     }
 
-    public boolean isReverseFinalState() {
-        return isFlagSet(MASK_REVERSE_FINAL_STATES);
+    public long[][] getUnAnchoredFinalTransitionConstraints() {
+        long[][] result = new long[numberOfGuardedUnAnchoredFinalTransitions][];
+        int i = 0;
+        NFAStateTransition[] successors = getSuccessors();
+        for (NFAStateTransition transition : successors) {
+            if (transition.getTarget().isUnAnchoredFinalState() && transition.hasConstraints()) {
+                result[i] = transition.getConstraints();
+                i++;
+            }
+        }
+        return result;
     }
 
-    public boolean isReverseAnchoredFinalState() {
-        return isFlagSet(FLAG_REVERSE_ANCHORED_FINAL_STATE);
-    }
-
-    public void setReverseAnchoredFinalState(boolean value) {
-        setFlag(FLAG_REVERSE_ANCHORED_FINAL_STATE, value);
-    }
-
-    public boolean isReverseUnAnchoredFinalState() {
-        return isFlagSet(FLAG_REVERSE_UN_ANCHORED_FINAL_STATE);
-    }
-
-    public void setReverseUnAnchoredFinalState(boolean value) {
-        setFlag(FLAG_REVERSE_UN_ANCHORED_FINAL_STATE, value);
-    }
-
-    public boolean hasTransitionToAnchoredFinalState(boolean forward) {
-        return (forward ? transitionToAnchoredFinalState : revTransitionToAnchoredFinalState) >= 0;
+    public short getTransitionToAnchoredFinalStateId(boolean forward) {
+        return forward ? transitionToAnchoredFinalState : revTransitionToAnchoredFinalState;
     }
 
     public NFAStateTransition getTransitionToAnchoredFinalState(boolean forward) {
-        assert hasTransitionToAnchoredFinalState(forward);
-        return forward ? next.get(transitionToAnchoredFinalState) : prev.get(revTransitionToAnchoredFinalState);
+        assert hasUnGuardedTransitionToAnchoredFinalState(forward);
+        return getSuccessors(forward)[getTransitionToAnchoredFinalStateId(forward)];
     }
 
-    public boolean hasTransitionToUnAnchoredFinalState(boolean forward) {
-        return (forward ? transitionToUnAnchoredFinalState : revTransitionToUnAnchoredFinalState) >= 0;
+    @Override
+    public boolean hasUnGuardedTransitionToUnAnchoredFinalState(boolean forward) {
+        return getTransitionToUnAnchoredFinalStateId(forward) >= 0;
+    }
+
+    public boolean hasGuardedTransitionToUnAnchoredFinalState() {
+        return getTransitionToUnAnchoredFinalStateId(true) == -1 && numberOfGuardedUnAnchoredFinalTransitions > 0;
     }
 
     public NFAStateTransition getTransitionToUnAnchoredFinalState(boolean forward) {
-        assert hasTransitionToUnAnchoredFinalState(forward);
-        return forward ? next.get(transitionToUnAnchoredFinalState) : prev.get(revTransitionToUnAnchoredFinalState);
+        assert hasUnGuardedTransitionToUnAnchoredFinalState(forward);
+        return getSuccessors(forward)[getTransitionToUnAnchoredFinalStateId(forward)];
     }
 
-    /**
-     * List of possible next states, sorted by priority.
-     */
-    public List<NFAStateTransition> getNext() {
-        return next;
+    public short getTransitionToUnAnchoredFinalStateId(boolean forward) {
+        return forward ? transitionToUnAnchoredFinalState : revTransitionToUnAnchoredFinalState;
     }
 
-    public List<NFAStateTransition> getNext(boolean forward) {
-        return forward ? next : prev;
+    public boolean hasUnGuardedTransitionToFinalState(boolean forward) {
+        return hasUnGuardedTransitionToAnchoredFinalState(forward) || hasUnGuardedTransitionToUnAnchoredFinalState(forward);
+    }
+
+    public int getFirstTransitionToFinalStateIndex(boolean forward) {
+        assert hasUnGuardedTransitionToFinalState(forward);
+        return Math.min(Short.toUnsignedInt(getTransitionToAnchoredFinalStateId(forward)), Short.toUnsignedInt(getTransitionToUnAnchoredFinalStateId(forward)));
+    }
+
+    public NFAStateTransition getFirstTransitionToFinalState(boolean forward) {
+        return getSuccessors(forward)[getFirstTransitionToFinalStateIndex(forward)];
     }
 
     public void addLoopBackNext(NFAStateTransition transition) {
         // loopBack transitions always have minimal priority, so no sorting is necessary
-        updateFinalStateTransitions(transition, (short) next.size());
-        next.add(transition);
+        updateFinalStateTransitions(transition, (short) getSuccessors().length);
+        setSuccessors(Arrays.copyOf(getSuccessors(), getSuccessors().length + 1));
+        getSuccessors()[getSuccessors().length - 1] = transition;
     }
 
     public void removeLoopBackNext() {
-        next.remove(next.size() - 1);
-        if (transitionToAnchoredFinalState == next.size()) {
+        setSuccessors(Arrays.copyOf(getSuccessors(), getSuccessors().length - 1));
+        if (transitionToAnchoredFinalState == getSuccessors().length) {
             transitionToAnchoredFinalState = -1;
         }
-        if (transitionToUnAnchoredFinalState == next.size()) {
+        if (transitionToUnAnchoredFinalState == getSuccessors().length) {
             transitionToUnAnchoredFinalState = -1;
         }
     }
 
-    public void setNext(ArrayList<NFAStateTransition> transitions, boolean createReverseTransitions) {
-        this.next = transitions;
-        for (short i = 0; i < transitions.size(); i++) {
-            NFAStateTransition t = transitions.get(i);
+    public void setSuccessors(NFAStateTransition[] transitions, boolean createReverseTransitions) {
+        setSuccessors(transitions);
+        for (short i = 0; i < transitions.length; i++) {
+            NFAStateTransition t = transitions[i];
             updateFinalStateTransitions(t, i);
             if (createReverseTransitions) {
-                if (isReverseAnchoredFinalState()) {
-                    t.getTarget().revTransitionToAnchoredFinalState = (short) t.getTarget().prev.size();
-                }
-                if (isReverseUnAnchoredFinalState()) {
-                    t.getTarget().revTransitionToUnAnchoredFinalState = (short) t.getTarget().prev.size();
-                }
-                t.getTarget().prev.add(t);
+                t.getTarget().incPredecessors();
             }
         }
     }
 
     private void updateFinalStateTransitions(NFAStateTransition transition, short i) {
-        if (transitionToAnchoredFinalState == -1 && transition.getTarget().isForwardAnchoredFinalState()) {
-            transitionToAnchoredFinalState = i;
+        boolean hasConstraints = transition.hasConstraints();
+        if (transition.getTarget().isAnchoredFinalState()) {
+            if (transitionToAnchoredFinalState == -1 && !hasConstraints) {
+                transitionToAnchoredFinalState = i;
+            }
+            if (hasConstraints) {
+                numberOfGuardedAnchoredFinalTransitions++;
+            }
         }
-        if (transitionToUnAnchoredFinalState == -1 && transition.getTarget().isForwardUnAnchoredFinalState()) {
-            transitionToUnAnchoredFinalState = i;
+        if (transition.getTarget().isUnAnchoredFinalState()) {
+            if (transitionToUnAnchoredFinalState == -1 && !hasConstraints) {
+                transitionToUnAnchoredFinalState = i;
+            }
+            if (hasConstraints) {
+                numberOfGuardedUnAnchoredFinalTransitions++;
+            }
         }
     }
 
-    public void removeNext(NFAState state) {
-        NFAStateTransition transitionToAFS = hasTransitionToAnchoredFinalState(true) ? getTransitionToAnchoredFinalState(true) : null;
-        NFAStateTransition transitionToUFS = hasTransitionToUnAnchoredFinalState(true) ? getTransitionToUnAnchoredFinalState(true) : null;
-        next.removeIf(x -> x.getTarget() == state);
-        if (hasTransitionToAnchoredFinalState(true)) {
-            this.transitionToAnchoredFinalState = (short) next.indexOf(transitionToAFS);
+    public void removeSuccessor(NFAState state) {
+        int toRemove = 0;
+        for (NFAStateTransition successor : getSuccessors()) {
+            if (successor.getTarget() == state) {
+                toRemove++;
+            }
         }
-        if (hasTransitionToUnAnchoredFinalState(true)) {
-            this.transitionToUnAnchoredFinalState = (short) next.indexOf(transitionToUFS);
+        if (toRemove == 0) {
+            return;
         }
+        NFAStateTransition[] newNext = new NFAStateTransition[getSuccessors().length - toRemove];
+        short iNew = 0;
+        for (short i = 0; i < getSuccessors().length; i++) {
+            var successor = getSuccessors()[i];
+            if (successor.getTarget() == state) {
+                if (i == transitionToAnchoredFinalState) {
+                    transitionToAnchoredFinalState = -1;
+                }
+                if (i == transitionToUnAnchoredFinalState) {
+                    transitionToUnAnchoredFinalState = -1;
+                }
+                if (successor.hasConstraints()) {
+                    if (state.isFinalState()) {
+                        numberOfGuardedUnAnchoredFinalTransitions--;
+                    }
+                    if (state.isAnchoredFinalState()) {
+                        numberOfGuardedAnchoredFinalTransitions--;
+                    }
+                }
+            } else {
+                if (i == transitionToAnchoredFinalState) {
+                    transitionToAnchoredFinalState = iNew;
+                }
+                if (i == transitionToUnAnchoredFinalState) {
+                    transitionToUnAnchoredFinalState = iNew;
+                }
+                newNext[iNew++] = getSuccessors()[i];
+            }
+        }
+        setSuccessors(newNext);
     }
 
-    public void setPrev(ArrayList<NFAStateTransition> transitions) {
-        this.prev = transitions;
-    }
-
-    /**
-     * List of possible previous states, unsorted.
-     */
-    public List<NFAStateTransition> getPrev() {
-        return prev;
-    }
-
-    public List<NFAStateTransition> getPrev(boolean forward) {
-        return forward ? prev : next;
-    }
-
-    @Override
-    public short getId() {
-        return id;
+    public void linkPredecessors() {
+        for (NFAStateTransition t : getSuccessors()) {
+            t.getTarget().addPredecessor(t);
+            if (isAnchoredInitialState()) {
+                t.getTarget().revTransitionToAnchoredFinalState = (short) t.getTarget().getNPredecessors();
+            }
+            if (isUnAnchoredInitialState()) {
+                t.getTarget().revTransitionToUnAnchoredFinalState = (short) t.getTarget().getNPredecessors();
+            }
+        }
     }
 
     /**
@@ -313,9 +379,9 @@ public class NFAState implements IndexedState, JsonConvertible {
      * priority, so when a single 'a' is encountered when searching for a match, the pre-calculated
      * result corresponding to capture group 1 must be preferred.
      */
-    public List<Integer> getPossibleResults() {
+    public TBitSet getPossibleResults() {
         if (possibleResults == null) {
-            return Collections.emptyList();
+            return TBitSet.getEmptyInstance();
         }
         return possibleResults;
     }
@@ -326,17 +392,33 @@ public class NFAState implements IndexedState, JsonConvertible {
 
     public void addPossibleResult(int index) {
         if (possibleResults == null) {
-            possibleResults = new ArrayList<>();
+            possibleResults = new TBitSet(TRegexOptions.TRegexTraceFinderMaxNumberOfResults);
         }
-        int searchResult = Collections.binarySearch(possibleResults, index);
-        if (searchResult < 0) {
-            possibleResults.add((searchResult + 1) * -1, index);
-        }
+        possibleResults.set(index);
+    }
+
+    /**
+     * Creates a copy of the {@code original} state. This copy is shallow as the state is just a
+     * part of a larger cyclic graph. However, it has its own copy of the {@link #getSuccessors()}
+     * and {@link #getPredecessors()} arrays. When copying the entire NFA, the
+     * {@link #getSuccessors()} and {@link #getPredecessors()} must be updated to point to
+     * transitions in the new NFA.
+     */
+    public NFAState(NFAState original) {
+        super(original);
+        this.stateSet = original.stateSet;
+        this.transitionToAnchoredFinalState = original.transitionToAnchoredFinalState;
+        this.transitionToUnAnchoredFinalState = original.transitionToUnAnchoredFinalState;
+        this.revTransitionToAnchoredFinalState = original.revTransitionToAnchoredFinalState;
+        this.revTransitionToUnAnchoredFinalState = original.revTransitionToUnAnchoredFinalState;
+        this.possibleResults = original.possibleResults;
+        this.finishedLookBehinds = original.finishedLookBehinds;
+        this.matchedConditionGroupsMap = original.matchedConditionGroupsMap;
     }
 
     @TruffleBoundary
     public String idToString() {
-        return getStateSet().stream().map(x -> String.valueOf(x.getId())).collect(Collectors.joining(",", "(", ")")) + "[" + id + "]";
+        return getStateSet().stream().map(x -> String.valueOf(x.getId())).collect(Collectors.joining(",", "(", ")")) + "[" + getId() + "]";
     }
 
     @TruffleBoundary
@@ -347,44 +429,48 @@ public class NFAState implements IndexedState, JsonConvertible {
 
     @Override
     public boolean equals(Object o) {
-        return o instanceof NFAState && id == ((NFAState) o).id;
+        return o instanceof NFAState && getId() == ((NFAState) o).getId();
     }
 
     @Override
     public int hashCode() {
-        return id;
+        return getId();
+    }
+
+    @Override
+    protected NFAStateTransition[] createTransitionsArray(int length) {
+        return new NFAStateTransition[length];
     }
 
     @TruffleBoundary
     private JsonArray sourceSectionsToJson() {
-        return Json.array(getStateSet().stream().map(RegexASTNode::getSourceSection).filter(Objects::nonNull).map(x -> Json.obj(
-                        Json.prop("start", x.getCharIndex()),
-                        Json.prop("end", x.getCharEndIndex()))));
+        return RegexAST.sourceSectionsToJson(getStateSet().stream().map(x -> getStateSet().getStateIndex().getSourceSections(x)).filter(Objects::nonNull).flatMap(Collection::stream));
     }
 
     @TruffleBoundary
     @Override
     public JsonObject toJson() {
-        return Json.obj(Json.prop("id", id),
+        return Json.obj(Json.prop("id", getId()),
                         Json.prop("stateSet", getStateSet().stream().map(x -> Json.val(x.getId()))),
+                        Json.prop("mustAdvance", isMustAdvance()),
                         Json.prop("sourceSections", sourceSectionsToJson()),
-                        Json.prop("matcherBuilder", matcherBuilder.toString()),
-                        Json.prop("forwardAnchoredFinalState", isForwardAnchoredFinalState()),
-                        Json.prop("forwardUnAnchoredFinalState", isForwardUnAnchoredFinalState()),
-                        Json.prop("reverseAnchoredFinalState", isReverseAnchoredFinalState()),
-                        Json.prop("reverseUnAnchoredFinalState", isReverseUnAnchoredFinalState()),
-                        Json.prop("next", next.stream().map(x -> Json.val(x.getId()))),
-                        Json.prop("prev", prev.stream().map(x -> Json.val(x.getId()))));
+                        Json.prop("forwardAnchoredFinalState", isAnchoredFinalState()),
+                        Json.prop("forwardUnAnchoredFinalState", isUnAnchoredFinalState()),
+                        Json.prop("reverseAnchoredFinalState", isAnchoredInitialState()),
+                        Json.prop("reverseUnAnchoredFinalState", isUnAnchoredInitialState()),
+                        Json.prop("next", Arrays.stream(getSuccessors()).map(x -> Json.val(x.getId()))),
+                        Json.prop("prev", Arrays.stream(getPredecessors()).map(x -> Json.val(x.getId()))));
     }
 
     @TruffleBoundary
     public JsonObject toJson(boolean forward) {
-        return Json.obj(Json.prop("id", id),
+        return Json.obj(Json.prop("id", getId()),
                         Json.prop("stateSet", getStateSet().stream().map(x -> Json.val(x.getId()))),
+                        Json.prop("matcherBuilder", Arrays.stream(getPredecessors()).findFirst().map(t -> t.getCodePointSet().toString()).orElse("")),
+                        Json.prop("mustAdvance", isMustAdvance()),
                         Json.prop("sourceSections", sourceSectionsToJson()),
-                        Json.prop("matcherBuilder", matcherBuilder.toString()),
                         Json.prop("anchoredFinalState", isAnchoredFinalState(forward)),
                         Json.prop("unAnchoredFinalState", isUnAnchoredFinalState(forward)),
-                        Json.prop("transitions", getNext(forward).stream().map(x -> Json.val(x.getId()))));
+                        Json.prop("transitions", Arrays.stream(getSuccessors(forward)).map(x -> Json.val(x.getId()))));
     }
 }

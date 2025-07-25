@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,6 +40,9 @@
  */
 package org.graalvm.nativeimage;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.Objects;
 
 import org.graalvm.nativeimage.impl.IsolateSupport;
@@ -48,7 +51,7 @@ import org.graalvm.word.UnsignedWord;
 /**
  * Support for the creation, access to, and tear-down of isolates.
  *
- * @since 1.0
+ * @since 19.0
  */
 public final class Isolates {
     private Isolates() {
@@ -57,7 +60,7 @@ public final class Isolates {
     /**
      * An exception thrown in the context of managing isolates.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public static final class IsolateException extends RuntimeException {
         private static final long serialVersionUID = 1L;
@@ -65,7 +68,7 @@ public final class Isolates {
         /**
          * Constructs a new exception with the specified detail message.
          *
-         * @since 1.0
+         * @since 19.0
          */
         public IsolateException(String message) {
             super(message);
@@ -77,30 +80,35 @@ public final class Isolates {
      *
      * @see CreateIsolateParameters.Builder
      *
-     * @since 1.0
+     * @since 19.0
      */
     public static final class CreateIsolateParameters {
 
         /**
          * Builder for a {@link CreateIsolateParameters} instance.
          *
-         * @since 1.0
+         * @since 19.0
          */
         public static final class Builder {
             private UnsignedWord reservedAddressSpaceSize;
+            private String auxiliaryImagePath;
+            private UnsignedWord auxiliaryImageReservedSpaceSize;
+            private final List<String> arguments;
+            private ProtectionDomain protectionDomain = ProtectionDomain.NO_DOMAIN;
 
             /**
              * Creates a new builder with default values.
              *
-             * @since 1.0
+             * @since 19.0
              */
             public Builder() {
+                arguments = new ArrayList<>();
             }
 
             /**
              * Sets the size in bytes for the reserved virtual address space of the new isolate.
              *
-             * @since 1.0
+             * @since 19.0
              */
             public Builder reservedAddressSpaceSize(UnsignedWord size) {
                 this.reservedAddressSpaceSize = size;
@@ -108,13 +116,58 @@ public final class Isolates {
             }
 
             /**
+             * Sets the file path to an auxiliary image which should be loaded in addition to the
+             * main image, or {@code null} if no such image should be loaded.
+             *
+             * @since 20.1
+             */
+            public Builder auxiliaryImagePath(String filePath) {
+                this.auxiliaryImagePath = filePath;
+                return this;
+            }
+
+            /**
+             * Sets the size in bytes of an address space to reserve for loading an auxiliary image
+             * in addition to the main image, or 0 if no space should be reserved.
+             *
+             * @since 20.1
+             */
+            public Builder auxiliaryImageReservedSpaceSize(UnsignedWord size) {
+                this.auxiliaryImageReservedSpaceSize = size;
+                return this;
+            }
+
+            /**
+             * Appends an isolate argument. The syntax for arguments is the same as the one that is
+             * used on the command-line when starting Native Image (e.g., {@code
+             * -XX:+AutomaticReferenceHandling}). If the same argument is added multiple times, the
+             * last specified value will be used.
+             *
+             * @since 22.1
+             */
+            public Builder appendArgument(String argument) {
+                this.arguments.add(argument);
+                return this;
+            }
+
+            /**
+             * Sets the {@link ProtectionDomain} for an isolate.
+             *
+             * @since 22.1
+             */
+            public Builder setProtectionDomain(ProtectionDomain domain) {
+                this.protectionDomain = domain;
+                return this;
+            }
+
+            /**
              * Produces the final {@link CreateIsolateParameters} with the values set previously by
              * the builder methods.
              *
-             * @since 1.0
+             * @since 19.0
              */
             public CreateIsolateParameters build() {
-                return new CreateIsolateParameters(reservedAddressSpaceSize);
+                return new CreateIsolateParameters(reservedAddressSpaceSize, auxiliaryImagePath, auxiliaryImageReservedSpaceSize, arguments, protectionDomain);
             }
         }
 
@@ -123,27 +176,99 @@ public final class Isolates {
         /**
          * Returns a {@link CreateIsolateParameters} with all default values.
          *
-         * @since 1.0
+         * @since 19.0
          */
         public static CreateIsolateParameters getDefault() {
             return DEFAULT;
         }
 
         private final UnsignedWord reservedAddressSpaceSize;
+        private final String auxiliaryImagePath;
+        private final UnsignedWord auxiliaryImageReservedSpaceSize;
+        private final List<String> arguments;
+        private final ProtectionDomain protectionDomain;
 
-        private CreateIsolateParameters(UnsignedWord reservedAddressSpaceSize) {
+        private CreateIsolateParameters(UnsignedWord reservedAddressSpaceSize, String auxiliaryImagePath, UnsignedWord auxiliaryImageReservedSpaceSize, List<String> arguments,
+                        ProtectionDomain protectionDomain) {
             this.reservedAddressSpaceSize = reservedAddressSpaceSize;
+            this.auxiliaryImagePath = auxiliaryImagePath;
+            this.auxiliaryImageReservedSpaceSize = auxiliaryImageReservedSpaceSize;
+            this.arguments = arguments;
+            this.protectionDomain = protectionDomain;
         }
 
         /**
          * Returns the size in bytes for the reserved virtual address space of the new isolate.
-         * Returns a {@link CreateIsolateParameters} with all default values.
          *
-         * @since 1.0
+         * @since 19.0
          */
         public UnsignedWord getReservedAddressSpaceSize() {
             return reservedAddressSpaceSize;
         }
+
+        /**
+         * Returns the file path to an auxiliary image which should be loaded in addition to the
+         * main image, or {@code null} if no such image should be loaded.
+         *
+         * @since 20.1
+         */
+        public String getAuxiliaryImagePath() {
+            return auxiliaryImagePath;
+        }
+
+        /**
+         * Returns the size in bytes of an address space to reserve for loading an auxiliary image
+         * in addition to the main image, or 0 if no space should be reserved.
+         *
+         * @since 20.1
+         */
+        public UnsignedWord getAuxiliaryImageReservedSpaceSize() {
+            return auxiliaryImageReservedSpaceSize;
+        }
+
+        /**
+         * Returns the list of additional isolate arguments.
+         *
+         * @since 22.1
+         */
+        public List<String> getArguments() {
+            return Collections.unmodifiableList(arguments);
+        }
+
+        /**
+         * Returns the memory protection domain to be used for an isolate.
+         *
+         * @since 22.1
+         */
+        public ProtectionDomain getProtectionDomain() {
+            return protectionDomain;
+        }
+    }
+
+    /**
+     * Identifies a protection domain for an isolate. A protection domain may be used by a
+     * {@code MemoryProtectionKeyProvider} in connection with underlying MMU hardware such as Memory
+     * Protection Keys.
+     *
+     * @since 22.1
+     *
+     */
+    public interface ProtectionDomain {
+        /**
+         * Do not use a protection domain.
+         *
+         * @since 22.1
+         */
+        ProtectionDomain NO_DOMAIN = new ProtectionDomain() {
+        };
+
+        /**
+         * Creates a new protection domain if passed to the {@link CreateIsolateParameters.Builder}.
+         *
+         * @since 22.1
+         */
+        ProtectionDomain NEW_DOMAIN = new ProtectionDomain() {
+        };
     }
 
     /**
@@ -155,7 +280,7 @@ public final class Isolates {
      * @return A pointer to the structure that represents the current thread in the new isolate.
      * @throws IsolateException on error.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public static IsolateThread createIsolate(CreateIsolateParameters parameters) throws IsolateException {
         Objects.requireNonNull(parameters);
@@ -170,7 +295,7 @@ public final class Isolates {
      * @return A pointer to the structure representing the newly attached isolate thread.
      * @throws IsolateException on error.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public static IsolateThread attachCurrentThread(Isolate isolate) throws IsolateException {
         return ImageSingletons.lookup(IsolateSupport.class).attachCurrentThread(isolate);
@@ -186,7 +311,7 @@ public final class Isolates {
      *         if the thread is not attached to that isolate.
      * @throws IsolateException on error.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public static IsolateThread getCurrentThread(Isolate isolate) throws IsolateException {
         return ImageSingletons.lookup(IsolateSupport.class).getCurrentThread(isolate);
@@ -201,7 +326,7 @@ public final class Isolates {
      * @return A pointer to the isolate, or {@code null}.
      * @throws IsolateException on error.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public static Isolate getIsolate(IsolateThread thread) throws IsolateException {
         return ImageSingletons.lookup(IsolateSupport.class).getIsolate(thread);
@@ -215,7 +340,7 @@ public final class Isolates {
      * @param thread The isolate thread to detach from its isolate.
      * @throws IsolateException on error.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public static void detachThread(IsolateThread thread) throws IsolateException {
         ImageSingletons.lookup(IsolateSupport.class).detachThread(thread);
@@ -231,7 +356,7 @@ public final class Isolates {
      *            which is to be torn down.
      * @throws IsolateException on error.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public static void tearDownIsolate(IsolateThread thread) throws IsolateException {
         ImageSingletons.lookup(IsolateSupport.class).tearDownIsolate(thread);

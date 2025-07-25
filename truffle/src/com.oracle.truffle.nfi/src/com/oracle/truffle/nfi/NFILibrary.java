@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,88 +40,184 @@
  */
 package com.oracle.truffle.nfi;
 
-import com.oracle.truffle.api.CompilerDirectives;
-import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
-import com.oracle.truffle.api.interop.ForeignAccess;
-import com.oracle.truffle.api.interop.MessageResolution;
-import com.oracle.truffle.api.interop.Resolve;
-import com.oracle.truffle.api.interop.TruffleObject;
-import com.oracle.truffle.api.interop.UnknownIdentifierException;
-import com.oracle.truffle.api.nodes.Node;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.Set;
 
+import com.oracle.truffle.api.CompilerDirectives.CompilationFinal;
+import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
+import com.oracle.truffle.api.TruffleLanguage;
+import com.oracle.truffle.api.dsl.Bind;
+import com.oracle.truffle.api.dsl.Cached;
+import com.oracle.truffle.api.interop.ArityException;
+import com.oracle.truffle.api.interop.InteropLibrary;
+import com.oracle.truffle.api.interop.InvalidArrayIndexException;
+import com.oracle.truffle.api.interop.TruffleObject;
+import com.oracle.truffle.api.interop.UnknownIdentifierException;
+import com.oracle.truffle.api.interop.UnsupportedMessageException;
+import com.oracle.truffle.api.interop.UnsupportedTypeException;
+import com.oracle.truffle.api.library.CachedLibrary;
+import com.oracle.truffle.api.library.ExportLibrary;
+import com.oracle.truffle.api.library.ExportMessage;
+import com.oracle.truffle.api.nodes.Node;
+import com.oracle.truffle.api.profiles.InlinedBranchProfile;
+
+@ExportLibrary(InteropLibrary.class)
 final class NFILibrary implements TruffleObject {
 
-    private final TruffleObject library;
-    private final Map<String, TruffleObject> symbols;
+    final Object library;
+    private final Map<String, Object> symbols;
 
-    NFILibrary(TruffleObject library) {
+    @TruffleBoundary
+    NFILibrary(Object library) {
         this.library = library;
         this.symbols = new HashMap<>();
     }
 
-    @Override
-    public ForeignAccess getForeignAccess() {
-        return NFILibraryMessageResolutionForeign.ACCESS;
-    }
-
-    TruffleObject getLibrary() {
+    Object getLibrary() {
         return library;
     }
 
     @TruffleBoundary
-    TruffleObject findSymbol(String name) {
+    Object findSymbol(String name) {
         return symbols.get(name);
     }
 
     @TruffleBoundary
-    void preBindSymbol(String name, TruffleObject symbol) {
+    void preBindSymbol(String name, Object symbol) {
         symbols.put(name, symbol);
     }
 
-    @TruffleBoundary
-    Keys getSymbols() {
-        return new Keys(symbols.keySet());
+    @SuppressWarnings("static-method")
+    @ExportMessage
+    boolean hasMembers() {
+        return true;
     }
 
-    @MessageResolution(receiverType = Keys.class)
+    @ExportMessage
+    @TruffleBoundary
+    Keys getMembers(@SuppressWarnings("unused") boolean includeInternal) {
+        return new Keys(symbols.keySet().toArray());
+    }
+
+    @ExportMessage(limit = "3")
+    boolean isMemberReadable(String symbol,
+                    @CachedLibrary("this.getLibrary()") InteropLibrary recursive) {
+        // no need to check the map, pre-bound symbols need to exist in the library, too
+        return recursive.isMemberReadable(getLibrary(), symbol);
+    }
+
+    @ExportMessage(limit = "3")
+    Object readMember(String symbol,
+                    @CachedLibrary("this.getLibrary()") InteropLibrary recursive) throws UnsupportedMessageException, UnknownIdentifierException {
+        Object preBound = findSymbol(symbol);
+        if (preBound != null) {
+            return preBound;
+        } else {
+            return recursive.readMember(getLibrary(), symbol);
+        }
+    }
+
+    @SuppressWarnings("static-method")
+    @ExportMessage
+    boolean isMemberInvocable(@SuppressWarnings("unused") String symbol) {
+        return true; // avoid expensive truffle boundary
+    }
+
+    @ExportMessage
+    Object invokeMember(String symbol, Object[] args,
+                    @Bind Node node,
+                    @CachedLibrary(limit = "3") InteropLibrary executables,
+                    @Cached InlinedBranchProfile exception) throws UnknownIdentifierException, ArityException, UnsupportedTypeException, UnsupportedMessageException {
+        Object preBound = findSymbol(symbol);
+        if (preBound == null) {
+            exception.enter(node);
+            throw UnknownIdentifierException.create(symbol);
+        }
+        return executables.execute(preBound, args);
+    }
+
+    @ExportMessage
+    @SuppressWarnings("unused")
+    static boolean hasLanguage(NFILibrary lib) {
+        return true;
+    }
+
+    @ExportMessage
+    @SuppressWarnings("unused")
+    static Class<? extends TruffleLanguage<?>> getLanguage(NFILibrary receiver) {
+        return NFILanguage.class;
+    }
+
+    @ExportMessage
+    @SuppressWarnings("unused")
+    static Object toDisplayString(NFILibrary receiver, boolean allowSideEffects) {
+        return "Native Library";
+    }
+
+    @ExportMessage
+    boolean isPointer(@CachedLibrary("this.library") InteropLibrary interop) {
+        return interop.isPointer(this.library);
+    }
+
+    @ExportMessage
+    long asPointer(@CachedLibrary("this.library") InteropLibrary interop) throws UnsupportedMessageException {
+        return interop.asPointer(this.library);
+    }
+
+    @ExportMessage
+    void toNative(@CachedLibrary("this.library") InteropLibrary interop) {
+        interop.toNative(this.library);
+    }
+
+    @ExportLibrary(InteropLibrary.class)
     static final class Keys implements TruffleObject {
 
-        private final Object[] keys;
+        @CompilationFinal(dimensions = 1) private final Object[] keys;
 
-        private Keys(Set<String> keySet) {
-            this.keys = keySet.toArray();
+        Keys(Object... keys) {
+            this.keys = keys;
         }
 
-        static boolean isInstance(TruffleObject obj) {
-            return obj instanceof Keys;
+        @SuppressWarnings("static-method")
+        @ExportMessage
+        boolean hasArrayElements() {
+            return true;
         }
 
-        @Override
-        public ForeignAccess getForeignAccess() {
-            return KeysForeign.ACCESS;
+        @ExportMessage
+        long getArraySize() {
+            return keys.length;
         }
 
-        @Resolve(message = "GET_SIZE")
-        abstract static class GetSize extends Node {
+        @ExportMessage
+        boolean isArrayElementReadable(long index) {
+            return 0 <= index && index < keys.length;
+        }
 
-            int access(Keys receiver) {
-                return receiver.keys.length;
+        @ExportMessage
+        Object readArrayElement(long idx,
+                        @Bind Node node,
+                        @Cached InlinedBranchProfile exception) throws InvalidArrayIndexException {
+            if (!isArrayElementReadable(idx)) {
+                exception.enter(node);
+                throw InvalidArrayIndexException.create(idx);
             }
+            return keys[(int) idx];
         }
 
-        @Resolve(message = "READ")
-        abstract static class Read extends Node {
+        @ExportMessage
+        static boolean hasLanguage(@SuppressWarnings("unused") Keys receiver) {
+            return true;
+        }
 
-            Object access(Keys receiver, int index) {
-                if (index < 0 || index >= receiver.keys.length) {
-                    CompilerDirectives.transferToInterpreter();
-                    throw UnknownIdentifierException.raise(Integer.toString(index));
-                }
-                return receiver.keys[index];
-            }
+        @ExportMessage
+        static Class<? extends TruffleLanguage<?>> getLanguage(@SuppressWarnings("unused") Keys receiver) {
+            return NFILanguage.class;
+        }
+
+        @ExportMessage
+        static Object toDisplayString(@SuppressWarnings("unused") Keys receiver, @SuppressWarnings("unused") boolean allowSideEffects) {
+            return "Native Members";
         }
     }
 }

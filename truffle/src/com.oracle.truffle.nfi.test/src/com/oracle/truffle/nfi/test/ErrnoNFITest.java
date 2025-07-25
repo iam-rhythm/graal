@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,22 +40,21 @@
  */
 package com.oracle.truffle.nfi.test;
 
-import com.oracle.truffle.api.CallTarget;
-import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
-import com.oracle.truffle.api.frame.VirtualFrame;
-import com.oracle.truffle.api.interop.ForeignAccess;
-import com.oracle.truffle.api.interop.InteropException;
-import com.oracle.truffle.api.interop.Message;
-import com.oracle.truffle.api.interop.TruffleObject;
-import com.oracle.truffle.api.nodes.Node;
-import com.oracle.truffle.nfi.test.interop.TestCallback;
-import com.oracle.truffle.tck.TruffleRunner;
-import com.oracle.truffle.tck.TruffleRunner.Inject;
 import java.io.File;
 import java.io.FileReader;
+
 import org.junit.Assert;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+
+import com.oracle.truffle.api.CallTarget;
+import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
+import com.oracle.truffle.api.frame.VirtualFrame;
+import com.oracle.truffle.api.interop.InteropException;
+import com.oracle.truffle.api.interop.InteropLibrary;
+import com.oracle.truffle.nfi.test.interop.TestCallback;
+import com.oracle.truffle.tck.TruffleRunner;
+import com.oracle.truffle.tck.TruffleRunner.Inject;
 
 @RunWith(TruffleRunner.class)
 public class ErrnoNFITest extends NFITest {
@@ -72,17 +71,17 @@ public class ErrnoNFITest extends NFITest {
 
     public static class TestVirtualErrno extends NFITestRootNode {
 
-        private final TruffleObject setErrno = lookupAndBind("setErrno", "(sint32):void");
-        @Child private Node executeSetErrno = Message.EXECUTE.createNode();
+        private final Object setErrno = lookupAndBind("setErrno", "(sint32):void");
+        @Child InteropLibrary setErrnoInterop = getInterop(setErrno);
 
-        private final TruffleObject getErrno = lookupAndBind("getErrno", "():sint32");
-        @Child private Node executeGetErrno = Message.EXECUTE.createNode();
+        private final Object getErrno = lookupAndBind("getErrno", "():sint32");
+        @Child InteropLibrary getErrnoInterop = getInterop(getErrno);
 
         @Override
         public Object executeTest(VirtualFrame frame) throws InteropException {
-            ForeignAccess.sendExecute(executeSetErrno, setErrno, frame.getArguments()[0]);
+            setErrnoInterop.execute(setErrno, frame.getArguments()[0]);
             destroyErrno();
-            return ForeignAccess.sendExecute(executeGetErrno, getErrno);
+            return getErrnoInterop.execute(getErrno);
         }
     }
 
@@ -99,12 +98,13 @@ public class ErrnoNFITest extends NFITest {
         }
     }
 
+    private static final TestCallback callback = new TestCallback(0, (args) -> {
+        destroyErrno();
+        return null;
+    });
+
     @Test
     public void testErrnoCallback(@Inject(TestErrnoCallback.class) CallTarget target) {
-        TestCallback callback = new TestCallback(0, (args) -> {
-            destroyErrno();
-            return null;
-        });
         Object ret = target.call(42, callback);
         Assert.assertEquals(42, ret);
     }

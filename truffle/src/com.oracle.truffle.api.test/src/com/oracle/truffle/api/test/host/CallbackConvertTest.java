@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -43,27 +43,57 @@ package com.oracle.truffle.api.test.host;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.fail;
 
+import org.graalvm.polyglot.HostAccess.Implementable;
+import org.junit.BeforeClass;
 import org.junit.Test;
 
 import com.oracle.truffle.api.interop.TruffleObject;
+import com.oracle.truffle.api.test.polyglot.AbstractPolyglotTest;
+import com.oracle.truffle.tck.tests.TruffleTestAssumptions;
 
-public final class CallbackConvertTest extends ProxyLanguageEnvTest {
+public final class CallbackConvertTest extends AbstractPolyglotTest {
     private char ch;
 
     public void callback(char v) {
         this.ch = v;
     }
 
+    @Implementable
     public interface CallWithInt {
         void callback(int v);
     }
 
+    @Implementable
     public interface CallWithChar {
         void callback(char v);
     }
 
+    @BeforeClass
+    public static void runWithWeakEncapsulationOnly() {
+        TruffleTestAssumptions.assumeWeakEncapsulation();
+    }
+
+    public CallbackConvertTest() {
+        needsLanguageEnv = true;
+    }
+
+    protected TruffleObject asTruffleObject(Object javaObj) {
+        Object value = languageEnv.asGuestValue(javaObj);
+        if (value instanceof TruffleObject) {
+            return (TruffleObject) value;
+        } else {
+            return (TruffleObject) languageEnv.asBoxedGuestValue(javaObj);
+        }
+    }
+
+    protected <T> T asJavaObject(Class<T> type, Object truffleObject) {
+        return context.asValue(truffleObject).as(type);
+    }
+
     @Test
     public void callWithIntTest() {
+        setupEnv();
+
         TruffleObject truffle = asTruffleObject(this);
         CallWithInt callback = asJavaObject(CallWithInt.class, truffle);
         callback.callback(32);
@@ -72,6 +102,7 @@ public final class CallbackConvertTest extends ProxyLanguageEnvTest {
 
     @Test(expected = IllegalArgumentException.class)
     public void callWithHugeIntTest() {
+        setupEnv();
         TruffleObject truffle = asTruffleObject(this);
         CallWithInt callback = asJavaObject(CallWithInt.class, truffle);
         callback.callback(Integer.MAX_VALUE / 2);
@@ -80,6 +111,7 @@ public final class CallbackConvertTest extends ProxyLanguageEnvTest {
 
     @Test
     public void callWithCharTest() {
+        setupEnv();
         TruffleObject truffle = asTruffleObject(this);
         CallWithChar callback = asJavaObject(CallWithChar.class, truffle);
         callback.callback('A');
@@ -88,6 +120,7 @@ public final class CallbackConvertTest extends ProxyLanguageEnvTest {
 
     @Test(expected = IllegalArgumentException.class)
     public void callWithNegativeNumberTest() {
+        setupEnv();
         TruffleObject truffle = asTruffleObject(this);
         CallWithInt callback = asJavaObject(CallWithInt.class, truffle);
         callback.callback(-32);
@@ -96,6 +129,8 @@ public final class CallbackConvertTest extends ProxyLanguageEnvTest {
 
     @Test
     public void callWithPositiveNumberTest() {
+        setupEnv();
+
         TruffleObject truffle = asTruffleObject(this);
         CallWithInt callback = asJavaObject(CallWithInt.class, truffle);
         callback.callback(65504);

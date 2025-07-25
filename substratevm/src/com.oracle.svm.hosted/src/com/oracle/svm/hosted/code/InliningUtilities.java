@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2014, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,59 +24,29 @@
  */
 package com.oracle.svm.hosted.code;
 
-import java.lang.annotation.Annotation;
-
-import org.graalvm.compiler.graph.Node;
-import org.graalvm.compiler.nodes.FrameState;
-import org.graalvm.compiler.nodes.FullInfopointNode;
-import org.graalvm.compiler.nodes.Invoke;
-import org.graalvm.compiler.nodes.ParameterNode;
-import org.graalvm.compiler.nodes.StartNode;
-import org.graalvm.compiler.nodes.StructuredGraph;
-import org.graalvm.compiler.nodes.java.MethodCallTargetNode;
-import org.graalvm.compiler.nodes.spi.ValueProxy;
-import org.graalvm.compiler.serviceprovider.JavaVersionUtil;
+import jdk.graal.compiler.graph.Node;
+import jdk.graal.compiler.nodes.FrameState;
+import jdk.graal.compiler.nodes.FullInfopointNode;
+import jdk.graal.compiler.nodes.ParameterNode;
+import jdk.graal.compiler.nodes.StartNode;
+import jdk.graal.compiler.nodes.StructuredGraph;
+import jdk.graal.compiler.nodes.extended.ValueAnchorNode;
+import jdk.graal.compiler.nodes.java.MethodCallTargetNode;
+import jdk.graal.compiler.nodes.spi.ValueProxy;
+import jdk.graal.compiler.replacements.nodes.MethodHandleWithExceptionNode;
 
 import com.oracle.svm.core.SubstrateOptions;
-import com.oracle.svm.core.util.VMError;
-import com.oracle.svm.hosted.nodes.AssertValueNode;
-
-import jdk.vm.ci.meta.ResolvedJavaMethod;
 
 public class InliningUtilities {
 
-    private static final Class<? extends Annotation> JDK_FORCE_INLINE_ANNOTATION = lookupForceInlineAnnotation();
-
-    @SuppressWarnings("unchecked")
-    private static Class<? extends Annotation> lookupForceInlineAnnotation() {
-        try {
-            if (JavaVersionUtil.Java8OrEarlier) {
-                return (Class<? extends Annotation>) Class.forName("java.lang.invoke.ForceInline");
-            } else {
-                return (Class<? extends Annotation>) Class.forName("jdk.internal.vm.annotation.ForceInline");
-            }
-        } catch (ClassNotFoundException ex) {
-            throw VMError.shouldNotReachHere(ex);
-        }
-    }
-
     public static boolean isTrivialMethod(StructuredGraph graph) {
-        if (graph.method().getAnnotation(JDK_FORCE_INLINE_ANNOTATION) != null) {
-            /*
-             * The method is annotated by the JDK as force inline, hopefully for a good reason.
-             * Treating it as a trivial method means we also inline it everywhere.
-             */
-            return true;
-        }
-
         int numInvokes = 0;
         int numOthers = 0;
         for (Node n : graph.getNodes()) {
-            if (n instanceof StartNode || n instanceof ParameterNode || n instanceof FullInfopointNode ||
-                            n instanceof ValueProxy || n instanceof AssertValueNode) {
+            if (n instanceof StartNode || n instanceof ParameterNode || n instanceof FullInfopointNode || n instanceof ValueProxy || n instanceof ValueAnchorNode || n instanceof FrameState) {
                 continue;
             }
-            if (n instanceof MethodCallTargetNode) {
+            if (n instanceof MethodCallTargetNode || n instanceof MethodHandleWithExceptionNode) {
                 numInvokes++;
             } else {
                 numOthers++;
@@ -99,17 +69,5 @@ public class InliningUtilities {
         } else {
             return false;
         }
-    }
-
-    public static int recursionDepth(Invoke invoke, ResolvedJavaMethod callee) {
-        FrameState state = invoke.stateAfter();
-        int result = 0;
-        do {
-            if (state.getMethod().equals(callee)) {
-                result++;
-            }
-            state = state.outerFrameState();
-        } while (state != null);
-        return result;
     }
 }

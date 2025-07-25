@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2023, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -41,6 +41,7 @@
 package org.graalvm.polyglot.proxy;
 
 import java.util.List;
+import java.util.NoSuchElementException;
 
 import org.graalvm.polyglot.Value;
 
@@ -51,16 +52,16 @@ import org.graalvm.polyglot.Value;
  * index zero.
  *
  * @see Proxy
- * @since 1.0
+ * @since 19.0
  */
-public interface ProxyArray extends Proxy {
+public interface ProxyArray extends ProxyIterable {
 
     /**
      * Returns the element at the given index.
      *
      * @throws ArrayIndexOutOfBoundsException if the index is out of bounds
      * @throws UnsupportedOperationException if the operation is not supported
-     * @since 1.0
+     * @since 19.0
      */
     Object get(long index);
 
@@ -69,7 +70,7 @@ public interface ProxyArray extends Proxy {
      *
      * @throws ArrayIndexOutOfBoundsException if the index is out of bounds
      * @throws UnsupportedOperationException if the operation is not supported
-     * @since 1.0
+     * @since 19.0
      */
     void set(long index, Value value);
 
@@ -80,7 +81,7 @@ public interface ProxyArray extends Proxy {
      *         didn't exist.
      * @throws ArrayIndexOutOfBoundsException if the index is out of bounds
      * @throws UnsupportedOperationException if the operation is not supported
-     * @since 1.0
+     * @since 19.0
      */
     @SuppressWarnings("unused")
     default boolean remove(long index) {
@@ -92,15 +93,32 @@ public interface ProxyArray extends Proxy {
      * language to get and set values using arbitrary indices. The array size is typically used by
      * Graal languages to traverse the array.
      *
-     * @since 1.0
+     * @since 19.0
      */
     long getSize();
 
     /**
-     * Creates a proxy array backed by a Java array. If the set values of the array are host values
-     * then the they will be {@link Value#asHostObject() unboxed}.
+     * {@inheritDoc}
      *
-     * @since 1.0
+     * @since 20.1
+     */
+    @Override
+    default Object getIterator() {
+        return new DefaultProxyArrayIterator(this);
+    }
+
+    /**
+     * Creates a proxy array backed by a Java Object array. If the set values of the array are host
+     * values then they will be {@link Value#asHostObject() unboxed}.
+     *
+     * Note this function expects a variable number of arguments of type Object, thus might not work
+     * as expected on non-Object array types. For instance, an int array will be stored as the first
+     * element of the resulting proxy array. To flatten it out, convert it to an Object array first
+     * (e.g. with {@code Arrays.stream( myIntArray ).boxed().toArray();}).
+     *
+     * @param values the Object[] array or the vararg arguments to be proxied.
+     *
+     * @since 19.0
      */
     static ProxyArray fromArray(Object... values) {
         return new ProxyArray() {
@@ -130,7 +148,7 @@ public interface ProxyArray extends Proxy {
      * Creates a proxy array backed by a Java List. If the set values of the list are host values
      * then the they will be {@link Value#asHostObject() unboxed}.
      *
-     * @since 1.0
+     * @since 19.0
      */
     static ProxyArray fromList(List<Object> values) {
         return new ProxyArray() {
@@ -164,7 +182,40 @@ public interface ProxyArray extends Proxy {
                 return values.size();
             }
 
+            @Override
+            public Object getIterator() {
+                return ProxyIterator.from(values.iterator());
+            }
         };
     }
 
+}
+
+final class DefaultProxyArrayIterator implements ProxyIterator {
+
+    private final ProxyArray array;
+    private long index;
+
+    DefaultProxyArrayIterator(ProxyArray array) {
+        this.array = array;
+    }
+
+    @Override
+    public boolean hasNext() {
+        return index < array.getSize();
+    }
+
+    @Override
+    public Object getNext() {
+        if (index >= array.getSize()) {
+            throw new NoSuchElementException();
+        }
+        try {
+            Object res = array.get(index);
+            index++;
+            return res;
+        } catch (ArrayIndexOutOfBoundsException e) {
+            throw new NoSuchElementException();
+        }
+    }
 }

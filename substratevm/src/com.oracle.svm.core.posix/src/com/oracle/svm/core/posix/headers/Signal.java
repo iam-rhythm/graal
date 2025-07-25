@@ -24,6 +24,9 @@
  */
 package com.oracle.svm.core.posix.headers;
 
+import static com.oracle.svm.core.Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_CODE;
+import static org.graalvm.nativeimage.c.function.CFunction.Transition.NO_TRANSITION;
+
 import org.graalvm.nativeimage.Platform;
 import org.graalvm.nativeimage.Platforms;
 import org.graalvm.nativeimage.c.CContext;
@@ -38,136 +41,367 @@ import org.graalvm.nativeimage.c.struct.CFieldAddress;
 import org.graalvm.nativeimage.c.struct.CFieldOffset;
 import org.graalvm.nativeimage.c.struct.CPointerTo;
 import org.graalvm.nativeimage.c.struct.CStruct;
+import org.graalvm.nativeimage.c.type.VoidPointer;
 import org.graalvm.nativeimage.c.type.WordPointer;
 import org.graalvm.word.PointerBase;
 
+import com.oracle.svm.core.RegisterDumper;
+import com.oracle.svm.core.SubstrateSegfaultHandler;
+import com.oracle.svm.core.SubstrateUtil;
+import com.oracle.svm.core.Uninterruptible;
+import com.oracle.svm.core.posix.PosixSignalHandlerSupport;
+
+// Checkstyle: stop
+
 /**
- * Contains definitions from signal.h that we actually need.
+ * Definitions manually translated from the C header file signal.h.
  */
 @CContext(PosixDirectives.class)
 public class Signal {
-    /* Allow lower-case type names, underscores in names, etc.: Checkstyle: stop. */
 
     @CFunction
     public static native int kill(int pid, int sig);
 
-    @CFunction
-    public static native int sigprocmask(int how, sigset_tPointer set, sigset_tPointer oldset);
+    @CConstant
+    public static native int SIG_BLOCK();
 
-    /** A pointer to a signal set. The implementation of a signal set is platform-specific. */
+    @CConstant
+    public static native int SIG_UNBLOCK();
+
+    @CConstant
+    public static native int SIG_SETMASK();
+
+    @CConstant
+    public static native int SIGEV_SIGNAL();
+
     @CPointerTo(nameOfCType = "sigset_t")
     public interface sigset_tPointer extends PointerBase {
     }
 
-    /** The interface to a C signal handler. */
+    /**
+     * WARNING: do NOT introduce direct calls to {@code signal} or {@code sigset} as they are not
+     * portable. Besides that, signal chaining (libjsig) in HotSpot would print warnings.
+     */
     public interface SignalDispatcher extends CFunctionPointer {
-
-        /** From signal(2): typedef void (*sig_t) (int). */
         @InvokeCFunctionPointer
         void dispatch(int sig);
     }
 
-    /** Register a signal handler. */
-    @CFunction
-    public static native SignalDispatcher signal(int signum, SignalDispatcher handler);
-
-    /** The signal handler that does the default action for a signal. */
     @CConstant
     public static native SignalDispatcher SIG_DFL();
 
-    /** The signal handler that ignores a signal. */
     @CConstant
     public static native SignalDispatcher SIG_IGN();
 
-    /** The signal handler that represents an error result. */
     @CConstant
     public static native SignalDispatcher SIG_ERR();
 
-    /** Send a signal to the current thread. */
     @CFunction
     public static native int raise(int signum);
 
-    @CStruct
+    @CStruct(isIncomplete = true)
     public interface siginfo_t extends PointerBase {
-        /* Fields unused */
+        @CField
+        int si_signo();
+
+        @CField
+        int si_errno();
+
+        @CField
+        int si_code();
+
+        @CField
+        VoidPointer si_addr();
     }
 
-    @Platforms(Platform.LINUX.class)
+    @Platforms({Platform.LINUX.class, Platform.DARWIN_AARCH64.class})
     @CPointerTo(nameOfCType = "long long int")
     public interface GregsPointer extends PointerBase {
         long read(int index);
     }
 
-    @Platforms(Platform.LINUX_AMD64.class)
-    @CEnum
-    @CContext(PosixDirectives.class)
-    public enum GregEnum {
-        REG_R8,
-        REG_R9,
-        REG_R10,
-        REG_R11,
-        REG_R12,
-        REG_R13,
-        REG_R14,
-        REG_R15,
-        REG_RDI,
-        REG_RSI,
-        REG_RBP,
-        REG_RBX,
-        REG_RDX,
-        REG_RAX,
-        REG_RCX,
-        REG_RSP,
-        REG_RIP,
-        REG_EFL,
-        REG_CSGSFS,
-        REG_ERR,
-        REG_TRAPNO,
-        REG_OLDMASK,
-        REG_CR2;
-
-        @CEnumValue
-        public native int getCValue();
-    }
-
-    @Platforms({Platform.LINUX.class, Platform.DARWIN.class})
     @CStruct
-    public interface ucontext_t extends PointerBase {
-        /*-
-            // Userlevel context.
-            typedef struct ucontext
-              {
-                unsigned long int uc_flags;
-                struct ucontext *uc_link;
-                stack_t uc_stack;
-                mcontext_t uc_mcontext;
-                __sigset_t uc_sigmask;
-                struct _libc_fpstate __fpregs_mem;
-              } ucontext_t;
-        
-            // Context to describe whole processor state.
-            typedef struct
-              {
-                gregset_t gregs;
-                // Note that fpregs is a pointer.
-                fpregset_t fpregs;
-                __extension__ unsigned long long __reserved1 [8];
-            } mcontext_t;
-         */
+    public interface ucontext_t extends RegisterDumper.Context {
         @CFieldAddress("uc_mcontext.gregs")
-        @Platforms(Platform.LINUX_AMD64.class)
-        GregsPointer uc_mcontext_gregs();
+        @Platforms({Platform.LINUX_AMD64.class})
+        GregsPointer uc_mcontext_linux_amd64_gregs();
+
+        @CFieldAddress("uc_mcontext")
+        @Platforms({Platform.LINUX_AARCH64_BASE.class})
+        mcontext_linux_aarch64_t uc_mcontext_linux_aarch64();
+
+        @CFieldAddress("uc_mcontext")
+        @Platforms({Platform.LINUX_RISCV64.class})
+        mcontext_linux_riscv64_t uc_mcontext_linux_riscv64();
 
         @CField("uc_mcontext")
-        @Platforms(Platform.DARWIN_AMD64.class)
-        MContext64 uc_mcontext();
+        @Platforms({Platform.DARWIN_AMD64.class})
+        AMD64DarwinMContext64 uc_mcontext_darwin_amd64();
 
+        @CField("uc_mcontext")
+        @Platforms({Platform.DARWIN_AARCH64.class})
+        AArch64DarwinMContext64 uc_mcontext_darwin_aarch64();
     }
 
+    public interface AdvancedSignalDispatcher extends CFunctionPointer {
+        @InvokeCFunctionPointer
+        void dispatch(int signum, siginfo_t siginfo, WordPointer opaque);
+    }
+
+    @CConstant
+    public static native int SA_RESTART();
+
+    @CConstant
+    public static native int SA_SIGINFO();
+
+    @CConstant
+    public static native int SA_NODEFER();
+
+    @CStruct(addStructKeyword = true)
+    public interface sigaction extends PointerBase {
+        @CField
+        SignalDispatcher sa_handler();
+
+        @CField
+        void sa_handler(SignalDispatcher value);
+
+        @CField
+        AdvancedSignalDispatcher sa_sigaction();
+
+        @CField
+        void sa_sigaction(AdvancedSignalDispatcher value);
+
+        @CField
+        int sa_flags();
+
+        @CField
+        void sa_flags(int value);
+
+        @CFieldAddress
+        sigset_tPointer sa_mask();
+    }
+
+    @CStruct(addStructKeyword = true)
+    public interface sigevent extends PointerBase {
+        @CField
+        void sigev_notify(int value);
+
+        @CField
+        void sigev_signo(int value);
+    }
+
+    /** Don't call this function directly, use {@link PosixSignalHandlerSupport} instead. */
+    @CFunction(transition = NO_TRANSITION)
+    public static native int sigaction(int signum, sigaction act, sigaction oldact);
+
+    @CEnum
+    @CContext(PosixDirectives.class)
+    public enum SignalEnum {
+        SIGABRT,
+        SIGALRM,
+        SIGBUS,
+        SIGCHLD,
+        SIGCONT,
+        SIGFPE,
+        SIGHUP,
+        SIGILL,
+        SIGINT,
+        SIGIO,
+        SIGIOT,
+        SIGKILL,
+        SIGPIPE,
+        SIGPROF,
+        SIGQUIT,
+        SIGSEGV,
+        SIGSTOP,
+        SIGSYS,
+        SIGTERM,
+        SIGTRAP,
+        SIGTSTP,
+        SIGTTIN,
+        SIGTTOU,
+        SIGURG,
+        SIGUSR1,
+        SIGUSR2,
+        SIGVTALRM,
+        SIGWINCH,
+        SIGXCPU,
+        SIGXFSZ;
+
+        @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
+        public int getCValue() {
+            if (SubstrateUtil.HOSTED) {
+                return CConstant.ValueAccess.get(this, "getCValue0");
+            }
+            return getCValue0();
+        }
+
+        @CEnumValue
+        private native int getCValue0();
+    }
+
+    @Platforms(Platform.LINUX.class)
+    @CEnum
+    @CContext(PosixDirectives.class)
+    public enum LinuxSignalEnum {
+        SIGPOLL,
+        SIGPWR;
+
+        @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
+        public int getCValue() {
+            if (SubstrateUtil.HOSTED) {
+                return CConstant.ValueAccess.get(this, "getCValue0");
+            }
+            return getCValue0();
+        }
+
+        @CEnumValue
+        private native int getCValue0();
+    }
+
+    @Platforms(Platform.DARWIN.class)
+    @CEnum
+    @CContext(PosixDirectives.class)
+    public enum DarwinSignalEnum {
+        SIGINFO,
+        SIGEMT;
+
+        @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
+        public int getCValue() {
+            if (SubstrateUtil.HOSTED) {
+                return CConstant.ValueAccess.get(this, "getCValue0");
+            }
+            return getCValue0();
+        }
+
+        @CEnumValue
+        private native int getCValue0();
+    }
+
+    /**
+     * Used in {@link SubstrateSegfaultHandler}. So, this must not be a {@link CEnum} as this would
+     * result in machine code that needs a proper a heap base.
+     *
+     * Information about Linux's AMD64 struct sigcontext_64 uc_mcontext can be found at
+     * https://github.com/torvalds/linux/blob/9e1ff307c779ce1f0f810c7ecce3d95bbae40896/arch/x86/include/uapi/asm/sigcontext.h#L238
+     */
+    @Platforms({Platform.LINUX_AMD64.class})
+    @CContext(PosixDirectives.class)
+    public static final class GregEnumLinuxAMD64 {
+        @CConstant
+        public static native int REG_R8();
+
+        @CConstant
+        public static native int REG_R9();
+
+        @CConstant
+        public static native int REG_R10();
+
+        @CConstant
+        public static native int REG_R11();
+
+        @CConstant
+        public static native int REG_R12();
+
+        @CConstant
+        public static native int REG_R13();
+
+        @CConstant
+        public static native int REG_R14();
+
+        @CConstant
+        public static native int REG_R15();
+
+        @CConstant
+        public static native int REG_RDI();
+
+        @CConstant
+        public static native int REG_RSI();
+
+        @CConstant
+        public static native int REG_RBP();
+
+        @CConstant
+        public static native int REG_RBX();
+
+        @CConstant
+        public static native int REG_RDX();
+
+        @CConstant
+        public static native int REG_RAX();
+
+        @CConstant
+        public static native int REG_RCX();
+
+        @CConstant
+        public static native int REG_RSP();
+
+        @CConstant
+        public static native int REG_RIP();
+
+        @CConstant
+        public static native int REG_EFL();
+
+        @CConstant
+        public static native int REG_CSGSFS();
+
+        @CConstant
+        public static native int REG_ERR();
+
+        @CConstant
+        public static native int REG_TRAPNO();
+
+        @CConstant
+        public static native int REG_OLDMASK();
+
+        @CConstant
+        public static native int REG_CR2();
+    }
+
+    /**
+     * Information about Linux's AArch64 struct sigcontext uc_mcontext can be found at
+     * https://github.com/torvalds/linux/blob/9e1ff307c779ce1f0f810c7ecce3d95bbae40896/arch/arm64/include/uapi/asm/sigcontext.h#L28
+     */
+    @CStruct(value = "mcontext_t")
+    @Platforms({Platform.LINUX_AARCH64_BASE.class})
+    public interface mcontext_linux_aarch64_t extends PointerBase {
+        @CField
+        long fault_address();
+
+        @CFieldAddress
+        GregsPointer regs();
+
+        @CField
+        long sp();
+
+        @CField
+        long pc();
+
+        @CField
+        long pstate();
+    }
+
+    /**
+     * Information about Linux's RISCV64 struct sigcontext uc_mcontext can be found at
+     * https://github.com/torvalds/linux/blob/9e1ff307c779ce1f0f810c7ecce3d95bbae40896/arch/riscv/include/uapi/asm/sigcontext.h#L17
+     */
+    @CStruct(value = "mcontext_t")
+    @Platforms({Platform.LINUX_RISCV64.class})
+    public interface mcontext_linux_riscv64_t extends PointerBase {
+        @CFieldAddress(value = "__gregs")
+        GregsPointer gregs();
+    }
+
+    /**
+     * Information about Darwin's AMD64 mcontext64 can be found at
+     * https://github.com/apple/darwin-xnu/blob/2ff845c2e033bd0ff64b5b6aa6063a1f8f65aa32/bsd/i386/_mcontext.h#L147
+     *
+     * Information about _STRUCT_X86_THREAD_STATE64 can be found at
+     * https://github.com/apple/darwin-xnu/blob/2ff845c2e033bd0ff64b5b6aa6063a1f8f65aa32/osfmk/mach/i386/_structs.h#L739
+     */
     @Platforms({Platform.DARWIN_AMD64.class})
     @CStruct(value = "__darwin_mcontext64", addStructKeyword = true)
-    public interface MContext64 extends PointerBase {
-
+    public interface AMD64DarwinMContext64 extends PointerBase {
         @CFieldOffset("__ss.__rax")
         int rax_offset();
 
@@ -221,163 +455,46 @@ public class Signal {
 
         @CFieldOffset("__ss.__rflags")
         int efl_offset();
-
     }
-
-    /** Advanced interface to a C signal handler. */
-    public interface AdvancedSignalDispatcher extends CFunctionPointer {
-
-        /** From SIGACTION(2): void (*sa_sigaction)(int, siginfo_t *, void *). */
-        @InvokeCFunctionPointer
-        void dispatch(int signum, siginfo_t siginfo, WordPointer opaque);
-    }
-
-    @Platforms({Platform.LINUX.class, Platform.DARWIN.class})
-    @CConstant
-    public static native int SA_SIGINFO();
-
-    @CStruct(addStructKeyword = true)
-    public interface sigaction extends PointerBase {
-        /*-
-           struct sigaction {
-               void     (*sa_handler)(int);
-               void     (*sa_sigaction)(int, siginfo_t *, void *);
-               sigset_t   sa_mask;
-               int        sa_flags;
-               void     (*sa_restorer)(void);
-           };
-         */
-
-        @CField
-        SignalDispatcher sa_handler();
-
-        @CField
-        void sa_handler(SignalDispatcher value);
-
-        @CField
-        AdvancedSignalDispatcher sa_sigaction();
-
-        @CField
-        void sa_sigaction(AdvancedSignalDispatcher value);
-
-        @CField
-        int sa_flags();
-
-        @CField
-        void sa_flags(int value);
-
-        @CFieldAddress
-        sigset_tPointer sa_mask();
-    }
-
-    /** Advanced signal handler register function. */
-    @CFunction
-    public static native int sigaction(SignalEnum signum, sigaction act, sigaction oldact);
 
     /**
-     * An alphabetical list of the signals on POSIX platforms. The signal numbers come from
-     * {@link #getCValue()}.
+     * Information about Darwin's AArch64 mcontext64 can be found at
+     * https://github.com/apple/darwin-xnu/blob/2ff845c2e033bd0ff64b5b6aa6063a1f8f65aa32/bsd/arm/_mcontext.h#L70
+     *
+     * Information about _STRUCT_ARM_THREAD_STATE64 can be found at
+     * https://github.com/apple/darwin-xnu/blob/2ff845c2e033bd0ff64b5b6aa6063a1f8f65aa32/osfmk/mach/arm/_structs.h#L102
      */
-    @CEnum
-    @CContext(PosixDirectives.class)
-    public enum SignalEnum {
-        /* create core image: abort program (formerly SIGIOT) */
-        SIGABRT,
-        /* terminate process: real-time timer expired */
-        SIGALRM,
-        /* create core image: bus error */
-        SIGBUS,
-        /* discard signal: child status has changed */
-        SIGCHLD,
-        /* discard signal: continue after stop */
-        SIGCONT,
-        /* create core image: floating-point exception */
-        SIGFPE,
-        /* terminate process: terminal line hangup */
-        SIGHUP,
-        /* create core image: illegal instruction */
-        SIGILL,
-        /* terminate process: interrupt program */
-        SIGINT,
-        /* discard signal: I/O is possible on a descriptor (see fcntl(2)) */
-        SIGIO,
-        /* create core image: abort program (replaced by SIGABRT) */
-        SIGIOT,
-        /* terminate process: kill program */
-        SIGKILL,
-        /* terminate process: write on a pipe with no reader */
-        SIGPIPE,
-        /* terminate process: profiling timer alarm (see setitimer(2)) */
-        SIGPROF,
-        /* create core image: quit program */
-        SIGQUIT,
-        /* create core image: segmentation violation */
-        SIGSEGV,
-        /* stop process: stop (cannot be caught or ignored) */
-        SIGSTOP,
-        /* create core image: non-existent system call invoked */
-        SIGSYS,
-        /* terminate process: software termination signal */
-        SIGTERM,
-        /* create core image: trace trap */
-        SIGTRAP,
-        /* stop process: stop signal generated from keyboard */
-        SIGTSTP,
-        /* stop process: background read attempted from control terminal */
-        SIGTTIN,
-        /* stop process: background write attempted to control terminal */
-        SIGTTOU,
-        /* discard signal: urgent condition present on socket */
-        SIGURG,
-        /* terminate process: User defined signal 1 */
-        SIGUSR1,
-        /* terminate process: User defined signal 2 */
-        SIGUSR2,
-        /* terminate process: virtual time alarm (see setitimer(2)) */
-        SIGVTALRM,
-        /* discard signal: Window size change */
-        SIGWINCH,
-        /* terminate process: cpu time limit exceeded (see setrlimit(2)) */
-        SIGXCPU,
-        /* terminate process: file size limit exceeded (see setrlimit(2)) */
-        SIGXFSZ;
+    @Platforms({Platform.DARWIN_AARCH64.class})
+    @CStruct(value = "__darwin_mcontext64", addStructKeyword = true)
+    public interface AArch64DarwinMContext64 extends PointerBase {
+        @CFieldAddress("__ss.__x")
+        GregsPointer regs();
 
-        @CEnumValue
-        public native int getCValue();
+        @CField("__ss.__fp")
+        long fp();
+
+        @CField("__ss.__lr")
+        long lr();
+
+        @CField("__ss.__sp")
+        long sp();
+
+        @CField("__ss.__pc")
+        long pc();
     }
 
-    /** An alphabetical list of Linux-specific signals. */
-    /* Workaround for GR-7858: @Platform @CEnum members. */
-    @Platforms(Platform.LINUX.class)
-    @CEnum
-    @CContext(PosixDirectives.class)
-    public enum LinuxSignalEnum {
-        /* Pollable event (Sys V). Synonym for SIGIO */
-        SIGPOLL,
-        /* Power failure restart (System V). */
-        SIGPWR;
+    public static class NoTransitions {
+        @CFunction(transition = NO_TRANSITION)
+        public static native int kill(int pid, int sig);
 
-        @CEnumValue
-        public native int getCValue();
+        @CFunction(transition = NO_TRANSITION)
+        public static native int sigprocmask(int how, sigset_tPointer set, sigset_tPointer oldset);
+
+        @CFunction(transition = NO_TRANSITION)
+        public static native int sigemptyset(sigset_tPointer set);
+
+        @CFunction(transition = NO_TRANSITION)
+        public static native int sigaddset(sigset_tPointer set, int signum);
+
     }
-
-    /** An alphabetical list of Darwin-specific signals. */
-    /* Workaround for GR-7858: @Platform @CEnum members. */
-    @Platforms(Platform.DARWIN.class)
-    @CEnum
-    @CContext(PosixDirectives.class)
-    public enum DarwinSignalEnum {
-        /* status request from keyboard */
-        SIGINFO,
-        /* EMT instruction */
-        SIGEMT;
-
-        @CEnumValue
-        public native int getCValue();
-    }
-
-    @CFunction
-    public static native int sigemptyset(sigset_tPointer set);
-
-    /* Allow lower-case type names, underscores in names, etc.: Checkstyle: resume. */
 }

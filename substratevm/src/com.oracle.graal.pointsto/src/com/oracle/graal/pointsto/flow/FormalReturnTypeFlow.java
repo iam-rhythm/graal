@@ -24,41 +24,53 @@
  */
 package com.oracle.graal.pointsto.flow;
 
-import org.graalvm.compiler.nodes.ValueNode;
-
-import com.oracle.graal.pointsto.BigBang;
-import com.oracle.graal.pointsto.meta.AnalysisMethod;
+import com.oracle.graal.pointsto.PointsToAnalysis;
 import com.oracle.graal.pointsto.meta.AnalysisType;
+import com.oracle.graal.pointsto.typestate.TypeState;
 
-public class FormalReturnTypeFlow extends TypeFlow<ValueNode> {
+import jdk.vm.ci.code.BytecodePosition;
+import jdk.vm.ci.meta.JavaKind;
 
-    protected final AnalysisMethod method;
-
-    public FormalReturnTypeFlow(ValueNode source, AnalysisType declaredType, AnalysisMethod method) {
-        super(source, declaredType);
-        this.method = method;
+public class FormalReturnTypeFlow extends TypeFlow<BytecodePosition> {
+    public FormalReturnTypeFlow(BytecodePosition source, AnalysisType declaredType) {
+        super(source, filterUncheckedInterface(declaredType));
     }
 
     public FormalReturnTypeFlow(FormalReturnTypeFlow original, MethodFlowsGraph methodFlows) {
         super(original, methodFlows);
-        this.method = original.method;
+    }
+
+    /**
+     * Filters the incoming type state using the declared type.
+     */
+    @Override
+    protected TypeState processInputState(PointsToAnalysis bb, TypeState newState) {
+        if (declaredType.getJavaKind() == JavaKind.Void) {
+            /*
+             * Void ReturnTypeFlow has a use edge from the latest predicate, which can propagate
+             * random values. We only use this edge to signal that the method can return, we don't
+             * care about the actual value. We sanitize it to AnyPrimitive to prevent from
+             * primitive/object collisions in addState.
+             */
+            return newState.isEmpty() ? TypeState.forEmpty() : TypeState.anyPrimitiveState();
+        }
+        /*
+         * Always filter the formal return state with the declared type, even if the type flow
+         * constraints are not relaxed. This avoids imprecision caused by MethodHandle API methods
+         * which elude static type checks.
+         */
+        return declaredTypeFilter(bb, newState, false);
     }
 
     @Override
-    public TypeFlow<ValueNode> copy(BigBang bb, MethodFlowsGraph methodFlows) {
+    public TypeFlow<BytecodePosition> copy(PointsToAnalysis bb, MethodFlowsGraph methodFlows) {
         return new FormalReturnTypeFlow(this, methodFlows);
     }
 
     @Override
-    public AnalysisMethod method() {
-        return method;
+    public String format(boolean withState, boolean withSource) {
+        return "Formal return from " + method().format("%H.%n(%p)") +
+                        (withSource ? " at " + formatSource() : "") +
+                        (withState ? " with state <" + getStateDescription() + ">" : "");
     }
-
-    @Override
-    public String toString() {
-        StringBuilder str = new StringBuilder();
-        str.append("FormalReturn<").append(getState()).append(">");
-        return str.toString();
-    }
-
 }

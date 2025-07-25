@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2016, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,12 +40,13 @@
  */
 package com.oracle.truffle.api.debug;
 
-import com.oracle.truffle.api.interop.TruffleObject;
-import com.oracle.truffle.api.nodes.LanguageInfo;
 import java.util.AbstractCollection;
 import java.util.Iterator;
-import java.util.Map;
-import java.util.Set;
+import java.util.NoSuchElementException;
+
+import com.oracle.truffle.api.interop.InteropLibrary;
+import com.oracle.truffle.api.interop.UnsupportedMessageException;
+import com.oracle.truffle.api.nodes.LanguageInfo;
 
 /**
  * Translation of a map of object properties to a collection of debugger values. The implementation
@@ -53,68 +54,106 @@ import java.util.Set;
  */
 final class ValuePropertiesCollection extends AbstractCollection<DebugValue> {
 
+    static final InteropLibrary INTEROP = InteropLibrary.getFactory().getUncached();
+
     private final DebuggerSession session;
     private final LanguageInfo language;
-    private final TruffleObject object;
-    private final Map<Object, Object> map;
-    private final Set<Map.Entry<Object, Object>> entrySet;
+    private final Object object;
     private final DebugScope scope;
+    private final Object keys;
+    private final String receiverName;
 
-    ValuePropertiesCollection(DebuggerSession session, LanguageInfo language, TruffleObject object,
-                    Map<Object, Object> map, Set<Map.Entry<Object, Object>> entrySet, DebugScope scope) {
+    ValuePropertiesCollection(DebuggerSession session, LanguageInfo language, Object object, Object keys, String receiverName, DebugScope scope) {
         this.session = session;
         this.language = language;
         this.object = object;
-        this.map = map;
-        this.entrySet = entrySet;
+        this.keys = keys;
         this.scope = scope;
+        this.receiverName = receiverName;
     }
 
     @Override
     public Iterator<DebugValue> iterator() {
-        return new PropertiesIterator(object, entrySet.iterator());
+        return new PropertiesIterator(receiverName);
     }
 
     @Override
     public int size() {
-        return entrySet.size();
+        try {
+            int size = (int) INTEROP.getArraySize(keys);
+            if (receiverName != null) { // Filter out the receiver
+                size--;
+            }
+            return size;
+        } catch (UnsupportedMessageException e) {
+            return 0;
+        }
     }
 
     DebugValue get(String name) {
-        if (!map.containsKey(name)) {
+        if (name.equals(receiverName)) {
             return null;
         }
-        Object value = map.get(name);
-        if (value == null) {
-            return null;
+        if (INTEROP.isMemberExisting(object, name)) {
+            return new DebugValue.ObjectMemberValue(session, language, scope, object, name);
         }
-        return new DebugValue.PropertyNamedValue(session, language, object, map, name, scope);
+        return null;
     }
 
     private final class PropertiesIterator implements Iterator<DebugValue> {
 
-        private final TruffleObject object;
-        private final Iterator<Map.Entry<Object, Object>> entries;
+        private final String ignoredName;
+        private long currentIndex = 0L;
+        private String nextMember;
 
-        PropertiesIterator(TruffleObject object, Iterator<Map.Entry<Object, Object>> entries) {
-            this.object = object;
-            this.entries = entries;
+        PropertiesIterator(String ignoredName) {
+            this.ignoredName = ignoredName;
         }
 
         @Override
         public boolean hasNext() {
-            return entries.hasNext();
+            if (ignoredName == null) {
+                return INTEROP.isArrayElementExisting(keys, currentIndex);
+            } else {
+                if (nextMember != null) {
+                    return true;
+                }
+                while (INTEROP.isArrayElementExisting(keys, currentIndex)) {
+                    nextMember = readNext();
+                    if (!ignoredName.equals(nextMember)) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+        }
+
+        private String readNext() {
+            try {
+                Object key = INTEROP.readArrayElement(keys, currentIndex);
+                String member = INTEROP.asString(key);
+                this.currentIndex++;
+                return member;
+            } catch (ThreadDeath td) {
+                throw td;
+            } catch (Throwable ex) {
+                throw DebugException.create(session, ex, language);
+            }
         }
 
         @Override
         public DebugValue next() {
-            try {
-                return new DebugValue.PropertyValue(session, language, object, entries.next(), scope);
-            } catch (ThreadDeath td) {
-                throw td;
-            } catch (Throwable ex) {
-                throw new DebugException(session, ex, language, null, true, null);
+            if (!hasNext()) {
+                throw new NoSuchElementException();
             }
+            String member;
+            if (nextMember != null) {
+                member = nextMember;
+                nextMember = null;
+            } else {
+                member = readNext();
+            }
+            return new DebugValue.ObjectMemberValue(session, language, scope, object, member);
         }
 
         @Override

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,13 +40,13 @@
  */
 package com.oracle.truffle.dsl.processor.verify;
 
-import com.oracle.truffle.api.CompilerDirectives;
-import com.oracle.truffle.dsl.processor.ExpectError;
 import java.util.Set;
+
 import javax.annotation.processing.AbstractProcessor;
 import javax.annotation.processing.RoundEnvironment;
 import javax.annotation.processing.SupportedAnnotationTypes;
 import javax.lang.model.SourceVersion;
+import javax.lang.model.element.AnnotationMirror;
 import javax.lang.model.element.Element;
 import javax.lang.model.element.TypeElement;
 import javax.lang.model.element.VariableElement;
@@ -55,7 +55,12 @@ import javax.lang.model.type.TypeKind;
 import javax.lang.model.type.TypeMirror;
 import javax.tools.Diagnostic;
 
-@SupportedAnnotationTypes("com.oracle.truffle.api.CompilerDirectives.CompilationFinal")
+import com.oracle.truffle.dsl.processor.ExpectError;
+import com.oracle.truffle.dsl.processor.ProcessorContext;
+import com.oracle.truffle.dsl.processor.TruffleTypes;
+import com.oracle.truffle.dsl.processor.java.ElementUtils;
+
+@SupportedAnnotationTypes(TruffleTypes.CompilerDirectives_CompilationFinal_Name)
 public class VerifyCompilationFinalProcessor extends AbstractProcessor {
 
     @Override
@@ -66,25 +71,29 @@ public class VerifyCompilationFinalProcessor extends AbstractProcessor {
     @Override
     public boolean process(Set<? extends TypeElement> annotations, RoundEnvironment roundEnv) {
         if (roundEnv.processingOver()) {
-            return false;
+            return true;
         }
-        for (Element element : roundEnv.getElementsAnnotatedWith(CompilerDirectives.CompilationFinal.class)) {
-            if (!element.getKind().isField()) {
-                emitError(element, String.format("Only fields can be annotated with %s.", CompilerDirectives.CompilationFinal.class.getSimpleName()));
-                continue;
+        try (ProcessorContext context = ProcessorContext.enter(processingEnv)) {
+            TruffleTypes types = context.getTypes();
+            for (Element element : roundEnv.getElementsAnnotatedWith(ElementUtils.castTypeElement(types.CompilerDirectives_CompilationFinal))) {
+                if (!element.getKind().isField()) {
+                    emitError(element, String.format("Only fields can be annotated with %s.", types.CompilerDirectives_CompilationFinal.asElement().getSimpleName().toString()));
+                    continue;
+                }
+                if (!checkDimensions((VariableElement) element)) {
+                    continue;
+                }
+                assertNoErrorExpected(element);
             }
-            if (!checkDimensions((VariableElement) element)) {
-                continue;
-            }
-            assertNoErrorExpected(element);
+            return true;
         }
-        return false;
     }
 
     private boolean checkDimensions(final VariableElement field) {
-        final CompilerDirectives.CompilationFinal compFin = field.getAnnotation(CompilerDirectives.CompilationFinal.class);
+        TruffleTypes types = ProcessorContext.getInstance().getTypes();
+        final AnnotationMirror compFin = ElementUtils.findAnnotationMirror(field, types.CompilerDirectives_CompilationFinal);
         if (compFin != null) {
-            final int compFinDimensions = compFin.dimensions();
+            final int compFinDimensions = ElementUtils.getAnnotationValue(Integer.class, compFin, "dimensions");
             final int fieldDimensions = dimension(field.asType());
             if (compFinDimensions < -1) {
                 emitError(field, "@CompilationFinal.dimensions cannot be negative.");
@@ -115,18 +124,18 @@ public class VerifyCompilationFinalProcessor extends AbstractProcessor {
     }
 
     void assertNoErrorExpected(final Element originatingElm) {
-        ExpectError.assertNoErrorExpected(processingEnv, originatingElm);
+        ExpectError.assertNoErrorExpected(originatingElm);
     }
 
     private void emitError(final Element originatingElm, final String message) {
-        if (ExpectError.isExpectedError(processingEnv, originatingElm, message)) {
+        if (ExpectError.isExpectedError(originatingElm, message)) {
             return;
         }
         processingEnv.getMessager().printMessage(Diagnostic.Kind.ERROR, message, originatingElm);
     }
 
     private void emitWarning(final Element originatingElm, final String message) {
-        if (ExpectError.isExpectedError(processingEnv, originatingElm, message)) {
+        if (ExpectError.isExpectedError(originatingElm, message)) {
             return;
         }
         processingEnv.getMessager().printMessage(Diagnostic.Kind.WARNING, message, originatingElm);

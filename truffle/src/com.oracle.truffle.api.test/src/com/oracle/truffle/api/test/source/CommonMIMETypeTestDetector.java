@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -41,22 +41,74 @@
 package com.oracle.truffle.api.test.source;
 
 import java.io.IOException;
-import java.nio.file.Path;
-import java.nio.file.spi.FileTypeDetector;
+import java.nio.charset.Charset;
+import java.nio.charset.IllegalCharsetNameException;
+import java.nio.charset.UnsupportedCharsetException;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
-public final class CommonMIMETypeTestDetector extends FileTypeDetector {
+import org.junit.BeforeClass;
+
+import com.oracle.truffle.api.TruffleFile;
+import com.oracle.truffle.api.TruffleLanguage;
+import com.oracle.truffle.api.test.polyglot.ProxyLanguage;
+import com.oracle.truffle.tck.tests.TruffleTestAssumptions;
+
+public final class CommonMIMETypeTestDetector implements TruffleFile.FileTypeDetector {
+
+    private static final Pattern DOC_TYPE_PATTERN = Pattern.compile("<!DOCTYPE\\s+(\\S+)\\s+");
+    private static final Pattern ENCODING_PATTERN = Pattern.compile("<\\?xml version=\"1.0\" encoding=\"(.*)\"\\?>");
+
+    @BeforeClass
+    public static void runWithWeakEncapsulationOnly() {
+        TruffleTestAssumptions.assumeWeakEncapsulation();
+    }
+
     @Override
-    public String probeContentType(Path path) throws IOException {
-        if (path.getFileName().toString().endsWith(".java")) {
-            return "text/x-java";
-        }
-        if (path.getFileName().toString().endsWith(".tjs")) {
-            return "application/test-js";
-        }
-        if (path.getFileName().toString().endsWith(".txt")) {
-            return "text/plain";
+    public String findMimeType(TruffleFile file) throws IOException {
+        String name = file.getName();
+        if (name != null) {
+            if (name.endsWith(".java")) {
+                return "text/x-java";
+            }
+            if (name.endsWith(".tjs")) {
+                return "application/test-js";
+            }
+            if (name.endsWith(".txt")) {
+                return "text/plain";
+            }
+            if (name.endsWith(".xml")) {
+                String content = new String(file.readAllBytes(), "UTF-8");
+                Matcher m = DOC_TYPE_PATTERN.matcher(content);
+                if (m.find()) {
+                    String docType = m.group(1);
+                    return "text/" + docType + "+xml";
+                }
+                return "text/xml";
+            }
         }
         return null;
     }
 
+    @Override
+    public Charset findEncoding(TruffleFile file) throws IOException {
+        String name = file.getName();
+        if (name.endsWith(".xml")) {
+            String content = new String(file.readAllBytes(), "UTF-8");
+            Matcher m = ENCODING_PATTERN.matcher(content);
+            if (m.find()) {
+                String encoding = m.group(1);
+                try {
+                    return Charset.forName(encoding);
+                } catch (IllegalCharsetNameException | UnsupportedCharsetException e) {
+                    // pass and return null
+                }
+            }
+        }
+        return null;
+    }
+
+    @TruffleLanguage.Registration(id = "TestFooXML", name = "", characterMimeTypes = "text/foo+xml", fileTypeDetectors = {CommonMIMETypeTestDetector.class})
+    public static class TestFooXMLLanguage extends ProxyLanguage {
+    }
 }

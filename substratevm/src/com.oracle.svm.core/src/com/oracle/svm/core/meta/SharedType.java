@@ -24,6 +24,8 @@
  */
 package com.oracle.svm.core.meta;
 
+import org.graalvm.word.WordBase;
+
 import com.oracle.svm.core.hub.DynamicHub;
 import com.oracle.svm.core.util.VMError;
 
@@ -31,6 +33,8 @@ import jdk.vm.ci.meta.Assumptions.AssumptionResult;
 import jdk.vm.ci.meta.JavaKind;
 import jdk.vm.ci.meta.ResolvedJavaMethod;
 import jdk.vm.ci.meta.ResolvedJavaType;
+
+import java.util.List;
 
 /**
  * The type interface which is both used in the hosted and substrate worlds.
@@ -40,35 +44,18 @@ public interface SharedType extends ResolvedJavaType {
     DynamicHub getHub();
 
     /**
-     * Gets the start of the type-ID range for instance-of checks. If the type-ID of the object in
-     * question is within this range then the object is an instance of this type.
-     * <p>
-     * Now if there is not a single type-ID range to be used for the check (e.g. for interface
-     * types), then the instance-of check must be done with a bit test. In this case
-     * {@link #getInstanceOfNumTypeIDs()} return -1 and this method returns the bit number to check
-     * in the bit-set of the object's {@link DynamicHub}.
-     */
-    int getInstanceOfFromTypeID();
-
-    /**
-     * Returns the size of the type-ID range for instance-of checks. Specifically:
-     * <ul>
-     * <li>0: there are no instantiated objects of that type and the instance-of check fails always
-     * </li>
-     * <li>-1: the instance-of check must be done with a bit test and
-     * {@link #getInstanceOfFromTypeID()} returns the bit number</li>
-     * <li>< -1: this type should not be in any type checks</li>
-     * </ul>
-     *
-     * @see #getInstanceOfFromTypeID()
-     */
-    int getInstanceOfNumTypeIDs();
-
-    /**
      * The kind of the field in memory (in contrast to {@link #getJavaKind()}, which is the kind of
      * the field on the Java type system level).
      */
     JavaKind getStorageKind();
+
+    int getTypeID();
+
+    /**
+     * Returns true if this type is part of the word type hierarchy, i.e, implements
+     * {@link WordBase}.
+     */
+    boolean isWordType();
 
     @Override
     default ResolvedJavaMethod resolveMethod(ResolvedJavaMethod method, ResolvedJavaType callerType) {
@@ -76,7 +63,7 @@ public interface SharedType extends ResolvedJavaType {
          * Not needed on Substrate VM for now, and we do not have the necessary information
          * available to implement it. method.getImplementations() does not contain abstract methods.
          */
-        throw VMError.unimplemented();
+        throw VMError.intentionallyUnimplemented(); // ExcludeFromJacocoGeneratedReport
     }
 
     @Override
@@ -114,5 +101,13 @@ public interface SharedType extends ResolvedJavaType {
             return new AssumptionResult<>(implementations[0]);
         }
         return null;
+    }
+
+    @Override
+    default List<ResolvedJavaMethod> getAllMethods(boolean forceLink) {
+        /*
+         * Not needed on SubstrateVM for now.
+         */
+        throw VMError.intentionallyUnimplemented(); // ExcludeFromJacocoGeneratedReport
     }
 }

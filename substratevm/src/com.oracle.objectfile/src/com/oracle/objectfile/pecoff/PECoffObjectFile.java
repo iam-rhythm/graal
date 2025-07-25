@@ -25,13 +25,13 @@
 package com.oracle.objectfile.pecoff;
 
 import java.nio.ByteOrder;
-import java.util.EnumSet;
-import java.util.List;
 import java.util.ArrayList;
+import java.util.EnumSet;
+import java.util.HashSet;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.HashSet;
 
 import com.oracle.objectfile.BuildDependency;
 import com.oracle.objectfile.ElementImpl;
@@ -39,11 +39,14 @@ import com.oracle.objectfile.LayoutDecision;
 import com.oracle.objectfile.LayoutDecisionMap;
 import com.oracle.objectfile.ObjectFile;
 import com.oracle.objectfile.SymbolTable;
+import com.oracle.objectfile.debuginfo.DebugInfoProvider;
 import com.oracle.objectfile.io.AssemblyBuffer;
 import com.oracle.objectfile.io.OutputAssembler;
-
 import com.oracle.objectfile.pecoff.PECoff.IMAGE_FILE_HEADER;
 import com.oracle.objectfile.pecoff.PECoff.IMAGE_SECTION_HEADER;
+import com.oracle.objectfile.pecoff.cv.CVDebugInfo;
+import com.oracle.objectfile.pecoff.cv.CVSymbolSectionImpl;
+import com.oracle.objectfile.pecoff.cv.CVTypeSectionImpl;
 
 /**
  * Represents a PECoff object file.
@@ -68,9 +71,10 @@ public class PECoffObjectFile extends ObjectFile {
     private PECoffSymtab symtab;
     private PECoffDirectiveSection directives;
     private boolean runtimeDebugInfoGeneration;
-    private String mainEntryPoint;
 
-    private PECoffObjectFile(boolean runtimeDebugInfoGeneration) {
+    @SuppressWarnings("this-escape")
+    private PECoffObjectFile(int pageSize, boolean runtimeDebugInfoGeneration) {
+        super(pageSize);
         this.runtimeDebugInfoGeneration = runtimeDebugInfoGeneration;
         // Create the elements of an empty PECoff file:
         // 1. create header
@@ -83,8 +87,9 @@ public class PECoffObjectFile extends ObjectFile {
         directives = new PECoffDirectiveSection(".drectve", 1);
     }
 
-    public PECoffObjectFile() {
-        this(false);
+    @SuppressWarnings("this-escape")
+    public PECoffObjectFile(int pageSize) {
+        this(pageSize, false);
     }
 
     @Override
@@ -105,15 +110,7 @@ public class PECoffObjectFile extends ObjectFile {
     @Override
     public Symbol createDefinedSymbol(String name, Element baseSection, long position, int size, boolean isCode, boolean isGlobal) {
         PECoffSymtab st = createSymbolTable();
-        String symName = name;
-
-        // Windows doesn't have symbol aliases, change the entrypoint symbol name to "main"
-        if (mainEntryPoint != null) {
-            if (mainEntryPoint.equals(symName)) {
-                symName = "main";
-            }
-        }
-        return st.newDefinedEntry(symName, (Section) baseSection, position, size, isGlobal, isCode);
+        return st.newDefinedEntry(name, (Section) baseSection, position, size, isGlobal, isCode);
     }
 
     @Override
@@ -129,7 +126,7 @@ public class PECoffObjectFile extends ObjectFile {
 
     @Override
     public PECoffUserDefinedSection newUserDefinedSection(Segment segment, String name, int alignment, ElementImpl impl) {
-        PECoffUserDefinedSection userDefined = new PECoffUserDefinedSection(this, name, alignment, impl);
+        PECoffUserDefinedSection userDefined = new PECoffUserDefinedSection(this, name, alignment, impl, EnumSet.of(PECoffSectionFlag.INITIALIZED_DATA, PECoffSectionFlag.READ));
         assert userDefined.getImpl() == impl;
         if (segment != null) {
             getOrCreateSegment(segment.getName(), name, true, false).add(userDefined);
@@ -388,6 +385,7 @@ public class PECoffObjectFile extends ObjectFile {
         READ(IMAGE_SECTION_HEADER.IMAGE_SCN_MEM_READ),
         WRITE(IMAGE_SECTION_HEADER.IMAGE_SCN_MEM_WRITE),
         EXECUTE(IMAGE_SECTION_HEADER.IMAGE_SCN_MEM_EXECUTE),
+        DISCARDABLE(IMAGE_SECTION_HEADER.IMAGE_SCN_MEM_DISCARDABLE),
         LINKER(IMAGE_SECTION_HEADER.IMAGE_SCN_LNK_INFO | IMAGE_SECTION_HEADER.IMAGE_SCN_LNK_REMOVE);
 
         private final int value;
@@ -648,11 +646,6 @@ public class PECoffObjectFile extends ObjectFile {
         byteOrder = byteorder;
     }
 
-    @Override
-    public void setMainEntryPoint(String name) {
-        mainEntryPoint = name;
-    }
-
     public static ByteOrder getTargetByteOrder() {
         return byteOrder;
     }
@@ -671,15 +664,15 @@ public class PECoffObjectFile extends ObjectFile {
         return machine;
     }
 
-    public PECoffRelocationTable getOrCreateRelocSection(PECoffSymtab syms, boolean withExplicitAddends) {
+    public PECoffRelocationTable getOrCreateRelocSection(PECoffSymtab syms) {
         Element el = elementForName(".reloctab");
         PECoffRelocationTable rs;
         if (el == null) {
-            rs = new PECoffRelocationTable(this, ".reloctab", syms, withExplicitAddends);
+            rs = new PECoffRelocationTable(this, ".reloctab", syms);
         } else if (el instanceof PECoffRelocationTable) {
             rs = (PECoffRelocationTable) el;
         } else {
-            throw new IllegalStateException("section exists but is not an PECoffRelocationTable");
+            throw new IllegalStateException("Section exists but is not an PECoffRelocationTable");
         }
         return rs;
     }
@@ -696,5 +689,42 @@ public class PECoffObjectFile extends ObjectFile {
     @Override
     protected int getMinimumFileSize() {
         return 0;
+    }
+
+    @Override
+    public Section newDebugSection(String name, ElementImpl impl) {
+        PECoffSection coffSection = (PECoffSection) super.newDebugSection(name, impl);
+        coffSection.getFlags().add(PECoffSectionFlag.DISCARDABLE);
+        coffSection.getFlags().add(PECoffSectionFlag.READ);
+        coffSection.getFlags().add(PECoffSectionFlag.INITIALIZED_DATA);
+        return coffSection;
+    }
+
+    @Override
+    public void installDebugInfo(DebugInfoProvider debugInfoProvider) {
+        CVDebugInfo cvDebugInfo = new CVDebugInfo(getMachine(), getByteOrder());
+
+        // we need an implementation for each section
+        CVSymbolSectionImpl cvSymbolSectionImpl = cvDebugInfo.getCVSymbolSection();
+        CVTypeSectionImpl cvTypeSectionImpl = cvDebugInfo.getCVTypeSection();
+
+        // now we can create the section elements with empty content
+        newDebugSection(cvSymbolSectionImpl.getSectionName(), cvSymbolSectionImpl);
+        newDebugSection(cvTypeSectionImpl.getSectionName(), cvTypeSectionImpl);
+
+        // the byte[] for each implementation's content are created and
+        // written under getOrDecideContent. doing that ensures that all
+        // dependent sections are filled in and then sized according to the
+        // declared dependencies. however, if we leave it at that then
+        // associated reloc sections only get created when the first reloc
+        // is inserted during content write that's too late for them to have
+        // layout constraints included in the layout decision set and causes
+        // an NPE during reloc section write. so we need to create the relevant
+        // reloc sections here in advance
+        cvSymbolSectionImpl.getOrCreateRelocationElement(0);
+        cvTypeSectionImpl.getOrCreateRelocationElement(0);
+
+        // ok now we can populate the implementations
+        cvDebugInfo.installDebugInfo(debugInfoProvider);
     }
 }

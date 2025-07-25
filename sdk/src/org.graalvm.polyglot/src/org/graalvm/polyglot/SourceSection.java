@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,7 +40,7 @@
  */
 package org.graalvm.polyglot;
 
-import org.graalvm.polyglot.impl.AbstractPolyglotImpl.AbstractSourceSectionImpl;
+import org.graalvm.polyglot.impl.AbstractPolyglotImpl.AbstractSourceSectionDispatch;
 
 /**
  * Description of contiguous section of text within a {@link Source} of program code.; supports
@@ -50,18 +50,18 @@ import org.graalvm.polyglot.impl.AbstractPolyglotImpl.AbstractSourceSectionImpl;
  * {@link #isAvailable() Unavailable} source sections are compared by identity. Source sections are
  * designed to be used as keys in hash maps.
  *
- * @since 1.0
+ * @since 19.0
  */
 public final class SourceSection {
 
-    static volatile AbstractSourceSectionImpl IMPL;
-
     final Source source;
-    final Object impl;
+    final AbstractSourceSectionDispatch dispatch;
+    final Object receiver;
 
-    SourceSection(Source source, Object impl) {
+    SourceSection(Source source, AbstractSourceSectionDispatch dispatch, Object receiver) {
         this.source = source;
-        this.impl = impl;
+        this.dispatch = dispatch;
+        this.receiver = receiver;
     }
 
     /**
@@ -70,10 +70,10 @@ public final class SourceSection {
      * Unavailable source sections return the same indices and lengths as empty source sections
      * starting at character index <code>0</code>.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public boolean isAvailable() {
-        return IMPL.isAvailable(impl);
+        return dispatch.isAvailable(receiver);
     }
 
     /**
@@ -82,10 +82,10 @@ public final class SourceSection {
      * valid line numbers, when <code>false</code>, {@link #getStartLine()} and
      * {@link #getEndLine()} return <code>1</code>.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public boolean hasLines() {
-        return IMPL.hasLines(impl);
+        return dispatch.hasLines(receiver);
     }
 
     /**
@@ -95,10 +95,10 @@ public final class SourceSection {
      * <code>false</code>, {@link #getStartColumn()} and {@link #getEndColumn()} return
      * <code>1</code>.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public boolean hasColumns() {
-        return IMPL.hasColumns(impl);
+        return dispatch.hasColumns(receiver);
     }
 
     /**
@@ -108,17 +108,17 @@ public final class SourceSection {
      * <code>false</code>, {@link #getCharIndex()}, {@link #getCharEndIndex()} and
      * {@link #getCharLength()} return <code>0</code>.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public boolean hasCharIndex() {
-        return IMPL.hasCharIndex(impl);
+        return dispatch.hasCharIndex(receiver);
     }
 
     /**
      * Representation of the source program that contains this section.
      *
      * @return the source object.
-     * @since 1.0
+     * @since 19.0
      */
     public Source getSource() {
         return source;
@@ -131,10 +131,10 @@ public final class SourceSection {
      *
      * @return the starting line number.
      * @see #hasLines()
-     * @since 1.0
+     * @since 19.0
      */
     public int getStartLine() {
-        return IMPL.getStartLine(impl);
+        return dispatch.getStartLine(receiver);
     }
 
     /**
@@ -144,10 +144,10 @@ public final class SourceSection {
      *
      * @return the starting column number.
      * @see #hasColumns()
-     * @since 1.0
+     * @since 19.0
      */
     public int getStartColumn() {
-        return IMPL.getStartColumn(impl);
+        return dispatch.getStartColumn(receiver);
     }
 
     /**
@@ -157,10 +157,10 @@ public final class SourceSection {
      *
      * @return the starting line number.
      * @see #hasLines()
-     * @since 1.0
+     * @since 19.0
      */
     public int getEndLine() {
-        return IMPL.getEndLine(impl);
+        return dispatch.getEndLine(receiver);
     }
 
     /**
@@ -170,10 +170,10 @@ public final class SourceSection {
      *
      * @return the starting column number.
      * @see #hasColumns()
-     * @since 1.0
+     * @since 19.0
      */
     public int getEndColumn() {
-        return IMPL.getEndColumn(impl);
+        return dispatch.getEndColumn(receiver);
     }
 
     /**
@@ -184,10 +184,10 @@ public final class SourceSection {
      *
      * @return the starting character index.
      * @see #hasCharIndex()
-     * @since 1.0
+     * @since 19.0
      */
     public int getCharIndex() {
-        return IMPL.getCharIndex(impl);
+        return dispatch.getCharIndex(receiver);
     }
 
     /**
@@ -198,10 +198,10 @@ public final class SourceSection {
      *
      * @return the number of characters in the section.
      * @see #hasCharIndex()
-     * @since 1.0
+     * @since 19.0
      */
     public int getCharLength() {
-        return IMPL.getCharLength(impl);
+        return dispatch.getCharLength(receiver);
     }
 
     /**
@@ -212,19 +212,19 @@ public final class SourceSection {
      *
      * @return the end position of the section.
      * @see #hasCharIndex()
-     * @since 1.0
+     * @since 19.0
      */
     public int getCharEndIndex() {
-        return IMPL.getCharEndIndex(impl);
+        return dispatch.getCharEndIndex(receiver);
     }
 
     /**
-     * @since 1.0
+     * @since 19.0
      * @deprecated use {@link #getCharacters()} instead.
      */
-    @Deprecated
+    @Deprecated(since = "19.0")
     public CharSequence getCode() {
-        return IMPL.getCode(impl);
+        return dispatch.getCode(receiver);
     }
 
     /**
@@ -232,10 +232,10 @@ public final class SourceSection {
      * of bounds or {@link #isAvailable() unavailable} source sections.
      *
      * @return the code as a string.
-     * @since 1.0
+     * @since 19.0
      */
     public CharSequence getCharacters() {
-        return IMPL.getCode(impl);
+        return dispatch.getCode(receiver);
     }
 
     /**
@@ -243,20 +243,20 @@ public final class SourceSection {
      * debugging purposes only.
      *
      * @see #getCharacters()
-     * @since 1.0
+     * @since 19.0
      */
     @Override
     public String toString() {
-        return IMPL.toString(impl);
+        return dispatch.toString(receiver);
     }
 
-    /** @since 1.0 or earlier */
+    /** @since 19.0 or earlier */
     @Override
     public int hashCode() {
-        return IMPL.hashCode(impl);
+        return dispatch.hashCode(receiver);
     }
 
-    /** @since 1.0 or earlier */
+    /** @since 19.0 or earlier */
     @Override
     public boolean equals(Object obj) {
         if (this == obj) {
@@ -265,9 +265,9 @@ public final class SourceSection {
 
         Object otherImpl = obj;
         if (otherImpl instanceof SourceSection) {
-            otherImpl = ((SourceSection) obj).impl;
+            otherImpl = ((SourceSection) obj).receiver;
         }
-        return IMPL.equals(impl, otherImpl);
+        return dispatch.equals(receiver, otherImpl);
     }
 
 }

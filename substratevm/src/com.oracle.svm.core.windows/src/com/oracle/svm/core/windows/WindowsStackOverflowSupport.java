@@ -24,43 +24,41 @@
  */
 package com.oracle.svm.core.windows;
 
-import org.graalvm.nativeimage.Feature;
-import org.graalvm.nativeimage.ImageSingletons;
-import org.graalvm.nativeimage.Platform;
-import org.graalvm.nativeimage.Platforms;
+import jdk.graal.compiler.word.Word;
 import org.graalvm.nativeimage.StackValue;
 import org.graalvm.nativeimage.c.struct.SizeOf;
+import org.graalvm.nativeimage.c.type.WordPointer;
+import org.graalvm.word.Pointer;
 import org.graalvm.word.UnsignedWord;
 
-import com.oracle.svm.core.annotate.AutomaticFeature;
-import com.oracle.svm.core.annotate.Uninterruptible;
+import com.oracle.svm.core.Uninterruptible;
+import com.oracle.svm.core.feature.AutomaticallyRegisteredImageSingleton;
 import com.oracle.svm.core.stack.StackOverflowCheck;
-import com.oracle.svm.core.windows.headers.WinBase;
+import com.oracle.svm.core.windows.headers.MemoryAPI;
 
-@Platforms({Platform.WINDOWS.class})
-class WindowsStackOverflowSupport implements StackOverflowCheck.OSSupport {
-
-    @Uninterruptible(reason = "Called while thread is being attached to the VM, i.e., when the thread state is not yet set up.")
+@AutomaticallyRegisteredImageSingleton(StackOverflowCheck.PlatformSupport.class)
+final class WindowsStackOverflowSupport implements StackOverflowCheck.PlatformSupport {
     @Override
-    public UnsignedWord lookupStackEnd() {
-        WinBase.MEMORY_BASIC_INFORMATION minfo = StackValue.get(WinBase.MEMORY_BASIC_INFORMATION.class);
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public boolean lookupStack(WordPointer stackBasePtr, WordPointer stackEndPtr) {
+        int sizeOfMInfo = SizeOf.get(MemoryAPI.MEMORY_BASIC_INFORMATION.class);
+        MemoryAPI.MEMORY_BASIC_INFORMATION minfo = StackValue.get(sizeOfMInfo);
+        MemoryAPI.VirtualQuery(minfo, minfo, Word.unsigned(sizeOfMInfo));
+        Pointer bottom = (Pointer) minfo.AllocationBase();
+        stackEndPtr.write(bottom);
+        UnsignedWord stackSize = minfo.RegionSize();
 
-        /*
-         * We find the boundary of the stack by looking at the base of the memory block that
-         * contains a (random known) address of the current stack. The stack-allocated memory where
-         * the function result is placed in is just the easiest way to get such an address.
-         */
-        WinBase.VirtualQuery(minfo, minfo, SizeOf.unsigned(WinBase.MEMORY_BASIC_INFORMATION.class));
+        /* Add up the sizes of all the regions with the same AllocationBase. */
+        while (true) {
+            MemoryAPI.VirtualQuery(bottom.add(stackSize), minfo, Word.unsigned(sizeOfMInfo));
+            if (bottom.equal(minfo.AllocationBase())) {
+                stackSize = stackSize.add(minfo.RegionSize());
+            } else {
+                break;
+            }
+        }
 
-        return minfo.AllocationBase();
-    }
-}
-
-@Platforms({Platform.WINDOWS.class})
-@AutomaticFeature
-class WindowsStackOverflowSupportFeature implements Feature {
-    @Override
-    public void afterRegistration(AfterRegistrationAccess access) {
-        ImageSingletons.add(StackOverflowCheck.OSSupport.class, new WindowsStackOverflowSupport());
+        stackBasePtr.write(bottom.add(stackSize));
+        return true;
     }
 }

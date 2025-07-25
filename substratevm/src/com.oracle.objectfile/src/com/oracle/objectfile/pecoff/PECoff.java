@@ -56,7 +56,7 @@ final class PECoff {
 
         static int totalsize = 20;
 
-        /**
+        /*
          * IMAGE_FILE_HEADER defines
          */
 
@@ -94,7 +94,7 @@ final class PECoff {
 
         static int totalsize = 40;
 
-        /**
+        /*
          * IMAGE_SECTION_HEADER defines
          */
 
@@ -124,6 +124,7 @@ final class PECoff {
 
         static final int IMAGE_SCN_LNK_NRELOC_OVFL        = 0x01000000;
 
+        static final int IMAGE_SCN_MEM_DISCARDABLE        = 0x02000000;
         static final int IMAGE_SCN_MEM_SHARED             = 0x10000000;
         static final int IMAGE_SCN_MEM_EXECUTE            = 0x20000000;
         static final int IMAGE_SCN_MEM_READ               = 0x40000000;
@@ -194,15 +195,17 @@ final class PECoff {
          * Relocation types
          */
         static final int IMAGE_REL_AMD64_ABSOLUTE = 0x0;
-        static final int IMAGE_REL_AMD64_ADDR32   = 0x2;
         static final int IMAGE_REL_AMD64_ADDR64   = 0x1;
+        static final int IMAGE_REL_AMD64_ADDR32   = 0x2;
+        static final int IMAGE_REL_AMD64_ADDR32NB = 0x3;
         static final int IMAGE_REL_AMD64_REL32    = 0x4;
         static final int IMAGE_REL_AMD64_REL32_1  = 0x5;
         static final int IMAGE_REL_AMD64_REL32_2  = 0x6;
         static final int IMAGE_REL_AMD64_REL32_3  = 0x7;
         static final int IMAGE_REL_AMD64_REL32_4  = 0x8;
         static final int IMAGE_REL_AMD64_REL32_5  = 0x9;
-
+        static final int IMAGE_REL_AMD64_SECTION  = 0xa;
+        static final int IMAGE_REL_AMD64_SECREL   = 0xb;
     }
     //@formatter:on
     // Checkstyle: resume

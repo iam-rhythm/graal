@@ -24,47 +24,16 @@
  */
 package com.oracle.svm.core.heap;
 
-import com.oracle.svm.core.annotate.RestrictHeapAccess;
-
 /**
  * Supply a closure to be applied to Objects.
  *
  */
 public interface ObjectVisitor {
-
-    /**
-     * Called before any Objects are visited. For example, from the client who creates the
-     * ObjectVisitor.
-     *
-     * @return true if visiting should continue, false if visiting should stop.
-     */
-    default boolean prologue() {
-        return true;
-    }
-
     /**
      * Visit an Object.
      *
      * @param o The Object to be visited.
-     * @return true if visiting should continue, false if visiting should stop.
      */
     @RestrictHeapAccess(access = RestrictHeapAccess.Access.NO_ALLOCATION, reason = "Must not allocate while visiting the heap.")
-    boolean visitObject(Object o);
-
-    /** Like visitObject(Object), but inlined for performance. */
-    @RestrictHeapAccess(access = RestrictHeapAccess.Access.NO_ALLOCATION, reason = "Must not allocate while visiting the heap.")
-    default boolean visitObjectInline(Object o) {
-        return visitObject(o);
-    }
-
-    /**
-     * Called after all Objects have been visited. For example, from the client who creates the
-     * ObjectVisitor. If visiting terminates because a visitor returned false, this method might not
-     * be called.
-     *
-     * @return true if the epilogue executed successfully, false otherwise.
-     */
-    default boolean epilogue() {
-        return true;
-    }
+    void visitObject(Object o);
 }

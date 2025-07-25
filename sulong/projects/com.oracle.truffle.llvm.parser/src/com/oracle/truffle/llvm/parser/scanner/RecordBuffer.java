@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2019, Oracle and/or its affiliates.
+ * Copyright (c) 2017, 2025, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -32,16 +32,19 @@ package com.oracle.truffle.llvm.parser.scanner;
 import java.util.Arrays;
 
 import com.oracle.truffle.llvm.runtime.except.LLVMParserException;
+import com.oracle.truffle.llvm.runtime.types.Type;
 
-final class RecordBuffer {
+public final class RecordBuffer {
 
-    private static final int INITIAL_BUFFER_SIZE = 256;
+    private static final int INITIAL_BUFFER_SIZE = 8;
 
     private long[] opBuffer = new long[INITIAL_BUFFER_SIZE];
 
     private int size = 0;
+    private int index = 1;
 
     void addOpNoCheck(long op) {
+        assert size < opBuffer.length;
         opBuffer[size++] = op;
     }
 
@@ -51,16 +54,18 @@ final class RecordBuffer {
     }
 
     void ensureFits(long numOfAdditionalOps) {
+        assert numOfAdditionalOps >= 0;
         if (size >= opBuffer.length - numOfAdditionalOps) {
-            opBuffer = Arrays.copyOf(opBuffer, opBuffer.length + ((int) numOfAdditionalOps * 2));
+            int newLength = opBuffer.length;
+            while (size >= newLength - numOfAdditionalOps) {
+                newLength *= 2;
+                if (newLength < 0) {
+                    // overflow
+                    throw new LLVMParserException("Record buffer too big!");
+                }
+            }
+            opBuffer = Arrays.copyOf(opBuffer, newLength);
         }
-    }
-
-    long getId() {
-        if (size <= 0) {
-            throw new LLVMParserException("Record Id not set!");
-        }
-        return opBuffer[0];
     }
 
     long[] getOps() {
@@ -69,5 +74,137 @@ final class RecordBuffer {
 
     void invalidate() {
         size = 0;
+        index = 1;
+    }
+
+    public long getAt(int pos) {
+        return opBuffer[pos + 1];
+    }
+
+    public int getId() {
+        if (size <= 0) {
+            throw new LLVMParserException("Record Id not set!");
+        }
+        long id = opBuffer[0];
+        if (id != (int) id) {
+            throw new LLVMParserException("invalid record id " + id);
+        }
+        return (int) id;
+    }
+
+    /**
+     * Returns the size (not including the record id).
+     */
+    public int size() {
+        return size - 1;
+    }
+
+    public long read() {
+        assert index < size;
+        return opBuffer[index++];
+    }
+
+    public void skip() {
+        index++;
+    }
+
+    public void skipConstantRange(long bitWidth) {
+        if (bitWidth > 64) {
+            long activeWords = read();
+            long lowerActiveWords = activeWords & ((1L << 32) - 1);
+            long upperActiveWords = activeWords >>> 32;
+            skip(lowerActiveWords);
+            skip(upperActiveWords);
+        } else {
+            skip(); // start
+            skip(); // end
+        }
+    }
+
+    public void skip(long nr) {
+        assert nr == (int) nr;
+        index += (int) nr;
+    }
+
+    public void setIndex(int index) {
+        this.index = index;
+    }
+
+    public int readInt() {
+        long read = read();
+        return toUnsignedIntExact(read);
+    }
+
+    private static int toUnsignedIntExact(long read) {
+        if (Type.fitsIntoUnsignedInt(read)) {
+            return Type.toUnsignedInt(read);
+        }
+        throw new ArithmeticException("unsigned integer overflow");
+    }
+
+    public boolean readBoolean() {
+        return read() != 0;
+    }
+
+    public int remaining() {
+        return size - index;
+    }
+
+    public void checkEnd(String message) {
+        if (remaining() > 0) {
+            throw new LLVMParserException(message);
+        }
+    }
+
+    public static String describe(long id, long[] args) {
+        final StringBuilder builder = new StringBuilder();
+        builder.append("<id=").append(id).append(" - ");
+        for (int i = 0; i < args.length; i++) {
+            builder.append("op").append(i).append('=').append(args[i]);
+            if (i != args.length - 1) {
+                builder.append(", ");
+            }
+        }
+        builder.append('>');
+        return builder.toString();
+    }
+
+    public long readSignedValue() {
+        long v = read();
+        if ((v & 1L) == 1L) {
+            v = v >>> 1;
+            return v == 0 ? Long.MIN_VALUE : -v;
+        } else {
+            return v >>> 1;
+        }
+    }
+
+    public String readString() {
+        int length = remaining();
+        StringBuilder string = new StringBuilder(length);
+        for (int i = 0; i < length; i++) {
+            string.append((char) opBuffer[index + i]);
+        }
+        index += length;
+        return string.toString();
+    }
+
+    public byte[] readStringAsBytes(boolean cstring) {
+        int length = remaining();
+        byte[] result = new byte[length + (cstring ? 1 : 0)];
+        for (int i = 0; i < length; i++) {
+            result[i] = (byte) opBuffer[index + i];
+        }
+        index += length;
+        return result;
+    }
+
+    public String readUnicodeString() {
+        // We use the byte array String constructor to Unicode Characters correctly
+        return new String(readStringAsBytes(false));
+    }
+
+    public long[] dumpArray() {
+        return getOps();
     }
 }

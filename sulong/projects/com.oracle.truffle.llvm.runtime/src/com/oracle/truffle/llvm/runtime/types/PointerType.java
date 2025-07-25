@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates.
+ * Copyright (c) 2017, 2022, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -29,39 +29,42 @@
  */
 package com.oracle.truffle.llvm.runtime.types;
 
-import com.oracle.truffle.api.Assumption;
+import com.oracle.truffle.api.CompilerAsserts;
 import com.oracle.truffle.api.CompilerDirectives;
-import com.oracle.truffle.api.CompilerDirectives.CompilationFinal;
 import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
-import com.oracle.truffle.api.Truffle;
-import com.oracle.truffle.llvm.runtime.nodes.api.LLVMNode;
+import com.oracle.truffle.llvm.runtime.CommonNodeFactory;
+import com.oracle.truffle.llvm.runtime.GetStackSpaceFactory;
+import com.oracle.truffle.llvm.runtime.NodeFactory;
 import com.oracle.truffle.llvm.runtime.datalayout.DataLayout;
+import com.oracle.truffle.llvm.runtime.nodes.api.LLVMExpressionNode;
+import com.oracle.truffle.llvm.runtime.nodes.api.LLVMNode;
 import com.oracle.truffle.llvm.runtime.types.visitors.TypeVisitor;
 
 public final class PointerType extends AggregateType {
     public static final PointerType I8 = new PointerType(PrimitiveType.I8);
     public static final PointerType VOID = new PointerType(VoidType.INSTANCE);
+    public static final PointerType PTR = new PointerType(MetaType.UNKNOWN);
 
-    @CompilationFinal private Type pointeeType;
-    @CompilationFinal private Assumption pointeeTypeAssumption;
+    private Type pointeeType;
 
     public PointerType(Type pointeeType) {
-        this.pointeeTypeAssumption = Truffle.getRuntime().createAssumption("PointerType.pointeeType");
         this.pointeeType = pointeeType;
     }
 
+    public boolean isOpaque() {
+        return pointeeType == MetaType.UNKNOWN;
+    }
+
     public Type getPointeeType() {
-        if (!pointeeTypeAssumption.isValid()) {
-            CompilerDirectives.transferToInterpreterAndInvalidate();
-        }
+        CompilerAsserts.neverPartOfCompilation();
+        assert !isOpaque() : "unexpected getPointeeType() on opaque pointer";
         return pointeeType;
     }
 
     public void setPointeeType(Type type) {
-        CompilerDirectives.transferToInterpreterAndInvalidate();
-        this.pointeeTypeAssumption.invalidate();
+        CompilerAsserts.neverPartOfCompilation();
+        verifyCycleFree(type);
         this.pointeeType = type;
-        this.pointeeTypeAssumption = Truffle.getRuntime().createAssumption("PointerType.pointeeType");
     }
 
     @Override
@@ -74,19 +77,14 @@ public final class PointerType extends AggregateType {
     }
 
     @Override
-    public int getSize(DataLayout targetDataLayout) {
+    public long getSize(DataLayout targetDataLayout) {
         return LLVMNode.ADDRESS_SIZE_IN_BYTES;
     }
 
     @Override
-    public Type shallowCopy() {
-        final PointerType copy = new PointerType(getPointeeType());
-        return copy;
-    }
-
-    @Override
-    public long getOffsetOf(long index, DataLayout targetDataLayout) {
-        return getPointeeType().getSize(targetDataLayout) * index;
+    public long getOffsetOf(long index, DataLayout targetDataLayout) throws TypeOverflowException {
+        // For a pointer, the index can be negative
+        return multiplySignedExact(getPointeeType().getSize(targetDataLayout), index);
     }
 
     @Override
@@ -95,14 +93,13 @@ public final class PointerType extends AggregateType {
     }
 
     @Override
-    public int getNumberOfElements() {
-        CompilerDirectives.transferToInterpreter();
-        throw new IllegalStateException();
+    public long getNumberOfElements() {
+        throw CompilerDirectives.shouldNotReachHere();
     }
 
     @Override
-    public int getBitSize() {
-        return Long.BYTES * Byte.SIZE;
+    public long getBitSize() {
+        return Long.SIZE;
     }
 
     @Override
@@ -113,7 +110,11 @@ public final class PointerType extends AggregateType {
     @Override
     @TruffleBoundary
     public String toString() {
-        return String.format("%s*", getPointeeType());
+        if (isOpaque()) {
+            return "ptr";
+        } else {
+            return String.format("%s*", getPointeeType());
+        }
     }
 
     @Override
@@ -124,5 +125,10 @@ public final class PointerType extends AggregateType {
     @Override
     public boolean equals(Object obj) {
         return obj instanceof PointerType;
+    }
+
+    @Override
+    public LLVMExpressionNode createNullConstant(NodeFactory nodeFactory, DataLayout dataLayout, GetStackSpaceFactory stackFactory) {
+        return CommonNodeFactory.createSimpleConstantNoArray(null, this);
     }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates.
+ * Copyright (c) 2017, 2020, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -29,7 +29,12 @@
  */
 package com.oracle.truffle.llvm.runtime.types;
 
+import com.oracle.truffle.llvm.runtime.CommonNodeFactory;
+import com.oracle.truffle.llvm.runtime.GetStackSpaceFactory;
+import com.oracle.truffle.llvm.runtime.NodeFactory;
 import com.oracle.truffle.llvm.runtime.datalayout.DataLayout;
+import com.oracle.truffle.llvm.runtime.except.LLVMParserException;
+import com.oracle.truffle.llvm.runtime.nodes.api.LLVMExpressionNode;
 import com.oracle.truffle.llvm.runtime.types.visitors.TypeVisitor;
 
 public final class MetaType extends Type {
@@ -48,11 +53,6 @@ public final class MetaType extends Type {
     private MetaType(String name) {
         this.name = name;
         this.identity = new Object();
-    }
-
-    @Override
-    public Type shallowCopy() {
-        return this;
     }
 
     @Override
@@ -86,7 +86,7 @@ public final class MetaType extends Type {
     }
 
     @Override
-    public int getBitSize() {
+    public long getBitSize() {
         return 0;
     }
 
@@ -101,12 +101,21 @@ public final class MetaType extends Type {
     }
 
     @Override
-    public int getSize(DataLayout targetDataLayout) {
+    public long getSize(DataLayout targetDataLayout) {
         return 0;
     }
 
     @Override
     public String toString() {
         return name;
+    }
+
+    @Override
+    public LLVMExpressionNode createNullConstant(NodeFactory nodeFactory, DataLayout dataLayout, GetStackSpaceFactory stackFactory) {
+        if (this == MetaType.DEBUG) {
+            return CommonNodeFactory.createSimpleConstantNoArray(null, this);
+        } else {
+            throw new LLVMParserException("Unsupported Type for Zero Constant: " + this);
+        }
     }
 }

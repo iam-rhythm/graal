@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2025, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -45,8 +45,8 @@ package org.graalvm.nativeimage.c.function;
  * {@link InvokeCFunctionPointer} that invoke the method referenced by this function pointer. Since
  * the signature of the invocation method is not known, it is not possible to define a single
  * generic invocation method here.
- * 
- * @since 1.0
+ *
+ * @since 19.0
  */
 public interface CFunctionPointer extends CodePointer, RelocatedPointer {
 }

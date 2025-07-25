@@ -24,16 +24,17 @@
  */
 package com.oracle.svm.core.stack;
 
-import org.graalvm.compiler.api.replacements.Fold;
-import org.graalvm.compiler.options.Option;
 import org.graalvm.nativeimage.ImageSingletons;
-import org.graalvm.nativeimage.IsolateThread;
+import org.graalvm.nativeimage.c.type.WordPointer;
 import org.graalvm.word.UnsignedWord;
 
-import com.oracle.svm.core.annotate.Uninterruptible;
+import com.oracle.svm.core.Uninterruptible;
 import com.oracle.svm.core.option.HostedOptionKey;
 import com.oracle.svm.core.thread.VMOperation;
 import com.oracle.svm.core.threadlocal.FastThreadLocalWord;
+
+import jdk.graal.compiler.api.replacements.Fold;
+import jdk.graal.compiler.options.Option;
 
 /**
  * This interface provides functions related to stack overflow checking that are invoked by other
@@ -80,15 +81,32 @@ public interface StackOverflowCheck {
     }
 
     /**
-     * Operating system abstraction: The OS needs to provide end of the physical stack memory.
-     *
-     * Note that currently there is no abstraction to influence the stack growth direction: We only
-     * support a stack that grows from higher addresses towards lower addresses. All supported
-     * platforms use this direction.
+     * Note that there is no abstraction to influence the stack growth direction: we only support a
+     * stack that grows from higher addresses towards lower addresses. All supported platforms use
+     * this direction.
      */
-    interface OSSupport {
-        @Uninterruptible(reason = "Called while thread is being attached to the VM, i.e., when the thread state is not yet set up.")
-        UnsignedWord lookupStackEnd();
+    interface PlatformSupport {
+        @Fold
+        static PlatformSupport singleton() {
+            return ImageSingletons.lookup(PlatformSupport.class);
+        }
+
+        /**
+         * Queries the stack boundaries.
+         *
+         * @param stackBasePtr If the method fails or if the platform doesn't support querying the
+         *            stack base, 0 will be written to the given memory location. Otherwise, the
+         *            address of the highest addressable byte of the stack + 1 will be written to
+         *            the given memory location.
+         *
+         * @param stackEndPtr If the method fails, 0 will be written to the given memory location.
+         *            Otherwise, the address of the lowest addressable byte of the stack will be
+         *            written to the given memory location.
+         *
+         * @return true, if the stack end was queried successfully.
+         */
+        @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+        boolean lookupStack(WordPointer stackBasePtr, WordPointer stackEndPtr);
     }
 
     @Fold
@@ -98,11 +116,23 @@ public interface StackOverflowCheck {
 
     /**
      * Called for each thread when the thread is attached to the VM. The method is called very
-     * early, before the thread register and the heap are being set up. Therefore, the
-     * implementation is severly limited to only operate on C memory and calling C fuctions.
+     * early, before the heap is set up. Therefore, the implementation is severely limited to only
+     * operate on C memory and calling C functions.
      */
     @Uninterruptible(reason = "Called while thread is being attached to the VM, i.e., when the thread state is not yet set up.")
-    void initialize(IsolateThread thread);
+    boolean initialize();
+
+    /**
+     * Determines whether the given address, e.g. a potential stack pointer, is within the safe
+     * boundaries of the current thread's stack (which includes the yellow zone if
+     * {@linkplain #makeYellowZoneAvailable() made available}.
+     */
+    boolean isWithinBounds(UnsignedWord address);
+
+    /**
+     * Throws new {@link StackOverflowError}.
+     */
+    void throwStackOverflowError();
 
     /**
      * Make the yellow zone of the stack available for usage. It must be eventually followed by a
@@ -110,6 +140,9 @@ public interface StackOverflowCheck {
      * already available, this function is a no-op.
      */
     void makeYellowZoneAvailable();
+
+    /** Check if the yellow zone of the stack available for usage. */
+    boolean isYellowZoneAvailable();
 
     /**
      * The inverse operation of {@link #makeYellowZoneAvailable}.
@@ -121,6 +154,15 @@ public interface StackOverflowCheck {
      */
     int yellowAndRedZoneSize();
 
+    /** @see #setState */
+    int getState();
+
+    /**
+     * Restore the specified state of the stack overflow checks obtained from {@link #getState}.
+     * This is intended for yielding and resuming continuations on a thread.
+     */
+    void setState(int state);
+
     /**
      * Disables all stack overflow checks for this thread. This operation is not reversible, i.e.,
      * it must only be called in the case of a fatal error where the VM is going to exit soon and
@@ -128,4 +170,14 @@ public interface StackOverflowCheck {
      */
     @Uninterruptible(reason = "Called by fatal error handling that is uninterruptible.")
     void disableStackOverflowChecksForFatalError();
+
+    /**
+     * Updates the stack overflow boundary of the current thread.
+     */
+    void updateStackOverflowBoundary();
+
+    /**
+     * Returns the stack overflow boundary of the current thread.
+     */
+    UnsignedWord getStackOverflowBoundary();
 }

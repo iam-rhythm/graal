@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2018, Oracle and/or its affiliates.
+ * Copyright (c) 2016, 2020, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -52,22 +52,19 @@ public final class CompareInstruction extends ValueInstruction {
 
     private final CompareOperator operator;
 
-    private Type baseType;
-
     private SymbolImpl lhs;
 
     private SymbolImpl rhs;
 
     private CompareInstruction(Type type, CompareOperator operator) {
         super(calculateResultType(type));
-        this.baseType = type;
         this.operator = operator;
     }
 
     private static Type calculateResultType(Type type) {
         // The comparison performed always yields either an i1 or vector of i1 as result
         if (type instanceof VectorType) {
-            return new VectorType(PrimitiveType.I1, ((VectorType) type).getNumberOfElements());
+            return new VectorType(PrimitiveType.I1, ((VectorType) type).getNumberOfElementsInt());
         }
         return PrimitiveType.I1;
     }
@@ -75,10 +72,6 @@ public final class CompareInstruction extends ValueInstruction {
     @Override
     public void accept(SymbolVisitor visitor) {
         visitor.visit(this);
-    }
-
-    public Type getBaseType() {
-        return baseType;
     }
 
     public SymbolImpl getLHS() {

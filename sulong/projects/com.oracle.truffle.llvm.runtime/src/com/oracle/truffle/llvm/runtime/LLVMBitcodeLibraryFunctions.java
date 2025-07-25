@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, Oracle and/or its affiliates.
+ * Copyright (c) 2018, 2022, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -30,6 +30,7 @@
 package com.oracle.truffle.llvm.runtime;
 
 import com.oracle.truffle.api.nodes.DirectCallNode;
+import com.oracle.truffle.llvm.runtime.except.LLVMLinkerException;
 import com.oracle.truffle.llvm.runtime.memory.LLVMStack;
 import com.oracle.truffle.llvm.runtime.nodes.api.LLVMNode;
 import com.oracle.truffle.llvm.runtime.pointer.LLVMPointer;
@@ -41,8 +42,12 @@ public final class LLVMBitcodeLibraryFunctions {
         @Child protected DirectCallNode callNode;
 
         protected LibraryFunctionNode(LLVMContext context, String name) {
-            LLVMFunctionDescriptor descriptor = context.getGlobalScope().getFunction(name);
-            callNode = DirectCallNode.create(descriptor.getLLVMIRFunction());
+            LLVMFunction function = context.getGlobalScopeChain().getFunction(name);
+            if (function == null) {
+                throw new LLVMLinkerException("Function not found: " + name);
+            }
+            LLVMFunctionDescriptor descriptor = context.createFunctionDescriptor(function, new LLVMFunctionCode(function));
+            callNode = DirectCallNode.create(descriptor.getFunctionCode().getLLVMIRFunctionSlowPath());
         }
 
         protected Object execute(Object... args) {
@@ -53,11 +58,44 @@ public final class LLVMBitcodeLibraryFunctions {
     public static final class SulongCanCatchNode extends LibraryFunctionNode {
 
         public SulongCanCatchNode(LLVMContext context) {
-            super(context, "@sulong_eh_canCatch");
+            super(context, "sulong_eh_canCatch");
         }
 
-        public int canCatch(LLVMStack.StackPointer stack, Object unwindHeader, LLVMPointer catchType) {
+        public int canCatch(LLVMStack stack, Object unwindHeader, LLVMPointer catchType) {
             return (int) execute(stack, unwindHeader, catchType.copy());
+        }
+    }
+
+    public static final class SulongCanCatchWindowsNode extends LibraryFunctionNode {
+
+        public SulongCanCatchWindowsNode(LLVMContext context) {
+            super(context, "__sulong_eh_canCatch_windows");
+        }
+
+        public LLVMPointer canCatch(LLVMStack stack, LLVMPointer thrownObject, LLVMPointer throwInfo, LLVMPointer catchType, LLVMPointer imageBase) {
+            return LLVMPointer.cast(execute(stack, thrownObject, throwInfo, catchType.copy(), imageBase));
+        }
+    }
+
+    public static final class SulongEHCopyWindowsNode extends LibraryFunctionNode {
+
+        public SulongEHCopyWindowsNode(LLVMContext context) {
+            super(context, "__sulong_eh_copy_windows");
+        }
+
+        public void copy(LLVMStack stack, LLVMPointer thrownObject, LLVMPointer catchableType, LLVMPointer imageBase, LLVMPointer exceptionSlot, int attributes) {
+            execute(stack, thrownObject, catchableType, imageBase, exceptionSlot, attributes);
+        }
+    }
+
+    public static final class SulongEHUnwindWindowsNode extends LibraryFunctionNode {
+
+        public SulongEHUnwindWindowsNode(LLVMContext context) {
+            super(context, "__sulong_eh_unwind_windows");
+        }
+
+        public void unwind(LLVMStack stack, LLVMPointer thrownObject, LLVMPointer throwInfo, LLVMPointer imageBase) {
+            execute(stack, thrownObject, throwInfo, imageBase);
         }
     }
 }

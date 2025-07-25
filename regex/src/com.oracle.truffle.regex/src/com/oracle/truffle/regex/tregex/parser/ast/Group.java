@@ -1,39 +1,56 @@
 /*
- * Copyright (c) 2016, 2016, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2025, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
- * This code is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 only, as
- * published by the Free Software Foundation.  Oracle designates this
- * particular file as subject to the "Classpath" exception as provided
- * by Oracle in the LICENSE file that accompanied this code.
+ * The Universal Permissive License (UPL), Version 1.0
  *
- * This code is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
- * version 2 for more details (a copy is included in the LICENSE file that
- * accompanied this code).
+ * Subject to the condition set forth below, permission is hereby granted to any
+ * person obtaining a copy of this software, associated documentation and/or
+ * data (collectively the "Software"), free of charge and under any and all
+ * copyright rights in the Software, and any and all patent rights owned or
+ * freely licensable by each licensor hereunder covering either (i) the
+ * unmodified Software as contributed to or provided by such licensor, or (ii)
+ * the Larger Works (as defined below), to deal in both
  *
- * You should have received a copy of the GNU General Public License version
- * 2 along with this work; if not, write to the Free Software Foundation,
- * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+ * (a) the Software, and
  *
- * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
- * or visit www.oracle.com if you need additional information or have any
- * questions.
+ * (b) any piece of software and/or hardware listed in the lrgrwrks.txt file if
+ * one is included with the Software each a "Larger Work" to which the Software
+ * is contributed by such licensors),
+ *
+ * without restriction, including without limitation the rights to copy, create
+ * derivative works of, display, perform, and distribute the Software and make,
+ * use, sell, offer for sale, import, export, have made, and have sold the
+ * Software and the Larger Work(s), and to sublicense the foregoing rights on
+ * either these or other terms.
+ *
+ * This license is subject to the following condition:
+ *
+ * The above copyright notice and either this complete permission notice or at a
+ * minimum a reference to the UPL must be included in all copies or substantial
+ * portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 package com.oracle.truffle.regex.tregex.parser.ast;
-
-import com.oracle.truffle.api.source.SourceSection;
-import com.oracle.truffle.regex.tregex.TRegexOptions;
-import com.oracle.truffle.regex.tregex.parser.ast.visitors.RegexASTVisitorIterable;
-import com.oracle.truffle.regex.tregex.util.json.Json;
-import com.oracle.truffle.regex.tregex.util.json.JsonValue;
 
 import java.util.ArrayList;
 import java.util.stream.Collectors;
 
-import static com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
+import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
+import com.oracle.truffle.regex.RegexOptions;
+import com.oracle.truffle.regex.UnsupportedRegexException;
+import com.oracle.truffle.regex.tregex.TRegexOptions;
+import com.oracle.truffle.regex.tregex.buffer.CompilationBuffer;
+import com.oracle.truffle.regex.tregex.parser.ast.visitors.RegexASTVisitorIterable;
+import com.oracle.truffle.regex.tregex.util.json.Json;
+import com.oracle.truffle.regex.tregex.util.json.JsonValue;
 
 /**
  * Groups are the top-most elements of regular expression ASTs.
@@ -55,15 +72,16 @@ import static com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
  * the priority of the alternatives: if matching with an earlier alternative is possible, that match
  * result is preferred to those from later alternatives.
  */
-public final class Group extends Term implements RegexASTVisitorIterable {
+public class Group extends QuantifiableTerm implements RegexASTVisitorIterable {
 
-    private final ArrayList<Sequence> alternatives = new ArrayList<>();
+    private ArrayList<Sequence> alternatives = new ArrayList<>();
     private short visitorIterationIndex = 0;
-    private byte groupNumber = -1;
-    private byte enclosedCaptureGroupsLow;
-    private byte enclosedCaptureGroupsHigh;
-    private SourceSection sourceSectionBegin;
-    private SourceSection sourceSectionEnd;
+    private short groupNumber = -1;
+    private int groupsWithGuardsIndex = -1;
+    private int enclosedCaptureGroupsLo;
+    private int enclosedCaptureGroupsHi;
+    private int enclosedZeroWidthGroupsLo;
+    private int enclosedZeroWidthGroupsHi;
 
     /**
      * Creates an empty non-capturing group.
@@ -73,45 +91,47 @@ public final class Group extends Term implements RegexASTVisitorIterable {
 
     /**
      * Creates an empty capturing group.
-     * 
+     *
      * @param groupNumber The number of this capturing group.
      */
     Group(int groupNumber) {
         setGroupNumber(groupNumber);
     }
 
-    private Group(Group copy, RegexAST ast, boolean recursive) {
+    protected Group(Group copy) {
         super(copy);
         groupNumber = copy.groupNumber;
-        enclosedCaptureGroupsLow = copy.enclosedCaptureGroupsLow;
-        enclosedCaptureGroupsHigh = copy.enclosedCaptureGroupsHigh;
-        sourceSectionBegin = copy.sourceSectionBegin;
-        sourceSectionEnd = copy.sourceSectionEnd;
-        if (recursive) {
-            for (Sequence s : copy.alternatives) {
-                add(s.copy(ast, true));
-            }
-        }
+        enclosedCaptureGroupsLo = copy.enclosedCaptureGroupsLo;
+        enclosedCaptureGroupsHi = copy.enclosedCaptureGroupsHi;
     }
 
     @Override
-    public Group copy(RegexAST ast, boolean recursive) {
-        return ast.register(new Group(this, ast, recursive));
+    public Group copy(RegexAST ast) {
+        return ast.register(new Group(this));
+    }
+
+    @Override
+    public Group copyRecursive(RegexAST ast, CompilationBuffer compilationBuffer) {
+        Group copy = copy(ast);
+        for (Sequence s : alternatives) {
+            copy.add(s.copyRecursive(ast, compilationBuffer));
+        }
+        return copy;
     }
 
     /**
-     * Returns whether or not this group loops. A looping group differs from a non-looping one in
-     * that when you match one of the group's non-empty alternatives, instead of continuing to the
-     * next node after the group, the same group is attempted again.
+     * Returns whether this group loops. A looping group differs from a non-looping one in that when
+     * you match one of the group's non-empty alternatives, instead of continuing to the next node
+     * after the group, the same group is attempted again.
      */
     public boolean isLoop() {
         return isFlagSet(FLAG_GROUP_LOOP);
     }
 
     /**
-     * Sets whether or this group should loop. If the group is set to be looping, this updates the
+     * Sets whether this group should loop. If the group is set to be looping, this updates the
      * 'next' and 'prev' pointers on the non-empty alternatives to point to the group itself.
-     * 
+     *
      * @param loop true if this group should loop
      * @see #isLoop()
      */
@@ -120,36 +140,19 @@ public final class Group extends Term implements RegexASTVisitorIterable {
     }
 
     /**
-     * Indicates whether this {@link Group} was inserted into the AST as the result of expanding
-     * quantifier syntax (*, +, ?, {n,m}).
-     * 
-     * E.g., if A is some group, then:
-     * <ul>
-     * <li>A* is expanded as (A|)*
-     * <li>A*? is expanded as (|A)*
-     * <li>A+ is expanded as A(A|)*
-     * <li>A+? is expanded as A(|A)*
-     * <li>A? is expanded as (A|)
-     * <li>A?? is expanded as (|A)
-     * <li>A{2,4} is expanded as AA(A|)(A|)
-     * <li>A{2,4}? is expanded as AA(|A)(|A)
-     * </ul>
-     * where (X|Y) is a group with alternatives X and Y and (X|Y)* is a looping group with
-     * alternatives X and Y. In the examples above, all of the occurrences of A in the expansions
-     * would be marked with this flag.
+     * Returns whether this group declares local flags, e.g. "(?i:...)".
      */
-    public boolean isExpandedQuantifier() {
-        return isFlagSet(FLAG_GROUP_EXPANDED_QUANTIFIER);
+    public boolean isLocalFlags() {
+        return isFlagSet(FLAG_GROUP_LOCAL_FLAGS);
     }
 
     /**
-     * Marks this {@link Group} as being inserted into the AST as part of expanding quantifier
-     * syntax (*, +, ?, {n,m}).
-     * 
-     * @see #isExpandedQuantifier()
+     * Sets whether this group declares local flags, e.g. "(?i:...)".
+     *
+     * @see #isLocalFlags()
      */
-    public void setExpandedQuantifier(boolean expandedQuantifier) {
-        setFlag(FLAG_GROUP_EXPANDED_QUANTIFIER, expandedQuantifier);
+    public void setLocalFlags(boolean loop) {
+        setFlag(FLAG_GROUP_LOCAL_FLAGS, loop);
     }
 
     /**
@@ -206,42 +209,115 @@ public final class Group extends Term implements RegexASTVisitorIterable {
 
     /**
      * Marks this {@link Group} as capturing and sets its group number.
-     * 
-     * @param groupNumber
      */
     public void setGroupNumber(int groupNumber) {
         assert groupNumber <= TRegexOptions.TRegexMaxNumberOfCaptureGroups;
-        this.groupNumber = (byte) groupNumber;
+        this.groupNumber = (short) groupNumber;
+    }
+
+    public boolean hasGroupWithGuardsIndex() {
+        return groupsWithGuardsIndex >= 0;
+    }
+
+    public int getGroupsWithGuardsIndex() {
+        return groupsWithGuardsIndex;
+    }
+
+    public void setGroupsWithGuardsIndex(int groupsWithGuardsIndex) {
+        this.groupsWithGuardsIndex = groupsWithGuardsIndex;
+    }
+
+    /**
+     * Marks this {@link Group} as non-capturing and clears its group number.
+     */
+    public void clearGroupNumber() {
+        this.groupNumber = -1;
     }
 
     /**
      * Gets the (inclusive) lower bound of the range of capture groups contained within this group.
      */
-    public int getEnclosedCaptureGroupsLow() {
-        return enclosedCaptureGroupsLow;
+    public int getEnclosedCaptureGroupsLo() {
+        return enclosedCaptureGroupsLo;
+    }
+
+    /**
+     * Gets the (inclusive) lower bound of the range of capture groups in this term. In contrast to
+     * {@link #getEnclosedCaptureGroupsLo()}, this range contains the group itself if it is a
+     * capturing group.
+     */
+    public int getCaptureGroupsLo() {
+        return isCapturing() ? getGroupNumber() : enclosedCaptureGroupsLo;
     }
 
     /**
      * Sets the (inclusive) lower bound of the range of capture groups contained within this group.
      */
-    public void setEnclosedCaptureGroupsLow(int enclosedCaptureGroupsLow) {
-        assert enclosedCaptureGroupsLow <= TRegexOptions.TRegexMaxNumberOfCaptureGroups;
-        this.enclosedCaptureGroupsLow = (byte) enclosedCaptureGroupsLow;
+    public void setEnclosedCaptureGroupsLo(int enclosedCaptureGroupsLo) {
+        assert enclosedCaptureGroupsLo <= TRegexOptions.TRegexMaxNumberOfCaptureGroups;
+        this.enclosedCaptureGroupsLo = (short) enclosedCaptureGroupsLo;
     }
 
     /**
      * Gets the (exclusive) upper bound of the range of capture groups contained within this group.
      */
-    public int getEnclosedCaptureGroupsHigh() {
-        return enclosedCaptureGroupsHigh;
+    public int getEnclosedCaptureGroupsHi() {
+        return enclosedCaptureGroupsHi;
+    }
+
+    /**
+     * Gets the (exclusive) upper bound of the range of capture groups in this term.
+     */
+    public int getCaptureGroupsHi() {
+        return enclosedCaptureGroupsHi;
     }
 
     /**
      * Sets the (exclusive) upper bound of the range of capture groups contained within this group.
      */
-    public void setEnclosedCaptureGroupsHigh(int enclosedCaptureGroupsHigh) {
-        assert enclosedCaptureGroupsHigh <= TRegexOptions.TRegexMaxNumberOfCaptureGroups;
-        this.enclosedCaptureGroupsHigh = (byte) enclosedCaptureGroupsHigh;
+    public void setEnclosedCaptureGroupsHi(int enclosedCaptureGroupsHi) {
+        assert enclosedCaptureGroupsHi <= TRegexOptions.TRegexMaxNumberOfCaptureGroups;
+        this.enclosedCaptureGroupsHi = (short) enclosedCaptureGroupsHi;
+    }
+
+    public boolean hasEnclosedCaptureGroups() {
+        return enclosedCaptureGroupsHi > enclosedCaptureGroupsLo;
+    }
+
+    public int getEnclosedZeroWidthGroupsLo() {
+        return enclosedZeroWidthGroupsLo;
+    }
+
+    public void setEnclosedZeroWidthGroupsLo(int enclosedZeroWidthGroupsLo) {
+        this.enclosedZeroWidthGroupsLo = enclosedZeroWidthGroupsLo;
+    }
+
+    public int getEnclosedZeroWidthGroupsHi() {
+        return enclosedZeroWidthGroupsHi;
+    }
+
+    public void setEnclosedZeroWidthGroupsHi(int enclosedZeroWidthGroupsHi) {
+        this.enclosedZeroWidthGroupsHi = enclosedZeroWidthGroupsHi;
+    }
+
+    /**
+     * Returns {@code true} iff all alternatives of this group match only the empty string.
+     */
+    public boolean isAlwaysZeroWidth() {
+        for (Sequence s : alternatives) {
+            for (Term t : s.getTerms()) {
+                if (!(t.isPositionAssertion() || t.isLookAroundAssertion() || (t.isGroup() && t.asGroup().isAlwaysZeroWidth()) ||
+                                (t.isAtomicGroup() && t.asAtomicGroup().getGroup().isAlwaysZeroWidth()))) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    @Override
+    public boolean isUnrollingCandidate(RegexOptions options) {
+        return hasQuantifier() && getQuantifier().isWithinThreshold(options.quantifierUnrollLimitGroup);
     }
 
     /**
@@ -254,71 +330,55 @@ public final class Group extends Term implements RegexASTVisitorIterable {
         return alternatives;
     }
 
-    @Override
-    public SourceSection getSourceSection() {
-        if (super.getSourceSection() == null && sourceSectionBegin != null && sourceSectionEnd != null) {
-            super.setSourceSection(sourceSectionBegin.getSource().createSection(sourceSectionBegin.getCharIndex(),
-                            sourceSectionEnd.getCharEndIndex() - sourceSectionBegin.getCharIndex()));
+    public void setAlternatives(ArrayList<Sequence> alternatives) {
+        for (Sequence s : alternatives) {
+            s.setParent(this);
         }
-        return super.getSourceSection();
+        this.alternatives = alternatives;
     }
 
-    /**
-     * Returns the {@link SourceSection} corresponding to this group's opening bracket and modifier
-     * symbols (like "?:", "?=", ...), or {@code null} if this group has no corresponding source
-     * (this is the case for groups inserted by the parser when expanding quantifiers etc.).
-     */
-    public SourceSection getSourceSectionBegin() {
-        return sourceSectionBegin;
-    }
-
-    public void setSourceSectionBegin(SourceSection sourceSectionBegin) {
-        this.sourceSectionBegin = sourceSectionBegin;
-    }
-
-    /**
-     * Returns the {@link SourceSection} corresponding to this group's closing bracket, or
-     * {@code null} if this group has no corresponding source (this is the case for groups inserted
-     * by the parser when expanding quantifiers etc.).
-     */
-    public SourceSection getSourceSectionEnd() {
-        return sourceSectionEnd;
-    }
-
-    public void setSourceSectionEnd(SourceSection sourceSectionEnd) {
-        this.sourceSectionEnd = sourceSectionEnd;
+    public Sequence getFirstAlternative() {
+        return alternatives.get(0);
     }
 
     public int size() {
         return alternatives.size();
     }
 
+    public boolean isEmpty() {
+        return size() == 0;
+    }
+
     /**
      * Adds a new alternative to this group. The new alternative will be <em>appended to the
      * end</em>, meaning it will have the <em>lowest priority</em> among all the alternatives.
-     * 
-     * @param sequence
      */
     public void add(Sequence sequence) {
         sequence.setParent(this);
         alternatives.add(sequence);
+        checkMaxSize();
     }
 
     /**
      * Inserts a new alternative to this group. The new alternative will be <em>inserted at the
      * beginning</em>, meaning it will have the <em>highest priority</em> among all the
      * alternatives.
-     * 
-     * @param sequence
      */
     public void insertFirst(Sequence sequence) {
         sequence.setParent(this);
         alternatives.add(0, sequence);
+        checkMaxSize();
+    }
+
+    private void checkMaxSize() {
+        if (alternatives.size() > TRegexOptions.TRegexParserTreeMaxNumberOfSequencesInGroup) {
+            throw new UnsupportedRegexException("too many sequences in a single group");
+        }
     }
 
     /**
      * Creates a new empty alternatives and adds it to the end of the list of alternatives.
-     * 
+     *
      * @param ast The AST that the new alternative should belong to
      * @return The newly created alternative
      */
@@ -328,28 +388,16 @@ public final class Group extends Term implements RegexASTVisitorIterable {
         return sequence;
     }
 
+    public Sequence getLastAlternative() {
+        return alternatives.get(size() - 1);
+    }
+
     public void removeLastSequence() {
         alternatives.remove(alternatives.size() - 1);
     }
 
     public boolean isLiteral() {
         return alternatives.size() == 1 && alternatives.get(0).isLiteral();
-    }
-
-    /**
-     * Marks the node as dead, i.e. unmatchable.
-     * <p>
-     * Note that using this setter also traverses the ancestors and children of this node and
-     * updates their "dead" status as well.
-     */
-    @Override
-    public void markAsDead() {
-        super.markAsDead();
-        for (Sequence s : alternatives) {
-            if (!s.isDead()) {
-                s.markAsDead();
-            }
-        }
     }
 
     @Override
@@ -373,11 +421,31 @@ public final class Group extends Term implements RegexASTVisitorIterable {
     }
 
     public String loopToString() {
-        return isLoop() ? "*" : "";
+        return isLoop() ? "*" : quantifierToString();
     }
 
     @Override
+    public boolean equalsSemantic(RegexASTNode obj, boolean ignoreQuantifier) {
+        if (obj == this) {
+            return true;
+        }
+        if (obj.getClass() != Group.class) {
+            return false;
+        }
+        Group o = (Group) obj;
+        if (size() != o.size() || groupNumber != o.groupNumber || isLoop() != o.isLoop() || (!ignoreQuantifier && !quantifierEquals(o))) {
+            return false;
+        }
+        for (int i = 0; i < size(); i++) {
+            if (!alternatives.get(i).equalsSemantic(o.alternatives.get(i))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     @TruffleBoundary
+    @Override
     public String toString() {
         return "(" + (isCapturing() ? "" : "?:") + alternativesToString() + ")" + loopToString();
     }

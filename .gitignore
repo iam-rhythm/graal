@@ -15,12 +15,14 @@
 *.obj
 *.orig
 *.pdf
+*.phaseplan
 *.pyc
 *.rej
 *.swn
 *.swo
 *.swp
 *.zip
+*.bgv
 .DS_Store
 .checkstyle
 .classpath
@@ -50,3 +52,9 @@ test-output/
 workingsets.xml
 bench-results.json
 jmh_result.json
+/vm/src/installer/dist/
+visualizer/IdealGraphVisualizer/*/target/
+/.src-rev
+*.interp
+*.tokens
+/vm/tests/gh_workflows/CDTInspectorTest/target/

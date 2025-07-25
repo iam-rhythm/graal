@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,254 +40,112 @@
  */
 package com.oracle.truffle.api.interop;
 
-import com.oracle.truffle.api.CallTarget;
-import com.oracle.truffle.api.Truffle;
+import com.oracle.truffle.api.CompilerDirectives;
+import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
 import com.oracle.truffle.api.impl.Accessor;
-import com.oracle.truffle.api.interop.ForeignAccess.StandardFactory;
 import com.oracle.truffle.api.nodes.Node;
-import com.oracle.truffle.api.nodes.RootNode;
 
-class InteropAccessor extends Accessor {
+final class InteropAccessor extends Accessor {
 
-    @Override
-    protected InteropSupport interopSupport() {
-        return new InteropSupport() {
-            @Override
-            public boolean canHandle(Object foreignAccess, Object receiver) {
-                ForeignAccess fa = (ForeignAccess) foreignAccess;
-                TruffleObject obj = (TruffleObject) receiver;
-                return fa.canHandle(obj);
-            }
+    static final InteropAccessor ACCESSOR = new InteropAccessor();
+    static final LanguageSupport LANGUAGE = ACCESSOR.languageSupport();
+    static final ExceptionSupport EXCEPTION = ACCESSOR.exceptionSupport();
+    static final InstrumentSupport INSTRUMENT = ACCESSOR.instrumentSupport();
+    static final NodeSupport NODES = ACCESSOR.nodeSupport();
+    static final HostSupport HOST = ACCESSOR.hostSupport();
 
-            @Override
-            public CallTarget canHandleTarget(Object access) {
-                ForeignAccess fa = (ForeignAccess) access;
-                return fa.checkLanguage();
-            }
-
-            @Override
-            public boolean isTruffleObject(Object value) {
-                return value instanceof TruffleObject;
-            }
-
-            @Override
-            public void checkInteropType(Object result) {
-                InteropAccessNode.checkInteropType(result);
-            }
-
-            @Override
-            public Object createDefaultNodeObject(Node node) {
-                return EmptyTruffleObject.INSTANCE;
-            }
-
-            @Override
-            public boolean isValidNodeObject(Object obj) {
-                if (obj instanceof TruffleObject) {
-                    TruffleObject tObj = (TruffleObject) obj;
-                    if (!ForeignAccess.sendHasKeys(Message.HAS_KEYS.createNode(), tObj)) {
-                        throw new AssertionError("Invalid node object: must return true for the HAS_KEYS message.");
-                    }
-                    Object keys;
-                    try {
-                        keys = ForeignAccess.sendKeys(Message.KEYS.createNode(), tObj);
-                    } catch (UnsupportedMessageException e) {
-                        throw new AssertionError("Invalid node object: must support the KEYS message.", e);
-                    }
-                    if (!(keys instanceof TruffleObject)) {
-                        throw new AssertionError("Invalid node object: the returned KEYS object must be a TruffleObject.");
-                    }
-                    TruffleObject tKeys = (TruffleObject) keys;
-
-                    Node hasSize = Message.HAS_SIZE.createNode();
-                    if (!ForeignAccess.sendHasSize(hasSize, tKeys)) {
-                        throw new AssertionError("Invalid node object: the returned KEYS object must support HAS_SIZE.");
-                    }
-                    Node getSize = Message.GET_SIZE.createNode();
-
-                    Number size;
-                    try {
-                        size = (Number) ForeignAccess.sendGetSize(getSize, tKeys);
-                    } catch (UnsupportedMessageException e) {
-                        throw new AssertionError("Invalid node object: the returned KEYS object must have a size.");
-                    }
-                    Node readKeyNode = Message.READ.createNode();
-                    Node readElementNode = Message.READ.createNode();
-                    Node keyInfoNode = Message.KEY_INFO.createNode();
-                    long longValue = size.longValue();
-                    for (long i = 0; i < longValue; i++) {
-                        Object key;
-                        try {
-                            key = ForeignAccess.sendRead(readKeyNode, tKeys, i);
-                        } catch (UnknownIdentifierException | UnsupportedMessageException e) {
-                            throw new AssertionError("Invalid node object: the returned KEYS object must be readable at number identifier " + i);
-                        }
-                        if (!(key instanceof String)) {
-                            throw new AssertionError("Invalid node object: the returned KEYS object must return a string at number identifier " + i + ". But was " + key.getClass().getName() + ".");
-                        }
-                        try {
-                            ForeignAccess.sendRead(readElementNode, tObj, key);
-                        } catch (UnknownIdentifierException | UnsupportedMessageException e) {
-                            throw new AssertionError("Invalid node object: the returned KEYS element must be readable with identifier " + key);
-                        }
-
-                        int keyInfo = ForeignAccess.sendKeyInfo(keyInfoNode, tObj, key);
-                        if (KeyInfo.isWritable(keyInfo)) {
-                            throw new AssertionError("Invalid node object: The key " + key + " is marked as writable but node objects must not be writable.");
-                        }
-                    }
-                    Node node = Message.HAS_SIZE.createNode();
-                    if (ForeignAccess.sendHasSize(node, tObj)) {
-                        throw new AssertionError("Invalid node object: the node object must not return true for HAS_SIZE.");
-                    }
-
-                    return true;
-                } else {
-                    throw new AssertionError("Invalid node object: Node objects must be of type TruffleObject.");
-                }
-            }
-        };
+    private InteropAccessor() {
     }
 
-}
-
-final class EmptyTruffleObject implements TruffleObject {
-
-    static final EmptyTruffleObject INSTANCE = new EmptyTruffleObject();
-
-    public ForeignAccess getForeignAccess() {
-        return ForeignAccess.createAccess(new StandardFactory() {
-
-            public CallTarget accessWrite() {
-                return null;
-            }
-
-            public CallTarget accessUnbox() {
-                return null;
-            }
-
-            public CallTarget accessRead() {
-                return null;
-            }
-
-            public CallTarget accessNew(int argumentsLength) {
-                return null;
-            }
-
-            public CallTarget accessMessage(Message unknown) {
-                return null;
-            }
-
-            public CallTarget accessHasKeys() {
-                return Truffle.getRuntime().createCallTarget(RootNode.createConstantNode(true));
-            }
-
-            public CallTarget accessKeys() {
-                return Truffle.getRuntime().createCallTarget(RootNode.createConstantNode(0));
-            }
-
-            public CallTarget accessKeyInfo() {
-                return Truffle.getRuntime().createCallTarget(RootNode.createConstantNode(EmptyKeys.INSTANCE));
-            }
-
-            public CallTarget accessIsNull() {
-                return Truffle.getRuntime().createCallTarget(RootNode.createConstantNode(false));
-            }
-
-            public CallTarget accessIsExecutable() {
-                return Truffle.getRuntime().createCallTarget(RootNode.createConstantNode(false));
-            }
-
-            public CallTarget accessIsBoxed() {
-                return Truffle.getRuntime().createCallTarget(RootNode.createConstantNode(false));
-            }
-
-            public CallTarget accessInvoke(int argumentsLength) {
-                return null;
-            }
-
-            public CallTarget accessHasSize() {
-                return Truffle.getRuntime().createCallTarget(RootNode.createConstantNode(false));
-            }
-
-            public CallTarget accessGetSize() {
-                return null;
-            }
-
-            public CallTarget accessExecute(int argumentsLength) {
-                return null;
-            }
-        }, null);
+    static Object checkInteropType(Object obj) {
+        assert checkInteropTypeImpl(obj);
+        return obj;
     }
 
-}
-
-final class EmptyKeys implements TruffleObject {
-
-    static final EmptyKeys INSTANCE = new EmptyKeys();
-
-    public ForeignAccess getForeignAccess() {
-        return ForeignAccess.createAccess(new StandardFactory() {
-
-            public CallTarget accessWrite() {
-                return null;
-            }
-
-            public CallTarget accessUnbox() {
-                return null;
-            }
-
-            public CallTarget accessRead() {
-                return null;
-            }
-
-            public CallTarget accessNew(int argumentsLength) {
-                return null;
-            }
-
-            public CallTarget accessMessage(Message unknown) {
-                return null;
-            }
-
-            public CallTarget accessHasKeys() {
-                return Truffle.getRuntime().createCallTarget(RootNode.createConstantNode(false));
-            }
-
-            public CallTarget accessKeys() {
-                return Truffle.getRuntime().createCallTarget(RootNode.createConstantNode(0));
-            }
-
-            public CallTarget accessKeyInfo() {
-                return Truffle.getRuntime().createCallTarget(RootNode.createConstantNode(0));
-            }
-
-            public CallTarget accessIsNull() {
-                return Truffle.getRuntime().createCallTarget(RootNode.createConstantNode(false));
-            }
-
-            public CallTarget accessIsExecutable() {
-                return Truffle.getRuntime().createCallTarget(RootNode.createConstantNode(false));
-            }
-
-            public CallTarget accessIsBoxed() {
-                return Truffle.getRuntime().createCallTarget(RootNode.createConstantNode(false));
-            }
-
-            public CallTarget accessInvoke(int argumentsLength) {
-                return null;
-            }
-
-            public CallTarget accessHasSize() {
-                return Truffle.getRuntime().createCallTarget(RootNode.createConstantNode(true));
-            }
-
-            public CallTarget accessGetSize() {
-                return Truffle.getRuntime().createCallTarget(RootNode.createConstantNode(0));
-            }
-
-            public CallTarget accessExecute(int argumentsLength) {
-                return null;
-            }
-        }, null);
+    private static boolean checkInteropTypeImpl(Object obj) {
+        if (InteropLibrary.isValidValue(obj)) {
+            return true;
+        }
+        CompilerDirectives.transferToInterpreterAndInvalidate();
+        Class<?> clazz = obj != null ? obj.getClass() : null;
+        return yieldAnError(clazz);
     }
 
+    @TruffleBoundary
+    private static boolean yieldAnError(Class<?> clazz) {
+        StringBuilder sb = new StringBuilder();
+        sb.append(clazz == null ? "null" : clazz.getName());
+        sb.append(" isn't allowed Truffle interop type!\n");
+        if (clazz == null) {
+            throw new NullPointerException(sb.toString());
+        } else {
+            throw new ClassCastException(sb.toString());
+        }
+    }
+
+    /*
+     * Instantiated by Accessor.
+     */
+    static class InteropImpl extends InteropSupport {
+
+        @Override
+        public boolean isTruffleObject(Object value) {
+            return value instanceof TruffleObject;
+        }
+
+        @Override
+        public void checkInteropType(Object result) {
+            InteropAccessor.checkInteropType(result);
+        }
+
+        @Override
+        public boolean isExecutableObject(Object value) {
+            return InteropLibrary.getUncached().isExecutable(value);
+        }
+
+        @Override
+        public boolean isScopeObject(Object receiver) {
+            InteropLibrary interop = InteropLibrary.getUncached();
+            return interop.isScope(receiver) && interop.hasMembers(receiver);
+        }
+
+        @Override
+        public Object createDefaultNodeObject(Node node) {
+            return EmptyTruffleObject.INSTANCE;
+        }
+
+        @Override
+        public Object createDefaultIterator(Object receiver) {
+            return new ArrayIterator(receiver);
+        }
+
+        @Override
+        public Node createDispatchedInteropLibrary(int limit) {
+            return InteropLibrary.getFactory().createDispatched(limit);
+        }
+
+        @Override
+        public Node getUncachedInteropLibrary() {
+            return InteropLibrary.getUncached();
+        }
+
+        @Override
+        public long unboxPointer(Node library, Object value) {
+            InteropLibrary interop = (InteropLibrary) library;
+            if (!interop.isPointer(value)) {
+                CompilerDirectives.transferToInterpreterAndInvalidate();
+                throw new IllegalArgumentException("value is not an interop pointer");
+            }
+            try {
+                return interop.asPointer(value);
+            } catch (UnsupportedMessageException e) {
+                CompilerDirectives.transferToInterpreterAndInvalidate();
+                throw new IllegalArgumentException("value is not an interop pointer");
+            }
+        }
+    }
+
+    static final class EmptyTruffleObject implements TruffleObject {
+        static final EmptyTruffleObject INSTANCE = new EmptyTruffleObject();
+    }
 }

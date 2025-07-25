@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2014, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -50,7 +50,7 @@ import org.graalvm.word.PointerBase;
  * The {@link IsolateThread} points to a thread-local data structure. Therefore, the pointer must
  * not be shared between threads.
  *
- * @since 1.0
+ * @since 19.0
  */
 @CStruct(value = "graal_isolatethread_t", isIncomplete = true)
 public interface IsolateThread extends PointerBase {

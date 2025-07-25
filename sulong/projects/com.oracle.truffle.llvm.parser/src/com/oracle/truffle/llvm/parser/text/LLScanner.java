@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, 2019, Oracle and/or its affiliates.
+ * Copyright (c) 2018, 2021, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -29,20 +29,26 @@
  */
 package com.oracle.truffle.llvm.parser.text;
 
-import com.oracle.truffle.api.TruffleFile;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import org.graalvm.collections.EconomicSet;
+
+import com.oracle.truffle.api.TruffleFile;
 import com.oracle.truffle.api.source.Source;
 import com.oracle.truffle.llvm.runtime.LLVMContext;
+import com.oracle.truffle.llvm.runtime.debug.scope.LLVMSourceFileReference;
 import com.oracle.truffle.llvm.runtime.except.LLVMParserException;
 import com.oracle.truffle.llvm.runtime.types.symbols.LLVMIdentifier;
 
 final class LLScanner {
+
+    static final LLSourceMap NOT_FOUND = new LLSourceMap(null);
 
     private static TruffleFile findMapping(Path canonicalBCPath, String pathMappings, LLVMContext context) {
         if (pathMappings.isEmpty()) {
@@ -58,7 +64,7 @@ final class LLScanner {
             final Path mappedBCFile = Paths.get(splittedMapping[0]).normalize().toAbsolutePath();
             if (mappedBCFile.equals(canonicalBCPath)) {
                 final Path mappedLLFile = Paths.get(splittedMapping[1]).normalize().toAbsolutePath();
-                return context.getEnv().getTruffleFile(mappedLLFile.toUri());
+                return context.getEnv().getInternalTruffleFile(mappedLLFile.toUri());
             }
         }
 
@@ -66,7 +72,7 @@ final class LLScanner {
     }
 
     private static TruffleFile findLLPathMapping(String bcPath, String pathMappings, LLVMContext context) {
-        if (bcPath == null || !bcPath.endsWith(".bc")) {
+        if (bcPath == null) {
             return null;
         }
 
@@ -76,47 +82,89 @@ final class LLScanner {
             return mappedFile;
         }
 
-        final String defaultPath = canonicalBCPath.toString().substring(0, bcPath.length() - ".bc".length()) + ".ll";
-        return context.getEnv().getTruffleFile(defaultPath);
+        return context.getEnv().getInternalTruffleFile(getLLPath(canonicalBCPath.toString()));
     }
 
-    static LLSourceMap findAndScanLLFile(String bcPath, String pathMappings, LLVMContext context) {
-        if (bcPath == null || !bcPath.endsWith(".bc")) {
-            return null;
+    private static String getLLPath(String canonicalBCPath) {
+        if (canonicalBCPath.endsWith(".bc")) {
+            return canonicalBCPath.substring(0, canonicalBCPath.length() - ".bc".length()) + ".ll";
+        }
+        return canonicalBCPath + ".ll";
+    }
+
+    static LLSourceMap findAndScanLLFile(String bcPath, String pathMappings, LLVMContext context, List<LLVMSourceFileReference> sourceFileReferences) {
+        if (bcPath == null) {
+            return NOT_FOUND;
         }
 
         final TruffleFile llFile = findLLPathMapping(bcPath, pathMappings, context);
         if (llFile == null || !llFile.exists() || !llFile.isReadable()) {
-            return null;
+            printWarning("Cannot find .ll file for %s (decrease %s logging level to disable this message)\n", bcPath, LLVMContext.llDebugLogger().getName());
+            return NOT_FOUND;
         }
 
         try (BufferedReader llReader = llFile.newBufferedReader()) {
             final Source llSource = Source.newBuilder("llvm", llFile).mimeType("text/x-llvmir").build();
             final LLSourceMap sourceMap = new LLSourceMap(llSource);
 
-            final LLScanner scanner = new LLScanner(sourceMap);
+            EconomicSet<LLVMSourceFileReference> sourceFileWorkset = createSourceFileSet(sourceFileReferences);
+            if (sourceFileWorkset == null) {
+                printVerbose("No source file checksums found in %s\n", bcPath);
+            }
+            final LLScanner scanner = new LLScanner(sourceMap, sourceFileWorkset);
             for (String line = llReader.readLine(); line != null; line = llReader.readLine()) {
                 if (!scanner.continueAfter(line)) {
-                    return sourceMap;
+                    break;
                 }
             }
+            if (sourceFileWorkset != null && !sourceFileWorkset.isEmpty()) {
+                printVerbose("Checksums in the .ll file (%s) and the .bc file (%s) do not match!\n", llFile, bcPath);
+                printVerbose("The following files have changed in the .bc file:\n");
+                for (LLVMSourceFileReference sourceFileReference : sourceFileWorkset) {
+                    printVerbose("  %s\n", LLVMSourceFileReference.toString(sourceFileReference));
+                }
+            }
+            return sourceMap;
         } catch (IOException e) {
             throw new LLVMParserException("Error while reading from file: " + llFile.getPath());
         }
+    }
 
-        return null;
+    private static void printWarning(String format, Object... args) {
+        if (LLVMContext.llDebugWarningEnabled()) {
+            LLVMContext.llDebugWarningLog(String.format(format, args));
+        }
+    }
+
+    private static void printVerbose(String format, Object... args) {
+        if (LLVMContext.llDebugVerboseEnabled()) {
+            LLVMContext.llDebugVerboseLog(String.format(format, args));
+        }
+    }
+
+    private static EconomicSet<LLVMSourceFileReference> createSourceFileSet(List<LLVMSourceFileReference> sourceFileReferences) {
+        if (sourceFileReferences == null || sourceFileReferences.isEmpty()) {
+            return null;
+        }
+        EconomicSet<LLVMSourceFileReference> units = EconomicSet.create(LLVMSourceFileReference.EQUIVALENCE);
+        units.addAll(sourceFileReferences);
+        return units;
     }
 
     private final LLSourceMap map;
 
     private int currentLine;
     private LLSourceMap.Function function;
+    private final EconomicSet<LLVMSourceFileReference> sourceFileReferences;
 
-    private LLScanner(LLSourceMap map) {
+    private LLScanner(LLSourceMap map, EconomicSet<LLVMSourceFileReference> sourceFileReferences) {
         this.map = map;
         this.currentLine = 0;
         this.function = null;
+        this.sourceFileReferences = sourceFileReferences;
     }
+
+    private static final Pattern DIFILE_PATTERN = Pattern.compile("!\\d+ = !DIFile\\((?:filename: \"([^\"]*)\", )?(?:directory: \"([^\"]*)\", )?(?:checksumkind: (.*), )?checksum: \"(\\w+)\"\\)");
 
     // parse a line and indicate if the scanner should continue after it
     private boolean continueAfter(String line) {
@@ -140,25 +188,50 @@ final class LLScanner {
         } else if (line.startsWith("@")) {
             parseGlobal(line);
 
-        } else if (line.startsWith("!0")) {
-            // this is the first entry of the metadata list in the *.ll file
-            // after it, no more functions will be defined, so we stop scanning here
-            // to avoid parsing the metadata which often accounts for more than half
-            // of the total file size
-            return false;
+        } else {
+            if (sourceFileReferences == null) {
+                if (line.startsWith("!0")) {
+                    // this is the first entry of the metadata list in the *.ll file
+                    // after it, no more functions will be defined, so we stop scanning here
+                    // to avoid parsing the metadata which often accounts for more than half
+                    // of the total file size
+                    return false;
+                }
+            } else {
+                /*
+                 * We do have source files we need to verify. Only stop if all files have been
+                 * found.
+                 */
+                Matcher matcher = DIFILE_PATTERN.matcher(line);
+                if (matcher.matches()) {
+                    String filename = matcher.group(1);
+                    String directory = matcher.group(2);
+                    String checksumKind = matcher.group(3);
+                    String checksum = matcher.group(4);
+                    LLVMSourceFileReference unit = LLVMSourceFileReference.create(filename, directory, checksumKind, checksum);
+                    sourceFileReferences.remove(unit);
+                    if (sourceFileReferences.isEmpty()) {
+                        // all source files found
+                        return false;
+                    }
+                }
+            }
         }
 
         return true;
     }
 
-    private static final Pattern FUNCTION_NAME_REGEX = Pattern.compile("define .* @\"?(?<functionName>\\S+)\"?\\(.*");
+    private static final Pattern FUNCTION_NAME_REGEX = Pattern.compile("define .* @((?<functionNameUnquoted>[^\\s(\"]+)|\"(?<functionNameQuoted>[^\"]+)\")\\(.*");
 
     private void beginFunction(String line) {
         assert function == null;
 
         final Matcher matcher = FUNCTION_NAME_REGEX.matcher(line);
         if (matcher.matches()) {
-            String functionName = matcher.group("functionName");
+            String functionName = matcher.group("functionNameUnquoted");
+            if (functionName == null) {
+                functionName = matcher.group("functionNameQuoted");
+            }
             functionName = LLVMIdentifier.toGlobalIdentifier(functionName);
             function = new LLSourceMap.Function(functionName, currentLine);
             map.registerFunction(functionName, function);

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2016, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -41,6 +41,7 @@
 package com.oracle.truffle.api.test;
 
 import org.junit.Assert;
+import org.junit.BeforeClass;
 import org.junit.Test;
 
 import com.oracle.truffle.api.CallTarget;
@@ -51,8 +52,14 @@ import com.oracle.truffle.api.nodes.LoopNode;
 import com.oracle.truffle.api.nodes.Node;
 import com.oracle.truffle.api.nodes.RepeatingNode;
 import com.oracle.truffle.api.nodes.RootNode;
+import com.oracle.truffle.tck.tests.TruffleTestAssumptions;
 
 public class LoopNodeTest {
+
+    @BeforeClass
+    public static void runWithWeakEncapsulationOnly() {
+        TruffleTestAssumptions.assumeWeakEncapsulation();
+    }
 
     @Test
     public void testHundredInvocations() {
@@ -162,10 +169,19 @@ public class LoopNodeTest {
             }
         };
 
-        CallTarget target = Truffle.getRuntime().createCallTarget(root);
+        CallTarget target = root.getCallTarget();
         for (int i = 0; i < 1000; i++) {
             Assert.assertEquals(15, target.call());
         }
+    }
+
+    @Test
+    public void testSpecialValue() {
+        IterateAndReturnValueNode iterate = new IterateAndReturnValueNode("Ronaldo", 3);
+        TestWhileWithValueNode whileNode = new TestWhileWithValueNode(iterate);
+        final Object specialValue = whileNode.execute(null);
+        Assert.assertEquals(3, whileNode.continues);
+        Assert.assertEquals("Ronaldo", specialValue);
     }
 
     private static class BodyNode extends GuestLanguageNode {
@@ -201,6 +217,26 @@ public class LoopNodeTest {
 
     }
 
+    private static class IterateAndReturnValueNode extends GuestLanguageNode {
+        final Object specialValue;
+        int iterations;
+
+        IterateAndReturnValueNode(Object specialValue, int iterations) {
+            this.specialValue = specialValue;
+            this.iterations = iterations;
+        }
+
+        @Override
+        public Object execute(VirtualFrame frame) {
+            if (iterations == 0) {
+                return specialValue;
+            } else {
+                iterations--;
+                return RepeatingNode.CONTINUE_LOOP_STATUS;
+            }
+        }
+    }
+
     private static class TestWhileNode extends GuestLanguageNode {
 
         @Child private LoopNode loop;
@@ -214,7 +250,7 @@ public class LoopNodeTest {
 
         @Override
         public Object execute(VirtualFrame frame) {
-            loop.executeLoop(frame);
+            loop.execute(frame);
             return null;
         }
 
@@ -249,6 +285,44 @@ public class LoopNodeTest {
             }
         }
 
+    }
+
+    private static class TestWhileWithValueNode extends GuestLanguageNode {
+
+        @Child private LoopNode loop;
+
+        int continues;
+
+        TestWhileWithValueNode(GuestLanguageNode bodyNode) {
+            loop = Truffle.getRuntime().createLoopNode(new WhileWithValueRepeatingNode(bodyNode));
+        }
+
+        @Override
+        public Object execute(VirtualFrame frame) {
+            return loop.execute(frame);
+        }
+
+        private class WhileWithValueRepeatingNode extends Node implements RepeatingNode {
+            @Child private GuestLanguageNode bodyNode;
+
+            WhileWithValueRepeatingNode(GuestLanguageNode bodyNode) {
+                this.bodyNode = bodyNode;
+            }
+
+            @Override
+            public boolean executeRepeating(VirtualFrame frame) {
+                throw new RuntimeException("This method will not be called.");
+            }
+
+            @Override
+            public Object executeRepeatingWithValue(VirtualFrame frame) {
+                final Object result = bodyNode.execute(frame);
+                if (result == CONTINUE_LOOP_STATUS) {
+                    continues++;
+                }
+                return result;
+            }
+        }
     }
 
     // substitute with a guest language node type

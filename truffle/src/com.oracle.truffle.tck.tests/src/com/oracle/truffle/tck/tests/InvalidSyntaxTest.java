@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,20 +40,20 @@
  */
 package com.oracle.truffle.tck.tests;
 
-import java.io.IOException;
 import java.util.AbstractMap;
-import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.Objects;
+import java.util.TreeSet;
+
 import org.graalvm.polyglot.PolyglotException;
 import org.graalvm.polyglot.Source;
 import org.junit.AfterClass;
+import org.junit.Assume;
+import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
-import org.graalvm.polyglot.Engine;
-import org.junit.Assume;
-import org.junit.Before;
 
 @RunWith(Parameterized.class)
 public class InvalidSyntaxTest {
@@ -64,7 +64,7 @@ public class InvalidSyntaxTest {
     @Parameterized.Parameters(name = "{0}")
     public static Collection<Object[]> createInvalidSyntaxTests() {
         context = new TestContext(InvalidSyntaxTest.class);
-        final Collection<Object[]> result = new ArrayList<>();
+        final Collection<Object[]> result = new TreeSet<>(Comparator.comparing(a -> ((String) a[0])));
         for (String language : TestUtil.getRequiredLanguages(context)) {
             for (Source src : context.getInstalledProviders().get(language).createInvalidSyntaxScripts(context.getContext())) {
                 result.add(new Object[]{
@@ -73,21 +73,23 @@ public class InvalidSyntaxTest {
                 });
             }
         }
+        if (result.isEmpty()) {
+            // BeforeClass and AfterClass annotated methods are not called when there are no tests
+            // to run. But we need to free TestContext.
+            afterClass();
+        }
         return result;
     }
 
-    @AfterClass
-    public static void afterClass() throws IOException {
-        context.close();
-        context = null;
+    @BeforeClass
+    public static void setUpClass() {
+        TestUtil.assertNoCurrentContext();
     }
 
-    @Before
-    public void setUp() {
-        // JUnit mixes test executions from different classes. There are still tests using the
-        // deprecated PolyglotEngine. For tests executed by Parametrized runner
-        // creating Context as a test parameter we need to ensure that correct SPI is used.
-        Engine.create().close();
+    @AfterClass
+    public static void afterClass() {
+        context.close();
+        context = null;
     }
 
     public InvalidSyntaxTest(final String testName, final Source source) {

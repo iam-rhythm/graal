@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,6 +40,7 @@
  */
 package com.oracle.truffle.sl.test;
 
+import static com.oracle.truffle.sl.test.SLJavaInteropTest.toUnixString;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 
@@ -49,39 +50,47 @@ import java.io.IOException;
 import org.graalvm.polyglot.Context;
 import org.graalvm.polyglot.Engine;
 import org.graalvm.polyglot.Instrument;
+import org.graalvm.polyglot.PolyglotAccess;
 import org.junit.After;
 import org.junit.Before;
+import org.junit.BeforeClass;
 import org.junit.Test;
 
 import com.oracle.truffle.api.instrumentation.EventBinding;
 import com.oracle.truffle.api.instrumentation.TruffleInstrument;
 import com.oracle.truffle.sl.SLLanguage;
 
-public class SLSharedCodeSeparatedEnvTest {
+public class SLSharedCodeSeparatedEnvTest extends AbstractSLTest {
+
+    @BeforeClass
+    public static void runWithWeakEncapsulationOnly() {
+        TruffleTestAssumptions.assumeWeakEncapsulation();
+    }
 
     private ByteArrayOutputStream osRuntime;
     private ByteArrayOutputStream os1;
     private ByteArrayOutputStream os2;
     private Engine engine;
-    private Context e1;
-    private Context e2;
+    private Context c1;
+    private Context c2;
 
     @Before
     public void initializeEngines() {
+        int instances = SLLanguage.counter;
+
         osRuntime = new ByteArrayOutputStream();
-        engine = Engine.newBuilder().out(osRuntime).err(osRuntime).build();
+        engine = newEngineBuilder().out(osRuntime).err(osRuntime).build();
 
         os1 = new ByteArrayOutputStream();
         os2 = new ByteArrayOutputStream();
 
-        int instances = SLLanguage.counter;
         // @formatter:off
-        e1 = Context.newBuilder("sl").engine(engine).out(os1).build();
-        e1.getPolyglotBindings().putMember("extra", 1);
-        e2 = Context.newBuilder("sl").engine(engine).out(os2).build();
-        e2.getPolyglotBindings().putMember("extra", 2);
-        e1.initialize("sl");
-        e2.initialize("sl");
+        c1 = newContextBuilder("sl").engine(engine).out(os1).allowPolyglotAccess(PolyglotAccess.ALL).build();
+        c1.getPolyglotBindings().putMember("extra", 1);
+        c2 = newContextBuilder("sl").engine(engine).out(os2).allowPolyglotAccess(PolyglotAccess.ALL).build();
+        c2.getPolyglotBindings().putMember("extra", 2);
+        c1.initialize("sl");
+        c2.initialize("sl");
         assertEquals("One SLLanguage instance created", instances + 1, SLLanguage.counter);
     }
 
@@ -99,18 +108,18 @@ public class SLSharedCodeSeparatedEnvTest {
             "}";
         // @formatter:on
 
-        e1.eval("sl", sayHello);
-        assertEquals("Ahoj1\n", os1.toString("UTF-8"));
-        assertEquals("", os2.toString("UTF-8"));
+        c1.eval("sl", sayHello);
+        assertEquals("Ahoj1\n", toUnixString(os1));
+        assertEquals("", toUnixString(os2));
 
-        e2.eval("sl", sayHello);
-        assertEquals("Ahoj1\n", os1.toString("UTF-8"));
-        assertEquals("Ahoj2\n", os2.toString("UTF-8"));
+        c2.eval("sl", sayHello);
+        assertEquals("Ahoj1\n", toUnixString(os1));
+        assertEquals("Ahoj2\n", toUnixString(os2));
     }
 
     @Test
     public void instrumentsSeeOutputOfBoth() throws Exception {
-        Instrument outInstr = e2.getEngine().getInstruments().get("captureOutput");
+        Instrument outInstr = c2.getEngine().getInstruments().get("captureOutput");
         ByteArrayOutputStream outConsumer = outInstr.lookup(ByteArrayOutputStream.class);
         assertNotNull("Stream capturing is ready", outConsumer);
 
@@ -119,13 +128,13 @@ public class SLSharedCodeSeparatedEnvTest {
                         "}";
         // @formatter:on
 
-        e1.eval("sl", sayHello);
-        assertEquals("Ahoj1\n", os1.toString("UTF-8"));
-        assertEquals("", os2.toString("UTF-8"));
+        c1.eval("sl", sayHello);
+        assertEquals("Ahoj1\n", toUnixString(os1));
+        assertEquals("", toUnixString(os2));
 
-        e2.eval("sl", sayHello);
-        assertEquals("Ahoj1\n", os1.toString("UTF-8"));
-        assertEquals("Ahoj2\n", os2.toString("UTF-8"));
+        c2.eval("sl", sayHello);
+        assertEquals("Ahoj1\n", toUnixString(os1));
+        assertEquals("Ahoj2\n", toUnixString(os2));
 
         engine.close();
 
@@ -134,11 +143,11 @@ public class SLSharedCodeSeparatedEnvTest {
                                         "Ahoj1\n" +
                                         "Ahoj2\n" +
                                         "endOfOutputCapture\n",
-                        outConsumer.toString("UTF-8"));
+                        toUnixString(outConsumer));
 
         assertEquals("Output of instrument goes not to os runtime if specified otherwise",
                         "initializingOutputCapture\n" + "endOfOutputCapture\n",
-                        osRuntime.toString("UTF-8"));
+                        toUnixString(osRuntime));
     }
 
     @TruffleInstrument.Registration(id = "captureOutput", services = ByteArrayOutputStream.class)

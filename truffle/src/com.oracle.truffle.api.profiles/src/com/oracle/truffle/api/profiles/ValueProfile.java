@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2014, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -44,6 +44,8 @@ import java.util.Objects;
 
 import com.oracle.truffle.api.CompilerDirectives;
 import com.oracle.truffle.api.CompilerDirectives.CompilationFinal;
+import com.oracle.truffle.api.dsl.InlineSupport.InlineTarget;
+import com.oracle.truffle.api.dsl.NeverDefault;
 
 /**
  * <p>
@@ -72,10 +74,6 @@ import com.oracle.truffle.api.CompilerDirectives.CompilationFinal;
  *     }
  * }
  * </pre>
- * <p>
- *
- *
- * {@inheritDoc}
  *
  * @see #createIdentityProfile()
  * @see #createClassProfile()
@@ -109,12 +107,38 @@ public abstract class ValueProfile extends Profile {
      * @see ValueProfile usage example
      * @since 0.10
      */
+    @NeverDefault
     public static ValueProfile createClassProfile() {
         if (Profile.isProfilingEnabled()) {
             return ExactClass.create();
         } else {
             return Disabled.INSTANCE;
         }
+    }
+
+    /**
+     * <p>
+     * Returns a value profile that profiles the exact class of a value. It will check the class of
+     * the profiled value and provide additional information to the compiler if only non-null values
+     * of exactly one concrete Java class are passed as a parameter to the
+     * {@link ValueProfile#profile} method. This can be beneficial if subsequent code can take
+     * advantage of knowing the concrete class of the value. The profile will degrade to the generic
+     * case if a null value or if at least two instances of two different Java classes are
+     * registered.
+     * </p>
+     *
+     * <p>
+     * <b>Compilation notes:</b> Value profiles require a runtime check in their initialized state
+     * to verify their profiled class. If two classes have been seen on a single profile instance
+     * then this profile will transition to a generic state with no overhead.
+     * </P>
+     *
+     * @see ValueProfile usage example
+     * @since 23.0
+     */
+    @NeverDefault
+    public static ValueProfile create() {
+        return createClassProfile();
     }
 
     /**
@@ -131,37 +155,32 @@ public abstract class ValueProfile extends Profile {
      *
      * @since 0.10
      */
+    @NeverDefault
     public static ValueProfile createIdentityProfile() {
         if (Profile.isProfilingEnabled()) {
-            return Identity.create();
+            return Identity.create0();
         } else {
             return Disabled.INSTANCE;
         }
     }
 
     /**
-     * <p>
-     * Returns a value profile that profiles the object equality of a value. A single instance can
-     * only profile one set of equal values.
-     * </p>
+     * Returns the uncached version of the profile. The uncached version of a profile does nothing.
      *
-     * <p>
-     * <b>Compilation notes:</b> Equality profiles inline the body of the equal method of the first
-     * profiled value in order to verify its assumption. Please take care that you do this only for
-     * equals implementations that your guest language actually has control over otherwise your
-     * compiled code might contain recursions or too much code. If two non equal objects have been
-     * seen on a single profile instance then this profile will transition to a generic state with
-     * no overhead.
-     * </p>
-     *
-     * @since 0.10
+     * @since 19.0
      */
-    public static ValueProfile createEqualityProfile() {
-        if (Profile.isProfilingEnabled()) {
-            return Equality.create();
-        } else {
-            return Disabled.INSTANCE;
-        }
+    public static ValueProfile getUncached() {
+        return Disabled.INSTANCE;
+    }
+
+    /**
+     * Returns an inlined version of the profile. This version is automatically used by Truffle DSL
+     * node inlining.
+     *
+     * @since 23.0
+     */
+    public static InlinedExactClassProfile inline(InlineTarget target) {
+        return InlinedExactClassProfile.inline(target);
     }
 
     static final class Disabled extends ValueProfile {
@@ -180,61 +199,7 @@ public abstract class ValueProfile extends Profile {
 
         @Override
         public String toString() {
-            return toStringDisabled(ValueProfile.class);
-        }
-
-    }
-
-    static final class Equality extends ValueProfile {
-
-        private static final Object GENERIC = new Object();
-
-        @CompilationFinal protected Object cachedValue = null;
-
-        Equality() {
-        }
-
-        @Override
-        @SuppressWarnings("unchecked")
-        public <T> T profile(T newValue) {
-            // Field needs to be cached in local variable for thread safety and startup speed.
-            Object cached = this.cachedValue;
-            if (cached != GENERIC) {
-                if (cached != null && cached.equals(newValue)) {
-                    return (T) cached;
-                } else {
-                    CompilerDirectives.transferToInterpreterAndInvalidate();
-                    if (cached == null && newValue != null) {
-                        cachedValue = newValue;
-                    } else {
-                        cachedValue = GENERIC;
-                    }
-                }
-            }
-            return newValue;
-        }
-
-        public boolean isGeneric() {
-            return getCachedValue() == GENERIC;
-        }
-
-        public boolean isUninitialized() {
-            return getCachedValue() == null;
-        }
-
-        public Object getCachedValue() {
-            return cachedValue;
-        }
-
-        @Override
-        public String toString() {
-            return toString(ValueProfile.class, isUninitialized(), isGeneric(),
-                            String.format("value == %s@%x", cachedValue != null ? cachedValue.getClass().getSimpleName() : "null", Objects.hash(cachedValue)));
-        }
-
-        /* Needed for lazy class loading. */
-        static ValueProfile create() {
-            return new Equality();
+            return toStringDisabled();
         }
 
     }
@@ -282,13 +247,23 @@ public abstract class ValueProfile extends Profile {
         }
 
         @Override
+        public void disable() {
+            cachedValue = GENERIC;
+        }
+
+        @Override
+        public void reset() {
+            cachedValue = UNINITIALIZED;
+        }
+
+        @Override
         public String toString() {
             return toString(ValueProfile.class, isUninitialized(), isGeneric(),
                             String.format("value == %s@%x", cachedValue != null ? cachedValue.getClass().getSimpleName() : "null", Objects.hash(cachedValue)));
         }
 
         /* Needed for lazy class loading. */
-        static ValueProfile create() {
+        static ValueProfile create0() {
             return new Identity();
         }
 
@@ -311,8 +286,12 @@ public abstract class ValueProfile extends Profile {
             // Field needs to be cached in local variable for thread safety and startup speed.
             Class<?> clazz = cachedClass;
             if (clazz != Object.class) {
-                if (clazz != null && value != null && value.getClass() == clazz) {
-                    return (T) CompilerDirectives.castExact(value, clazz);
+                if (clazz != null && CompilerDirectives.isExact(value, clazz)) {
+                    if (CompilerDirectives.inInterpreter()) {
+                        return value;
+                    } else {
+                        return (T) CompilerDirectives.castExact(value, clazz);
+                    }
                 } else {
                     CompilerDirectives.transferToInterpreterAndInvalidate();
                     if (clazz == null && value != null) {
@@ -333,7 +312,17 @@ public abstract class ValueProfile extends Profile {
             return cachedClass == null;
         }
 
-        Class<?> getCachedClass() {
+        @Override
+        public void disable() {
+            cachedClass = Object.class;
+        }
+
+        @Override
+        public void reset() {
+            cachedClass = null;
+        }
+
+        Class<?> getCachedValue() {
             return cachedClass;
         }
 

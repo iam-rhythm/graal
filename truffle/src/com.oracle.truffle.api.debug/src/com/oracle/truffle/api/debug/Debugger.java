@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -51,17 +51,13 @@ import java.util.function.Consumer;
 
 import org.graalvm.polyglot.Engine;
 
-import com.oracle.truffle.api.CallTarget;
+import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
 import com.oracle.truffle.api.TruffleLanguage;
 import com.oracle.truffle.api.debug.impl.DebuggerInstrument;
-import com.oracle.truffle.api.frame.MaterializedFrame;
 import com.oracle.truffle.api.impl.Accessor;
 import com.oracle.truffle.api.instrumentation.Instrumenter;
 import com.oracle.truffle.api.instrumentation.TruffleInstrument;
 import com.oracle.truffle.api.instrumentation.TruffleInstrument.Env;
-import com.oracle.truffle.api.nodes.Node;
-import com.oracle.truffle.api.nodes.RootNode;
-import com.oracle.truffle.api.source.Source;
 
 /**
  * Class that simplifies implementing a debugger on top of Truffle. Primarily used to implement
@@ -95,14 +91,18 @@ public final class Debugger {
     final List<Object> propSupport = new CopyOnWriteArrayList<>();
     private final List<Consumer<Breakpoint>> breakpointAddedListeners = new CopyOnWriteArrayList<>();
     private final List<Consumer<Breakpoint>> breakpointRemovedListeners = new CopyOnWriteArrayList<>();
-    final ObjectStructures.MessageNodes msgNodes;
     private final Set<DebuggerSession> sessions = new HashSet<>();
     private final List<Breakpoint> breakpoints = new ArrayList<>();
     final Breakpoint alwaysHaltBreakpoint;
+    private final ThreadLocal<Integer> disabledSteppingCount = new ThreadLocal<>() {
+        @Override
+        protected Integer initialValue() {
+            return 0;
+        }
+    };
 
     Debugger(Env env) {
         this.env = env;
-        this.msgNodes = new ObjectStructures.MessageNodes();
         this.alwaysHaltBreakpoint = new Breakpoint(BreakpointLocation.ANY, SuspendAnchor.BEFORE);
         this.alwaysHaltBreakpoint.setEnabled(true);
     }
@@ -157,7 +157,7 @@ public final class Debugger {
      * Returns the number of active debugger sessions. This is useful, for instance, in deciding
      * whether to open a new debugger session, depending on whether there is an existing one or not.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public synchronized int getSessionCount() {
         return sessions.size();
@@ -169,6 +169,7 @@ public final class Debugger {
             for (Breakpoint b : breakpoints) {
                 b.sessionClosed(session);
             }
+            alwaysHaltBreakpoint.sessionClosed(session);
         }
     }
 
@@ -261,7 +262,7 @@ public final class Debugger {
      * list of breakpoints}. The reported breakpoint is not {@link Breakpoint#isModifiable()
      * modifiable}.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public void addBreakpointAddedListener(Consumer<Breakpoint> listener) {
         breakpointAddedListeners.add(listener);
@@ -270,7 +271,7 @@ public final class Debugger {
     /**
      * Remove a listener that was added by {@link #addBreakpointAddedListener(Consumer)}.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public void removeBreakpointAddedListener(Consumer<Breakpoint> listener) {
         breakpointAddedListeners.remove(listener);
@@ -281,7 +282,7 @@ public final class Debugger {
      * list of breakpoints}. The reported breakpoint is not {@link Breakpoint#isModifiable()
      * modifiable}.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public void addBreakpointRemovedListener(Consumer<Breakpoint> listener) {
         breakpointRemovedListeners.add(listener);
@@ -290,10 +291,77 @@ public final class Debugger {
     /**
      * Remove a listener that was added by {@link #addBreakpointRemovedListener(Consumer)}.
      *
-     * @since 1.0
+     * @since 19.0
      */
     public void removeBreakpointRemovedListener(Consumer<Breakpoint> listener) {
         breakpointRemovedListeners.remove(listener);
+    }
+
+    /**
+     * Disable stepping on the current thread. The current thread must be in an entered context.
+     * Assure that the stepping is restored again by calling {@link #restoreStepping()} like:
+     *
+     * {@snippet file = "com/oracle/truffle/api/debug/Debugger.java" region =
+     * "DebuggerSnippets#disableStepping"}
+     * <p>
+     * The typical usage is to disable stepping on a specific code path. E.g. when a guest code is
+     * executed as a safepoint action, which executes out of an apparent code flow. The calls to
+     * disable/restoreStepping can be nested. Every call to {@link #disableStepping()} increments a
+     * disabled count by one and every call to {@link #restoreStepping()} decrements the disabled
+     * count by one.
+     * <p>
+     * Disabling of stepping does not prevent breakpoints from being hit. After a breakpoint is hit,
+     * stepping is allowed automatically for the breakpoint's session, so that the user can continue
+     * stepping from the breakpoint location. The stepping is allowed only on the level of the
+     * disabled count where the breakpoint is hit. The stepping is still disabled on other disabled
+     * count levels.
+     *
+     * @throws IllegalStateException when not in an entered context
+     * @see #restoreStepping()
+     * @since 22.3
+     */
+    @TruffleBoundary
+    public void disableStepping() {
+        if (env.getEnteredContext() == null) {
+            throw new IllegalStateException("Need to be called on a context thread");
+        }
+        int count = disabledSteppingCount.get();
+        disabledSteppingCount.set(count + 1);
+    }
+
+    /**
+     * Restore the stepping on the current thread. The current thread must be in an entered context
+     * and after a call to {@link #disableStepping()}. The restore decrements the disabled count by
+     * one and allows stepping when zero is reached.
+     *
+     * @throws IllegalStateException when not in an entered context, or when called without the
+     *             preceding call to {@link #disableStepping()}
+     * @see #disableStepping()
+     * @since 22.3
+     */
+    @TruffleBoundary
+    public void restoreStepping() {
+        if (env.getEnteredContext() == null) {
+            throw new IllegalStateException("Need to be called on a context thread");
+        }
+        int count = disabledSteppingCount.get();
+        if (count == 0) {
+            throw new IllegalStateException("restoreStepping() called without a corresponding disabledStepping()");
+        }
+        // When stepping is restored, we need to clear the session-specific overrides
+        synchronized (this) {
+            for (DebuggerSession session : sessions) {
+                session.clearDisabledSteppingOnCurrentThread(count);
+            }
+        }
+        count--;
+        disabledSteppingCount.set(count);
+    }
+
+    // returns 0 when stepping is not disabled,
+    // positive value - the stepping disable count
+    int getSteppingDisabledCount() {
+        return disabledSteppingCount.get();
     }
 
     Env getEnv() {
@@ -302,10 +370,6 @@ public final class Debugger {
 
     Instrumenter getInstrumenter() {
         return env.getInstrumenter();
-    }
-
-    ObjectStructures.MessageNodes getMessageNodes() {
-        return msgNodes;
     }
 
     static void trace(String message, Object... parameters) {
@@ -320,7 +384,7 @@ public final class Debugger {
      *
      * @param env the instrument environment to find debugger for
      * @return an instance of associated debugger, never <code>null</code>
-     * @since 1.0
+     * @since 19.0
      */
     public static Debugger find(TruffleInstrument.Env env) {
         return env.lookup(env.getInstruments().get("debugger"), Debugger.class);
@@ -331,7 +395,7 @@ public final class Debugger {
      *
      * @param engine the engine to find debugger for
      * @return an instance of associated debugger, never <code>null</code>
-     * @since 1.0
+     * @since 19.0
      */
     public static Debugger find(Engine engine) {
         return engine.getInstruments().get("debugger").lookup(Debugger.class);
@@ -352,40 +416,33 @@ public final class Debugger {
     }
 
     static final class AccessorDebug extends Accessor {
-
-        @Override
-        protected Nodes nodes() {
-            return super.nodes();
-        }
-
-        /*
-         * TODO get rid of this access and replace it with an API in {@link TruffleInstrument.Env}.
-         * I don't think {@link CallTarget} is the right return type here as we want to make it
-         * embeddable into the current AST.
-         */
-        protected CallTarget parse(Source code, Node context, String... argumentNames) {
-            RootNode rootNode = context.getRootNode();
-            return languageSupport().parse(engineSupport().getEnvForInstrument(rootNode.getLanguageInfo()), code, context, argumentNames);
-        }
-
-        /*
-         * TODO I initially moved this to TruffleInstrument.Env but decided against as a new API for
-         * inline parsing might replace it.
-         */
-        protected Object evalInContext(Source source, Node node, MaterializedFrame frame) {
-            return languageSupport().evalInContext(source, node, frame);
-        }
-
     }
 
     static final AccessorDebug ACCESSOR = new AccessorDebug();
 
-    static {
-        DebuggerInstrument.setFactory(new DebuggerInstrument.DebuggerFactory() {
+    static DebuggerInstrument.DebuggerFactory createFactory() {
+        return new DebuggerInstrument.DebuggerFactory() {
             public Debugger create(Env env) {
                 return new Debugger(env);
             }
-        });
+        };
+    }
+
+}
+
+class DebuggerSnippets {
+
+    public void disableStepping() {
+        Engine engine = Engine.create();
+        // @start region = "DebuggerSnippets#disableStepping"
+        Debugger debugger = Debugger.find(engine);
+        debugger.disableStepping();
+        try {
+            // run code which debugger should not step into
+        } finally {
+            debugger.restoreStepping();
+        }
+        // @end region = "DebuggerSnippets#disableStepping"
     }
 
 }

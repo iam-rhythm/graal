@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -41,20 +41,19 @@
 package com.oracle.truffle.tck.tests;
 
 import com.oracle.truffle.tck.common.inline.InlineVerifier;
-import java.io.IOException;
 import java.util.AbstractMap;
 import java.util.Collection;
-import java.util.LinkedHashSet;
+import java.util.Comparator;
 import java.util.Objects;
+import java.util.TreeSet;
 
 import org.junit.AfterClass;
 import org.junit.Assume;
-import org.junit.Before;
+import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 
-import org.graalvm.polyglot.Engine;
 import org.graalvm.polyglot.PolyglotException;
 import org.graalvm.polyglot.Value;
 import org.graalvm.polyglot.tck.InlineSnippet;
@@ -68,27 +67,29 @@ public class InlineExecutionTest {
     @Parameterized.Parameters(name = "{0}")
     public static Collection<InlineTestRun> createScriptTests() {
         context = new TestContext(InlineExecutionTest.class);
-        final Collection<InlineTestRun> res = new LinkedHashSet<>();
+        final Collection<InlineTestRun> res = new TreeSet<>(Comparator.comparing(TestRun::toString));
         for (String lang : TestUtil.getRequiredLanguages(context)) {
             for (InlineSnippet snippet : context.getInlineScripts(lang)) {
                 res.add(new InlineTestRun(new AbstractMap.SimpleImmutableEntry<>(lang, snippet.getScript()), snippet));
             }
         }
+        if (res.isEmpty()) {
+            // BeforeClass and AfterClass annotated methods are not called when there are no tests
+            // to run. But we need to free TestContext.
+            afterClass();
+        }
         return res;
     }
 
-    @AfterClass
-    public static void afterClass() throws IOException {
-        context.close();
-        context = null;
+    @BeforeClass
+    public static void setUpClass() {
+        TestUtil.assertNoCurrentContext();
     }
 
-    @Before
-    public void setUp() {
-        // JUnit mixes test executions from different classes. There are still tests using the
-        // deprecated PolyglotEngine. For tests executed by Parametrized runner
-        // creating Context as a test parameter we need to ensure that correct SPI is used.
-        Engine.create().close();
+    @AfterClass
+    public static void afterClass() {
+        context.close();
+        context = null;
     }
 
     public InlineExecutionTest(final InlineTestRun testRun) {
@@ -109,13 +110,22 @@ public class InlineExecutionTest {
         }
         context.getContext().initialize(testRun.getID());
         context.setInlineSnippet(testRun.getID(), inlineSnippet, verifier);
+        Value result = null;
+        PolyglotException ex = null;
         try {
             try {
-                final Value result = testRun.getSnippet().getExecutableValue().execute(testRun.getActualParameters().toArray());
-                TestUtil.validateResult(testRun, result, null);
+                result = testRun.getSnippet().getExecutableValue().execute(testRun.getActualParameters().toArray());
+            } catch (IllegalArgumentException e) {
+                ex = context.getContext().asValue(e).as(PolyglotException.class);
+                TestUtil.validateResult(testRun, ex);
                 success = true;
-            } catch (PolyglotException pe) {
-                TestUtil.validateResult(testRun, null, pe);
+            } catch (PolyglotException e) {
+                ex = e;
+                TestUtil.validateResult(testRun, e);
+                success = true;
+            }
+            if (result != null) {
+                TestUtil.validateResult(testRun, result, true);
                 success = true;
             }
             if (verifier != null && verifier.exception != null) {
@@ -125,9 +135,9 @@ public class InlineExecutionTest {
         } catch (PolyglotException | AssertionError e) {
             throw new AssertionError(
                             TestUtil.formatErrorMessage(
-                                            "Unexpected Exception: " + e.getMessage(),
+                                            "Unexpected Exception: " + e,
                                             testRun,
-                                            context),
+                                            context, result, ex),
                             e);
         } finally {
             context.setInlineSnippet(null, null, null);
@@ -135,7 +145,7 @@ public class InlineExecutionTest {
         }
     }
 
-    private class TestResultVerifier implements InlineVerifier.ResultVerifier {
+    private final class TestResultVerifier implements InlineVerifier.ResultVerifier {
 
         Exception exception;
 
@@ -143,14 +153,14 @@ public class InlineExecutionTest {
         public void verify(Object ret) {
             Value result = context.getValue(ret);
             InlineSnippet inlineSnippet = testRun.getInlineSnippet();
-            TestUtil.validateResult(inlineSnippet.getResultVerifier(), testRun, result, null);
+            TestUtil.validateResult(inlineSnippet.getResultVerifier(), testRun, result, true);
         }
 
         @Override
         public void verify(PolyglotException pe) {
             InlineSnippet inlineSnippet = testRun.getInlineSnippet();
             try {
-                TestUtil.validateResult(inlineSnippet.getResultVerifier(), testRun, null, pe);
+                TestUtil.validateResult(inlineSnippet.getResultVerifier(), testRun, pe);
             } catch (Exception exc) {
                 exception = exc;
             }

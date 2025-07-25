@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,13 +40,23 @@
  */
 package com.oracle.truffle.nfi.test.interop;
 
-import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
-import com.oracle.truffle.api.interop.ForeignAccess;
-import com.oracle.truffle.api.interop.TruffleObject;
 import java.lang.reflect.Field;
+import java.math.BigInteger;
+
 import org.junit.Assert;
+
+import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
+import com.oracle.truffle.api.interop.InteropLibrary;
+import com.oracle.truffle.api.interop.TruffleObject;
+import com.oracle.truffle.api.interop.UnsupportedMessageException;
+import com.oracle.truffle.api.interop.UnsupportedTypeException;
+import com.oracle.truffle.api.library.CachedLibrary;
+import com.oracle.truffle.api.library.ExportLibrary;
+import com.oracle.truffle.api.library.ExportMessage;
+
 import sun.misc.Unsafe;
 
+@ExportLibrary(InteropLibrary.class)
 public class NativeVector implements TruffleObject, AutoCloseable {
 
     private final double[] vector;
@@ -58,7 +68,8 @@ public class NativeVector implements TruffleObject, AutoCloseable {
         this.vector = vector.clone();
     }
 
-    public int size() {
+    @ExportMessage
+    public int getArraySize() {
         return vector.length;
     }
 
@@ -75,7 +86,8 @@ public class NativeVector implements TruffleObject, AutoCloseable {
     }
 
     @TruffleBoundary
-    public void transitionToNative() {
+    @ExportMessage
+    public void toNative() {
         if (!isPointer()) {
             nativeStorage = unsafe.allocateMemory(vector.length * Double.BYTES);
 
@@ -92,19 +104,44 @@ public class NativeVector implements TruffleObject, AutoCloseable {
         }
     }
 
+    @ExportMessage
     public boolean isPointer() {
         return nativeStorage != 0;
     }
 
+    @ExportMessage
     public long asPointer() {
         return nativeStorage;
     }
 
-    public double get(int idx) {
+    @ExportMessage
+    public boolean hasArrayElements() {
+        return true;
+    }
+
+    @ExportMessage(name = "isArrayElementReadable")
+    @ExportMessage(name = "isArrayElementModifiable")
+    @ExportMessage(name = "isArrayElementInsertable")
+    public boolean isArrayElementAccessable(long idx) {
+        return 0 <= idx && idx < getArraySize();
+    }
+
+    @ExportMessage
+    public double readArrayElement(long idx) {
         if (isPointer()) {
             return unsafe.getDouble(nativeStorage + idx * Double.BYTES);
         } else {
-            return vector[idx];
+            return vector[(int) idx];
+        }
+    }
+
+    @ExportMessage(limit = "3")
+    public void writeArrayElement(long idx, Object value,
+                    @CachedLibrary("value") InteropLibrary interop) throws UnsupportedTypeException {
+        try {
+            set((int) idx, interop.asDouble(value));
+        } catch (UnsupportedMessageException ex) {
+            throw UnsupportedTypeException.create(new Object[]{value});
         }
     }
 
@@ -116,8 +153,78 @@ public class NativeVector implements TruffleObject, AutoCloseable {
         }
     }
 
-    @Override
-    public ForeignAccess getForeignAccess() {
-        return NativeVectorMessageResolutionForeign.ACCESS;
+    @ExportMessage
+    @ExportMessage(name = "fitsInDouble")
+    boolean isNumber() {
+        return vector.length == 1;
+    }
+
+    @ExportMessage
+    double asDouble() throws UnsupportedMessageException {
+        if (isNumber()) {
+            return readArrayElement(0);
+        } else {
+            throw UnsupportedMessageException.create();
+        }
+    }
+
+    @ExportMessage
+    boolean fitsInByte() {
+        return false;
+    }
+
+    @ExportMessage
+    boolean fitsInShort() {
+        return false;
+    }
+
+    @ExportMessage
+    boolean fitsInInt() {
+        return false;
+    }
+
+    @ExportMessage
+    boolean fitsInLong() {
+        return false;
+    }
+
+    @ExportMessage
+    boolean fitsInFloat() {
+        return false;
+    }
+
+    @ExportMessage
+    boolean fitsInBigInteger() {
+        return false;
+    }
+
+    @ExportMessage
+    byte asByte() throws UnsupportedMessageException {
+        throw UnsupportedMessageException.create();
+    }
+
+    @ExportMessage
+    short asShort() throws UnsupportedMessageException {
+        throw UnsupportedMessageException.create();
+    }
+
+    @ExportMessage
+    int asInt() throws UnsupportedMessageException {
+        throw UnsupportedMessageException.create();
+    }
+
+    @ExportMessage
+    long asLong() throws UnsupportedMessageException {
+        throw UnsupportedMessageException.create();
+    }
+
+    @ExportMessage
+    float asFloat() throws UnsupportedMessageException {
+        throw UnsupportedMessageException.create();
+    }
+
+    @ExportMessage
+    BigInteger asBigInteger() throws UnsupportedMessageException {
+        throw UnsupportedMessageException.create();
     }
 }

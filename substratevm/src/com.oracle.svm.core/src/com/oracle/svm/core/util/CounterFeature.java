@@ -25,16 +25,18 @@
 package com.oracle.svm.core.util;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 
-import org.graalvm.nativeimage.Feature;
 import org.graalvm.nativeimage.ImageSingletons;
 
-import com.oracle.svm.core.annotate.AutomaticFeature;
+import com.oracle.svm.core.feature.AutomaticallyRegisteredFeature;
+import com.oracle.svm.core.feature.InternalFeature;
+import com.oracle.svm.core.jdk.RuntimeSupport;
 import com.oracle.svm.core.util.Counter.Group;
 
-@AutomaticFeature
-public class CounterFeature implements Feature {
+@AutomaticallyRegisteredFeature
+public class CounterFeature implements InternalFeature {
 
     @Override
     public void afterRegistration(AfterRegistrationAccess access) {
@@ -42,10 +44,11 @@ public class CounterFeature implements Feature {
     }
 
     @Override
-    public void duringSetup(DuringSetupAccess access) {
+    public void beforeAnalysis(BeforeAnalysisAccess access) {
         CounterGroupList counterGroupList = ImageSingletons.lookup(CounterGroupList.class);
-        List<Group> enabledGroups = new ArrayList<>(counterGroupList.value.size());
-        for (Group group : counterGroupList.value) {
+        List<Group> candidateGroups = counterGroupList.getGroups();
+        List<Group> enabledGroups = new ArrayList<>(candidateGroups.size());
+        for (Group group : candidateGroups) {
             /*
              * Set the actual enabled value, the value is constant folded during image generation.
              */
@@ -54,7 +57,11 @@ public class CounterFeature implements Feature {
                 enabledGroups.add(group);
             }
         }
-        enabledGroups.sort((g1, g2) -> g1.name.compareTo(g2.name));
-        ImageSingletons.add(CounterSupport.class, new CounterSupport(enabledGroups.toArray(new Group[enabledGroups.size()])));
+
+        if (enabledGroups.size() > 0) {
+            enabledGroups.sort(Comparator.comparing(g -> g.name));
+            ImageSingletons.add(CounterSupport.class, new CounterSupport(enabledGroups.toArray(new Group[0])));
+            RuntimeSupport.getRuntimeSupport().addShutdownHook(CounterSupport.shutdownHook());
+        }
     }
 }

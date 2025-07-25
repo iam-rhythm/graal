@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,10 +40,10 @@
  */
 package com.oracle.truffle.sl.test;
 
+import static com.oracle.truffle.sl.test.SLJavaInteropTest.toUnixString;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -53,10 +53,13 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.io.PrintStream;
 import java.math.BigInteger;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.Semaphore;
 
 import org.graalvm.polyglot.Context;
@@ -65,39 +68,54 @@ import org.graalvm.polyglot.Instrument;
 import org.graalvm.polyglot.PolyglotException;
 import org.graalvm.polyglot.Source;
 import org.graalvm.polyglot.Value;
+import org.junit.BeforeClass;
 import org.junit.Test;
 
 import com.oracle.truffle.api.CompilerDirectives;
 import com.oracle.truffle.api.CompilerDirectives.CompilationFinal;
-import com.oracle.truffle.api.Scope;
+import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
+import com.oracle.truffle.api.exception.AbstractTruffleException;
 import com.oracle.truffle.api.frame.MaterializedFrame;
 import com.oracle.truffle.api.frame.VirtualFrame;
 import com.oracle.truffle.api.instrumentation.EventBinding;
 import com.oracle.truffle.api.instrumentation.EventContext;
 import com.oracle.truffle.api.instrumentation.ExecutionEventListener;
+import com.oracle.truffle.api.instrumentation.InstrumentableNode;
 import com.oracle.truffle.api.instrumentation.ProbeNode;
 import com.oracle.truffle.api.instrumentation.SourceSectionFilter;
 import com.oracle.truffle.api.instrumentation.StandardTags;
 import com.oracle.truffle.api.instrumentation.StandardTags.CallTag;
+import com.oracle.truffle.api.instrumentation.StandardTags.RootBodyTag;
+import com.oracle.truffle.api.instrumentation.StandardTags.RootTag;
+import com.oracle.truffle.api.instrumentation.StandardTags.StatementTag;
 import com.oracle.truffle.api.instrumentation.TruffleInstrument;
-import com.oracle.truffle.api.interop.ForeignAccess;
-import com.oracle.truffle.api.interop.KeyInfo;
-import com.oracle.truffle.api.interop.Message;
-import com.oracle.truffle.api.interop.MessageResolution;
-import com.oracle.truffle.api.interop.Resolve;
+import com.oracle.truffle.api.interop.InteropLibrary;
+import com.oracle.truffle.api.interop.InvalidArrayIndexException;
+import com.oracle.truffle.api.interop.NodeLibrary;
 import com.oracle.truffle.api.interop.TruffleObject;
 import com.oracle.truffle.api.interop.UnknownIdentifierException;
 import com.oracle.truffle.api.interop.UnsupportedMessageException;
+import com.oracle.truffle.api.library.ExportLibrary;
+import com.oracle.truffle.api.library.ExportMessage;
+import com.oracle.truffle.api.library.LibraryFactory;
 import com.oracle.truffle.api.nodes.Node;
 import com.oracle.truffle.api.nodes.RootNode;
 import com.oracle.truffle.api.source.SourceSection;
-import com.oracle.truffle.sl.runtime.SLBigNumber;
+import com.oracle.truffle.sl.runtime.SLBigInteger;
+import com.oracle.truffle.sl.runtime.SLFunction;
 import com.oracle.truffle.tck.DebuggerTester;
 
 /**
  * Test of SL instrumentation.
  */
-public class SLInstrumentTest {
+public class SLInstrumentTest extends AbstractSLTest {
+
+    static final InteropLibrary INTEROP = LibraryFactory.resolve(InteropLibrary.class).getUncached();
+
+    @BeforeClass
+    public static void runWithWeakEncapsulationOnly() {
+        TruffleTestAssumptions.assumeWeakEncapsulation();
+    }
 
     @Test
     public void testLexicalScopes() throws Exception {
@@ -118,322 +136,278 @@ public class SLInstrumentTest {
                         "      d = 7;\n" +      // 15
                         "      println(d);\n" +
                         "    }\n" +
+                        "    e = 30;\n" +
                         "  }\n" +
+                        "  f = 40;\n" +         // 20
                         "  println(b);\n" +
-                        "  println(a);\n" +     // 20
+                        "  println(a);\n" +
                         "}\n" +
                         "function main() {\n" +
-                        "  test(\"n_n\");\n" +
+                        "  test(\"n_n\");\n" +  // 25
                         "}";
         Source source = Source.newBuilder("sl", code, "testing").build();
         List<Throwable> throwables;
-        try (Engine engine = Engine.newBuilder().out(new java.io.OutputStream() {
-            // null output stream
-            @Override
-            public void write(int b) throws IOException {
-            }
-        }).build()) {
+        try (Engine engine = newEngineBuilder().out(OutputStream.nullOutputStream()).build()) {
             Instrument envInstr = engine.getInstruments().get("testEnvironmentHandlerInstrument");
             TruffleInstrument.Env env = envInstr.lookup(Environment.class).env;
             throwables = new ArrayList<>();
-            env.getInstrumenter().attachExecutionEventListener(SourceSectionFilter.newBuilder().lineIn(1, source.getLineCount()).build(), new ExecutionEventListener() {
-                @Override
-                public void onEnter(EventContext context, VirtualFrame frame) {
-                    Node node = context.getInstrumentedNode();
-                    Iterable<Scope> lexicalScopes = env.findLocalScopes(node, null);
-                    Iterable<Scope> dynamicScopes = env.findLocalScopes(node, frame);
-                    try {
-                        verifyLexicalScopes(lexicalScopes, dynamicScopes, context.getInstrumentedSourceSection().getStartLine(), frame.materialize());
-                    } catch (ThreadDeath t) {
-                        throw t;
-                    } catch (Throwable t) {
-                        CompilerDirectives.transferToInterpreter();
-                        PrintStream lsErr = System.err;
-                        lsErr.println("Line = " + context.getInstrumentedSourceSection().getStartLine());
-                        lsErr.println("Node = " + node + ", class = " + node.getClass().getName());
-                        t.printStackTrace(lsErr);
-                        throwables.add(t);
-                    }
-                }
+            env.getInstrumenter().attachExecutionEventListener(SourceSectionFilter.newBuilder().tagIs(StatementTag.class, RootTag.class, RootBodyTag.class).lineIn(1, source.getLineCount()).build(),
+                            new ExecutionEventListener() {
+                                @Override
+                                public void onEnter(EventContext context, VirtualFrame frame) {
+                                    verifyScopes(context, frame, true);
+                                }
 
-                @Override
-                public void onReturnValue(EventContext context, VirtualFrame frame, Object result) {
-                }
+                                @Override
+                                public void onReturnValue(EventContext context, VirtualFrame frame, Object result) {
+                                    if (context.hasTag(StandardTags.StatementTag.class)) {
+                                        verifyScopes(context, frame, false);
+                                    }
+                                }
 
-                @Override
-                public void onReturnExceptional(EventContext context, VirtualFrame frame, Throwable exception) {
-                }
-            });
-            Context.newBuilder().engine(engine).build().eval(source);
+                                @Override
+                                public void onReturnExceptional(EventContext context, VirtualFrame frame, Throwable exception) {
+                                }
+
+                                private void verifyScopes(EventContext context, VirtualFrame frame, boolean onEnter) {
+                                    Node node = context.getInstrumentedNode();
+                                    assertTrue(NodeLibrary.getUncached().hasScope(node, null));
+                                    assertTrue(NodeLibrary.getUncached().hasScope(node, frame));
+                                    assertFalse(NodeLibrary.getUncached().hasReceiverMember(node, frame));
+                                    assertTrue(NodeLibrary.getUncached().hasRootInstance(node, frame));
+                                    try {
+                                        verifyRootInstance(node, NodeLibrary.getUncached().getRootInstance(node, frame));
+                                        Object lexicalScope = NodeLibrary.getUncached().getScope(node, null, onEnter);
+                                        Object dynamicScope = NodeLibrary.getUncached().getScope(node, frame, onEnter);
+                                        Object lexicalArguments = findArguments(node, null);
+                                        Object dynamicArguments = findArguments(node, frame);
+                                        verifyLexicalScopes(onEnter, new Object[]{lexicalScope, dynamicScope}, new Object[]{lexicalArguments, dynamicArguments},
+                                                        context.getInstrumentedSourceSection().getStartLine(), node, frame.materialize());
+                                    } catch (ThreadDeath t) {
+                                        throw t;
+                                    } catch (Throwable t) {
+                                        CompilerDirectives.transferToInterpreter();
+                                        PrintStream lsErr = System.err;
+                                        lsErr.println("Line = " + context.getInstrumentedSourceSection().getStartLine() + " onEnter = " + onEnter);
+                                        lsErr.println("Node = " + node + ", class = " + node.getClass().getName());
+                                        t.printStackTrace(lsErr);
+                                        throwables.add(t);
+                                    }
+                                }
+
+                                private void verifyRootInstance(Node node, Object rootInstance) throws UnsupportedMessageException {
+                                    assertNotNull(rootInstance);
+                                    SLFunction function = (SLFunction) rootInstance;
+                                    assertEquals(node.getRootNode().getName(), InteropLibrary.getUncached().asString(function.getName()));
+                                }
+
+                                private Object findArguments(Node node, VirtualFrame frame) throws UnsupportedMessageException {
+                                    Node rootTagNode = node;
+                                    while (rootTagNode != null) {
+                                        if (rootTagNode instanceof InstrumentableNode && ((InstrumentableNode) rootTagNode).hasTag(StandardTags.RootTag.class)) {
+                                            break;
+                                        }
+                                        rootTagNode = rootTagNode.getParent();
+                                    }
+                                    if (rootTagNode == null) {
+                                        return null;
+                                    }
+                                    return NodeLibrary.getUncached().getScope(rootTagNode, frame, true);
+                                }
+                            });
+            newContextBuilder().engine(engine).build().eval(source);
         }
-        assertTrue(throwables.toString(), throwables.isEmpty());
+        if (!throwables.isEmpty()) {
+            if (throwables.size() == 1 && throwables.get(0) instanceof RuntimeException) {
+                throw (RuntimeException) throwables.get(0);
+            }
+            AssertionError error = new AssertionError("Expected no failure");
+            for (Throwable throwable : throwables) {
+                error.addSuppressed(throwable);
+            }
+            throw error;
+        }
     }
 
     @CompilerDirectives.TruffleBoundary
-    private static void verifyLexicalScopes(Iterable<Scope> lexicalScopes, Iterable<Scope> dynamicScopes, int line, MaterializedFrame frame) {
-        int depth = 0;
+    private void verifyLexicalScopes(boolean onEnter, Object[] scopes, Object[] arguments,
+                    int line, Node node, MaterializedFrame frame) throws UnsupportedMessageException, InvalidArrayIndexException {
         switch (line) {
             case 1:
                 break;
             case 2:
-                for (Scope ls : lexicalScopes) {
-                    // Test that ls.getNode() returns the current root node:
-                    checkRootNode(ls, "test", frame);
-                    TruffleObject arguments = (TruffleObject) ls.getArguments();
-                    checkVars(arguments, "n", null);
-                    TruffleObject variables = (TruffleObject) ls.getVariables();
-                    checkVars(variables, "n", null);
-                    depth++;
+                checkRootNode(scopes, "test", node, frame);
+                checkVars(arguments, "n", "n_n");
+                if (onEnter) {
+                    checkVars(scopes, "n", "n_n");
+                } else {
+                    checkVars(scopes, "n", "n_n", "a", 1L);
                 }
-                assertEquals("LexicalScope depth", 1, depth);
-                depth = 0;
-                for (Scope ls : dynamicScopes) {
-                    // Test that ls.getNode() returns the current root node:
-                    checkRootNode(ls, "test", frame);
-                    TruffleObject arguments = (TruffleObject) ls.getArguments();
-                    checkVars(arguments, "n", "n_n");
-                    TruffleObject variables = (TruffleObject) ls.getVariables();
-                    checkVars(variables, "n", "n_n");
-                    depth++;
-                }
-                assertEquals("DynamicScope depth", 1, depth);
+                assertFalse(getParentScopes(arguments));
+                assertFalse(getParentScopes(scopes));
                 break;
             case 3:
             case 7:
-            case 19:
-            case 20:
-                for (Scope ls : lexicalScopes) {
-                    checkRootNode(ls, "test", frame);
-                    TruffleObject arguments = (TruffleObject) ls.getArguments();
-                    checkVars(arguments, "n", null);
-                    TruffleObject variables = (TruffleObject) ls.getVariables();
-                    checkVars(variables, "n", null, "a", null);
-                    depth++;
-                }
-                assertEquals("LexicalScope depth", 1, depth);
-                depth = 0;
-                for (Scope ls : dynamicScopes) {
-                    checkRootNode(ls, "test", frame);
-                    TruffleObject arguments = (TruffleObject) ls.getArguments();
-                    checkVars(arguments, "n", "n_n");
-                    TruffleObject variables = (TruffleObject) ls.getVariables();
-                    long aVal = (line < 19) ? 1L : 4L;
-                    checkVars(variables, "n", "n_n", "a", aVal);
-                    depth++;
-                }
-                assertEquals("DynamicScope depth", 1, depth);
+                checkRootNode(scopes, "test", node, frame);
+                checkVars(arguments, "n", "n_n");
+                checkVars(scopes, "n", "n_n", "a", 1L);
+                assertFalse(getParentScopes(arguments));
+                assertFalse(getParentScopes(scopes));
                 break;
             case 4:
             case 8:
-                for (Scope ls : lexicalScopes) {
-                    if (depth == 0) {
-                        checkBlock(ls);
-                        TruffleObject variables = (TruffleObject) ls.getVariables();
-                        checkVars(variables);
-                        assertNull(ls.getArguments());
-                    } else {
-                        checkRootNode(ls, "test", frame);
-                        TruffleObject variables = (TruffleObject) ls.getVariables();
-                        checkVars(variables, "n", null, "a", null);
-                        TruffleObject arguments = (TruffleObject) ls.getArguments();
-                        checkVars(arguments, "n", null);
-                    }
-                    depth++;
+                checkBlock(scopes, node);
+                checkVars(arguments, "n", "n_n");
+                long bVal = (line == 4) ? 10L : 20L;
+                if (onEnter) {
+                    checkVars(scopes, "n", "n_n", "a", 1L);
+                } else {
+                    checkVars(scopes, "n", "n_n", "a", 1L, "b", bVal);
                 }
-                assertEquals("LexicalScope depth", 2, depth);
-                depth = 0;
-                for (Scope ls : dynamicScopes) {
-                    if (depth == 0) {
-                        checkBlock(ls);
-                        TruffleObject variables = (TruffleObject) ls.getVariables();
-                        checkVars(variables);
-                        assertNull(ls.getArguments());
-                    } else {
-                        checkRootNode(ls, "test", frame);
-                        TruffleObject variables = (TruffleObject) ls.getVariables();
-                        checkVars(variables, "n", "n_n", "a", 1L);
-                        TruffleObject arguments = (TruffleObject) ls.getArguments();
-                        checkVars(arguments, "n", "n_n");
-                    }
-                    depth++;
+                if (mode == RunMode.AST) {
+                    assertFalse(getParentScopes(arguments));
+                    assertTrue(getParentScopes(scopes));
+
+                    checkRootNode(scopes, "test", node, frame);
+                    checkVars(scopes, "n", "n_n", "a", 1L);
+                    assertFalse(getParentScopes(scopes));
+                } else {
+                    assertFalse(getParentScopes(arguments));
+                    assertFalse(getParentScopes(scopes));
                 }
-                assertEquals("DynamicScope depth", 2, depth);
                 break;
             case 5:
             case 9:
             case 10:
-                for (Scope ls : lexicalScopes) {
-                    if (depth == 0) {
-                        checkBlock(ls);
-                        TruffleObject variables = (TruffleObject) ls.getVariables();
-                        checkVars(variables, "b", null);
-                        assertNull(ls.getArguments());
-                    } else {
-                        checkRootNode(ls, "test", frame);
-                        TruffleObject variables = (TruffleObject) ls.getVariables();
-                        checkVars(variables, "n", null, "a", null);
-                        TruffleObject arguments = (TruffleObject) ls.getArguments();
-                        checkVars(arguments, "n", null);
-                    }
-                    depth++;
+                checkBlock(scopes, node);
+                checkVars(arguments, "n", "n_n");
+                long aVal = (line == 10 || line == 9 && !onEnter) ? 0L : 1L;
+                bVal = (line == 5) ? 10L : 20L;
+                if (onEnter || line != 10) {
+                    checkVars(scopes, "n", "n_n", "a", aVal, "b", bVal);
+                } else {
+                    checkVars(scopes, "n", "n_n", "a", aVal, "b", bVal, "c", 1L);
                 }
-                assertEquals("LexicalScope depth", 2, depth);
-                depth = 0;
-                for (Scope ls : dynamicScopes) {
-                    if (depth == 0) {
-                        checkBlock(ls);
-                        TruffleObject variables = (TruffleObject) ls.getVariables();
-                        long bVal = (line == 5) ? 10L : 20L;
-                        checkVars(variables, "b", bVal);
-                        assertNull(ls.getArguments());
-                    } else {
-                        checkRootNode(ls, "test", frame);
-                        TruffleObject variables = (TruffleObject) ls.getVariables();
-                        long aVal = (line == 10) ? 0L : 1L;
-                        checkVars(variables, "n", "n_n", "a", aVal);
-                        TruffleObject arguments = (TruffleObject) ls.getArguments();
-                        checkVars(arguments, "n", "n_n");
-                    }
-                    depth++;
+                if (mode == RunMode.AST) {
+                    assertFalse(getParentScopes(arguments));
+                    assertTrue(getParentScopes(scopes));
+
+                    checkRootNode(scopes, "test", node, frame);
+                    checkVars(scopes, "n", "n_n", "a", aVal);
+                    assertFalse(getParentScopes(scopes));
+                } else {
+                    assertFalse(getParentScopes(arguments));
+                    assertFalse(getParentScopes(scopes));
                 }
-                assertEquals("DynamicScope depth", 2, depth);
                 break;
             case 11:
-                for (Scope ls : lexicalScopes) {
-                    if (depth == 0) {
-                        checkBlock(ls);
-                        TruffleObject variables = (TruffleObject) ls.getVariables();
-                        checkVars(variables, "b", null, "c", null);
-                        assertNull(ls.getArguments());
-                    } else {
-                        checkRootNode(ls, "test", frame);
-                    }
-                    depth++;
+                checkBlock(scopes, node);
+                checkVars(arguments, "n", "n_n");
+                checkVars(scopes, "n", "n_n", "a", 0L, "b", 20L, "c", 1L);
+                if (mode == RunMode.AST) {
+                    assertFalse(getParentScopes(arguments));
+                    assertTrue(getParentScopes(scopes));
+
+                    checkRootNode(scopes, "test", node, frame);
+                    checkVars(scopes, "n", "n_n", "a", 0L);
+                    assertFalse(getParentScopes(scopes));
+                } else {
+                    assertFalse(getParentScopes(arguments));
+                    assertFalse(getParentScopes(scopes));
                 }
-                assertEquals("LexicalScope depth", 2, depth);
-                depth = 0;
-                for (Scope ls : dynamicScopes) {
-                    if (depth == 0) {
-                        checkBlock(ls);
-                        TruffleObject variables = (TruffleObject) ls.getVariables();
-                        checkVars(variables, "b", 20L, "c", 1L);
-                        assertNull(ls.getArguments());
-                    } else {
-                        checkRootNode(ls, "test", frame);
-                    }
-                    depth++;
-                }
-                assertEquals("DynamicScope depth", 2, depth);
                 break;
             case 12:
             case 13:
             case 14:
             case 15:
-                for (Scope ls : lexicalScopes) {
-                    if (depth == 0) {
-                        checkBlock(ls);
-                        TruffleObject variables = (TruffleObject) ls.getVariables();
-                        checkVars(variables);
-                        assertNull(ls.getArguments());
-                    } else if (depth == 1) {
-                        checkBlock(ls);
-                        TruffleObject variables = (TruffleObject) ls.getVariables();
-                        checkVars(variables, "b", null, "c", null);
-                        assertNull(ls.getArguments());
-                    } else {
-                        checkRootNode(ls, "test", frame);
-                        TruffleObject variables = (TruffleObject) ls.getVariables();
-                        checkVars(variables, "n", null, "a", null);
-                    }
-                    depth++;
+                checkBlock(scopes, node);
+                checkVars(arguments, "n", "n_n");
+                aVal = (line == 12 && onEnter) ? 0L : 4L;
+                bVal = (line < 13 || line == 13 && onEnter) ? 20L : 5L;
+                long cVal = (line < 14 || line == 14 && onEnter) ? 1L : 6L;
+                if (onEnter || line != 15) {
+                    checkVars(scopes, "n", "n_n", "a", aVal, "b", bVal, "c", cVal);
+                } else {
+                    checkVars(scopes, "n", "n_n", "a", aVal, "b", bVal, "c", cVal, "d", 7L);
                 }
-                assertEquals("LexicalScope depth", 3, depth);
-                depth = 0;
-                for (Scope ls : dynamicScopes) {
-                    if (depth == 0) {
-                        checkBlock(ls);
-                        TruffleObject variables = (TruffleObject) ls.getVariables();
-                        checkVars(variables);
-                        assertNull(ls.getArguments());
-                    } else if (depth == 1) {
-                        checkBlock(ls);
-                        TruffleObject variables = (TruffleObject) ls.getVariables();
-                        long bVal = (line < 14) ? 20L : 5L;
-                        long cVal = (line < 15) ? 1L : 6L;
-                        checkVars(variables, "b", bVal, "c", cVal);
-                        assertNull(ls.getArguments());
-                    } else {
-                        checkRootNode(ls, "test", frame);
-                        TruffleObject variables = (TruffleObject) ls.getVariables();
-                        long aVal = (line == 12) ? 0L : 4L;
-                        checkVars(variables, "n", "n_n", "a", aVal);
-                    }
-                    depth++;
+                if (mode == RunMode.AST) {
+                    assertFalse(getParentScopes(arguments));
+                    assertTrue(getParentScopes(scopes));
+
+                    checkBlock(scopes, node);
+                    checkVars(scopes, "n", "n_n", "a", aVal, "b", bVal, "c", cVal);
+                    assertTrue(getParentScopes(scopes));
+
+                    checkRootNode(scopes, "test", node, frame);
+                    checkVars(scopes, "n", "n_n", "a", aVal);
+                    assertFalse(getParentScopes(scopes));
+                } else {
+                    assertFalse(getParentScopes(arguments));
+                    assertFalse(getParentScopes(scopes));
                 }
-                assertEquals("DynamicScope depth", 3, depth);
                 break;
             case 16:
-                for (Scope ls : lexicalScopes) {
-                    if (depth == 0) {
-                        checkBlock(ls);
-                        TruffleObject variables = (TruffleObject) ls.getVariables();
-                        checkVars(variables, "d", null);
-                        assertNull(ls.getArguments());
-                    } else if (depth == 1) {
-                        checkBlock(ls);
-                        TruffleObject variables = (TruffleObject) ls.getVariables();
-                        checkVars(variables, "b", null, "c", null);
-                        assertNull(ls.getArguments());
-                    } else {
-                        checkRootNode(ls, "test", frame);
-                        TruffleObject variables = (TruffleObject) ls.getVariables();
-                        checkVars(variables, "n", null, "a", null);
-                    }
-                    depth++;
+                checkBlock(scopes, node);
+                checkVars(arguments, "n", "n_n");
+                checkVars(scopes, "n", "n_n", "a", 4L, "b", 5L, "c", 6L, "d", 7L);
+
+                if (mode == RunMode.AST) {
+                    assertFalse(getParentScopes(arguments));
+                    assertTrue(getParentScopes(scopes));
+
+                    checkBlock(scopes, node);
+                    checkVars(scopes, "b", 5L, "c", 6L, "n", "n_n", "a", 4L);
+                    assertTrue(getParentScopes(scopes));
+
+                    checkRootNode(scopes, "test", node, frame);
+                    checkVars(scopes, "n", "n_n", "a", 4L);
+                    assertFalse(getParentScopes(scopes));
+                } else {
+                    assertFalse(getParentScopes(arguments));
+                    assertFalse(getParentScopes(scopes));
                 }
-                assertEquals("LexicalScope depth", 3, depth);
-                depth = 0;
-                for (Scope ls : dynamicScopes) {
-                    if (depth == 0) {
-                        checkBlock(ls);
-                        TruffleObject variables = (TruffleObject) ls.getVariables();
-                        checkVars(variables, "d", 7L);
-                        assertNull(ls.getArguments());
-                    } else if (depth == 1) {
-                        checkBlock(ls);
-                        TruffleObject variables = (TruffleObject) ls.getVariables();
-                        checkVars(variables, "b", 5L, "c", 6L);
-                        assertNull(ls.getArguments());
-                    } else {
-                        checkRootNode(ls, "test", frame);
-                        TruffleObject variables = (TruffleObject) ls.getVariables();
-                        checkVars(variables, "n", "n_n", "a", 4L);
-                    }
-                    depth++;
-                }
-                assertEquals("DynamicScope depth", 3, depth);
+
                 break;
+            case 18:
+                checkBlock(scopes, node);
+                checkVars(arguments, "n", "n_n");
+                if (onEnter) {
+                    checkVars(scopes, "n", "n_n", "a", 4L, "b", 5L, "c", 6L);
+                } else {
+                    checkVars(scopes, "n", "n_n", "a", 4L, "b", 5L, "c", 6L, "e", 30L);
+                }
+                if (mode == RunMode.AST) {
+                    assertFalse(getParentScopes(arguments));
+                    assertTrue(getParentScopes(scopes));
+
+                    checkRootNode(scopes, "test", node, frame);
+                    checkVars(scopes, "n", "n_n", "a", 4L);
+                    assertFalse(getParentScopes(scopes));
+                } else {
+                    assertFalse(getParentScopes(arguments));
+                    assertFalse(getParentScopes(scopes));
+                }
+                break;
+            case 20:
+            case 21:
             case 22:
-            case 23:
-                for (Scope ls : lexicalScopes) {
-                    checkRootNode(ls, "main", frame);
-                    TruffleObject arguments = (TruffleObject) ls.getArguments();
-                    checkVars(arguments);
-                    TruffleObject variables = (TruffleObject) ls.getVariables();
-                    checkVars(variables);
-                    depth++;
+                checkRootNode(scopes, "test", node, frame);
+                checkVars(arguments, "n", "n_n");
+                if (line == 20 && onEnter) {
+                    checkVars(scopes, "n", "n_n", "a", 4L);
+                } else {
+                    checkVars(scopes, "n", "n_n", "a", 4L, "f", 40L);
                 }
-                assertEquals("LexicalScope depth", 1, depth);
-                depth = 0;
-                for (Scope ls : dynamicScopes) {
-                    checkRootNode(ls, "main", frame);
-                    TruffleObject arguments = (TruffleObject) ls.getArguments();
-                    checkVars(arguments);
-                    TruffleObject variables = (TruffleObject) ls.getVariables();
-                    checkVars(variables);
-                    depth++;
-                }
-                assertEquals("DynamicScope depth", 1, depth);
+                assertFalse(getParentScopes(arguments));
+                assertFalse(getParentScopes(scopes));
+                break;
+            case 24:
+            case 25:
+                checkRootNode(scopes, "main", node, frame);
+                checkVars(arguments);
+                checkVars(scopes);
+                assertFalse(getParentScopes(arguments));
+                assertFalse(getParentScopes(scopes));
                 break;
             default:
                 fail("Untested line: " + line);
@@ -441,59 +415,123 @@ public class SLInstrumentTest {
         }
     }
 
-    private static void checkRootNode(Scope ls, String name, MaterializedFrame frame) {
-        assertEquals(name, ls.getName());
-        Node node = ls.getNode();
-        assertTrue(node.getClass().getName(), node instanceof RootNode);
-        assertEquals(name, ((RootNode) node).getName());
-        assertEquals(frame.getFrameDescriptor(), ((RootNode) node).getFrameDescriptor());
+    private void checkRootNode(Object[] scopes, String name, Node node, MaterializedFrame frame) throws UnsupportedMessageException {
+        for (Object scope : scopes) {
+            checkRootNode(scope, name, node, frame);
+        }
     }
 
-    private static void checkBlock(Scope ls) {
-        assertEquals("block", ls.getName());
-        // Test that ls.getNode() does not return the current root node, it ought to be a block node
-        Node node = ls.getNode();
-        assertNotNull(node);
-        assertFalse(node.getClass().getName(), node instanceof RootNode);
+    private void checkRootNode(Object scope, String name, Node node, MaterializedFrame frame) throws UnsupportedMessageException {
+        assertEquals(name, InteropLibrary.getUncached().asString(InteropLibrary.getUncached().toDisplayString(scope)));
+        assertTrue(InteropLibrary.getUncached().hasSourceLocation(scope));
+        SourceSection section = InteropLibrary.getUncached().getSourceLocation(scope);
+
+        if (mode == RunMode.AST) {
+            Node scopeNode = findScopeNode(node, section);
+            assertTrue(scopeNode.getClass().getName(), scopeNode instanceof RootNode);
+            assertEquals(name, ((RootNode) scopeNode).getName());
+            assertEquals(frame.getFrameDescriptor(), ((RootNode) scopeNode).getFrameDescriptor());
+        }
     }
 
-    private static boolean contains(TruffleObject vars, String key) {
-        return KeyInfo.isExisting(ForeignAccess.sendKeyInfo(Message.KEY_INFO.createNode(), vars, key));
+    private void checkBlock(Object[] scopes, Node node) throws UnsupportedMessageException {
+        for (Object scope : scopes) {
+            checkBlock(scope, node);
+        }
     }
 
-    private static Object read(TruffleObject vars, String key) {
+    private void checkBlock(Object scope, Node node) throws UnsupportedMessageException {
+        assertTrue(InteropLibrary.getUncached().hasSourceLocation(scope));
+        SourceSection section = InteropLibrary.getUncached().getSourceLocation(scope);
+        if (mode == RunMode.AST) {
+            assertEquals("block", InteropLibrary.getUncached().toDisplayString(scope));
+            // Test that ls.getNode() does not return the current root node, it ought to be a block
+            // node
+            Node scopeNode = findScopeNode(node, section);
+            assertFalse(scopeNode.getClass().getName(), scopeNode instanceof RootNode);
+        }
+    }
+
+    private static Node findScopeNode(Node node, SourceSection section) {
+        RootNode root = node.getRootNode();
+        if (section.equals(root.getSourceSection())) {
+            return root;
+        }
+        Node scopeNode = node.getParent();
+        while (scopeNode != null) {
+            if (section.equals(scopeNode.getSourceSection())) {
+                break;
+            }
+            scopeNode = scopeNode.getParent();
+        }
+        assertNotNull(scopeNode);
+        return scopeNode;
+    }
+
+    private static boolean contains(Object vars, String key) {
+        return INTEROP.isMemberExisting(vars, key);
+    }
+
+    private static Object read(Object vars, String key) {
         try {
-            return ForeignAccess.sendRead(Message.READ.createNode(), vars, key);
+            return INTEROP.readMember(vars, key);
         } catch (UnknownIdentifierException | UnsupportedMessageException e) {
             throw new AssertionError(e);
         }
     }
 
-    private static boolean isNull(TruffleObject vars) {
-        return ForeignAccess.sendIsNull(Message.IS_NULL.createNode(), vars);
+    private static boolean isNull(Object vars) {
+        return INTEROP.isNull(vars);
     }
 
-    private static int keySize(TruffleObject vars) {
-        try {
-            Object keys = ForeignAccess.sendKeys(Message.KEYS.createNode(), vars);
-            return ((Number) ForeignAccess.sendGetSize(Message.GET_SIZE.createNode(), (TruffleObject) keys)).intValue();
-        } catch (UnsupportedMessageException e) {
-            throw new AssertionError(e);
-        }
-    }
-
-    private static void checkVars(TruffleObject vars, Object... expected) {
-        for (int i = 0; i < expected.length; i += 2) {
-            String name = (String) expected[i];
-            Object value = expected[i + 1];
-            assertTrue(name, contains(vars, name));
-            if (value != null) {
-                assertEquals(name, value, read(vars, name));
-            } else {
-                assertTrue(isNull((TruffleObject) read(vars, name)));
+    private void checkVars(Object[] scopes, Object... expected) throws UnsupportedMessageException, InvalidArrayIndexException {
+        for (int s = 0; s < scopes.length; s++) {
+            boolean lexical = s < scopes.length / 2;
+            Object vars = scopes[s];
+            Object members = INTEROP.getMembers(vars);
+            int numMembers = (int) INTEROP.getArraySize(members);
+            Map<String, Integer> memberNamesMap = new LinkedHashMap<>(numMembers);
+            for (int i = 0; i < numMembers; i++) {
+                memberNamesMap.put(INTEROP.asString(INTEROP.readArrayElement(members, i)), i);
+            }
+            String memberNames = memberNamesMap.toString();
+            assertEquals(memberNames, expected.length / 2, memberNamesMap.size());
+            for (int i = 0; i < expected.length; i += 2) {
+                String expectedName = (String) expected[i];
+                assertTrue(expectedName + " not in " + memberNames, contains(vars, expectedName));
+                int index = memberNamesMap.get(expectedName);
+                Object member = INTEROP.readArrayElement(members, index);
+                assertEquals(memberNames, expectedName, INTEROP.asString(member));
+                if (this.mode == RunMode.AST) {
+                    assertTrue(INTEROP.hasSourceLocation(member));
+                }
+                if (lexical) {
+                    assertFalse(INTEROP.isMemberWritable(vars, expectedName));
+                    assertTrue(isNull(read(vars, expectedName)));
+                } else {
+                    Object value = expected[i + 1];
+                    if (value instanceof String) {
+                        assertEquals(expectedName, value, InteropLibrary.getUncached().asString(read(vars, expectedName)));
+                    } else {
+                        assertEquals(expectedName, value, read(vars, expectedName));
+                    }
+                    assertTrue(INTEROP.isMemberWritable(vars, expectedName));
+                }
             }
         }
-        assertEquals(expected.length / 2, keySize(vars));
+    }
+
+    private static boolean getParentScopes(Object[] scopes) throws UnsupportedMessageException {
+        boolean haveParent = false;
+        for (int s = 0; s < scopes.length; s++) {
+            if (InteropLibrary.getUncached().hasScopeParent(scopes[s])) {
+                haveParent = true;
+                scopes[s] = InteropLibrary.getUncached().getScopeParent(scopes[s]);
+            } else {
+                scopes[s] = null;
+            }
+        }
+        return haveParent;
     }
 
     @Test
@@ -514,11 +552,11 @@ public class SLInstrumentTest {
         // Pure exec:
         Source source = Source.newBuilder("sl", code, "testing").build();
         ByteArrayOutputStream engineOut = new ByteArrayOutputStream();
-        Engine engine = Engine.newBuilder().out(engineOut).build();
-        Context context = Context.newBuilder().engine(engine).build();
+        Engine engine = newEngineBuilder().out(engineOut).build();
+        Context context = newContextBuilder().engine(engine).build();
         context.eval(source);
         String engineOutput = fullOutput;
-        assertEquals(engineOutput, engineOut.toString());
+        assertEquals(engineOutput, toUnixString(engineOut));
 
         // Check output
         Instrument outInstr = engine.getInstruments().get("testEnvironmentHandlerInstrument");
@@ -529,7 +567,7 @@ public class SLInstrumentTest {
         context.eval(source);
         BufferedReader fromOutReader = new BufferedReader(new InputStreamReader(new ByteArrayInputStream(consumedOut.toByteArray())));
         engineOutput = engineOutput + fullOutput;
-        assertEquals(engineOutput, engineOut.toString());
+        assertEquals(engineOutput, toUnixString(engineOut));
         assertTrue(fromOutReader.ready());
         assertEquals(fullLines, readLinesList(fromOutReader));
 
@@ -541,7 +579,7 @@ public class SLInstrumentTest {
         fromOutReader = new BufferedReader(new InputStreamReader(new ByteArrayInputStream(consumedOut.toByteArray())));
         BufferedReader fromOutReader2 = new BufferedReader(new InputStreamReader(new ByteArrayInputStream(consumedOut2.toByteArray())));
         engineOutput = engineOutput + fullOutput;
-        assertEquals(engineOutput, engineOut.toString());
+        assertEquals(engineOutput, toUnixString(engineOut));
         assertTrue(fromOutReader.ready());
         assertTrue(fromOutReader2.ready());
         String fullLines2x = fullLines.substring(0, fullLines.length() - 1) + ", " + fullLines.substring(1);
@@ -554,7 +592,7 @@ public class SLInstrumentTest {
         consumedOut2.reset();
         context.eval(source);
         engineOutput = engineOutput + fullOutput;
-        assertEquals(engineOutput, engineOut.toString());
+        assertEquals(engineOutput, toUnixString(engineOut));
         assertEquals(0, consumedOut.size());
         assertTrue(consumedOut2.size() > 0);
         fromOutReader2 = new BufferedReader(new InputStreamReader(new ByteArrayInputStream(consumedOut2.toByteArray())));
@@ -565,7 +603,7 @@ public class SLInstrumentTest {
         outputConsumerBinding2.dispose();
         context.eval(source);
         engineOutput = engineOutput + fullOutput;
-        assertEquals(engineOutput, engineOut.toString());
+        assertEquals(engineOutput, toUnixString(engineOut));
         assertEquals(0, consumedOut.size());
         assertEquals(0, consumedOut2.size());
 
@@ -612,18 +650,23 @@ public class SLInstrumentTest {
                 return strIn.read();
             }
         };
-        Engine engine = Engine.newBuilder().in(delegateInputStream).build();
+        Engine engine = newEngineBuilder().in(delegateInputStream).build();
         TestRedoIO redoIO = engine.getInstruments().get("testRedoIO").lookup(TestRedoIO.class);
         redoIOPtr[0] = redoIO;
         redoIO.inRead.drainPermits();
-        Context context = Context.newBuilder().engine(engine).build();
+        Context context = newContextBuilder().engine(engine).build();
         Value ret = context.eval(ioWait);
         assertEquals("O.K.", ret.asString());
         assertFalse(redoIO.beforePop);
     }
 
-    private static class RuntimeInterruptedException extends RuntimeException {
+    private static final class RuntimeInterruptedException extends AbstractTruffleException {
         private static final long serialVersionUID = -4735601164894088571L;
+    }
+
+    @TruffleBoundary
+    private static CharSequence getSourceSectionCharacters(SourceSection section) {
+        return section.getCharacters();
     }
 
     @TruffleInstrument.Registration(id = "testRedoIO", services = TestRedoIO.class)
@@ -639,7 +682,7 @@ public class SLInstrumentTest {
             env.getInstrumenter().attachExecutionEventListener(SourceSectionFilter.ANY, new ExecutionEventListener() {
                 @Override
                 public void onEnter(EventContext context, VirtualFrame frame) {
-                    if ("readln".equals(context.getInstrumentedSourceSection().getCharacters())) {
+                    if ("readln".equals(getSourceSectionCharacters(context.getInstrumentedSourceSection()))) {
                         CompilerDirectives.transferToInterpreter();
                         // Interrupt the I/O
                         final Thread thread = Thread.currentThread();
@@ -707,8 +750,8 @@ public class SLInstrumentTest {
                         "}\n";
         final Source source = Source.newBuilder("sl", code, "testing").build();
         ByteArrayOutputStream engineOut = new ByteArrayOutputStream();
-        Engine engine = Engine.newBuilder().err(engineOut).build();
-        Context context = Context.newBuilder().engine(engine).build();
+        Engine engine = newEngineBuilder().err(engineOut).build();
+        Context context = newContextBuilder().engine(engine).build();
         // No instrument:
         Value ret = context.eval(source);
         assertTrue(ret.isNumber());
@@ -745,7 +788,7 @@ public class SLInstrumentTest {
         }
         assertTrue(interopFailure);
 
-        earlyReturn.returnValue = new SLBigNumber(new BigInteger("-42"));
+        earlyReturn.returnValue = new SLBigInteger(new BigInteger("-42"));
         ret = context.eval(source);
         assertTrue(ret.isNumber());
         assertEquals(-41L, ret.asLong());
@@ -757,17 +800,16 @@ public class SLInstrumentTest {
         assertEquals(Boolean.TRUE, ret.asBoolean());
 
         earlyReturn.fceCode = "fce(c)";
-        earlyReturn.returnValue = -42.42;
+        earlyReturn.returnValue = -42.00;
         ret = context.eval(source);
         assertTrue(ret.isNumber());
-        assertEquals(-42.42, ret.asDouble(), 1e-8);
+        assertEquals(-42.0, ret.asDouble(), 1e-8);
 
         earlyReturn.fceCode = "fce(c)";
         earlyReturn.returnValue = "Hello!";
         ret = context.eval(source);
         assertTrue(ret.isString());
         assertEquals("Hello!", ret.asString());
-
     }
 
     @TruffleInstrument.Registration(id = "testEarlyReturn", services = EarlyReturnInstrument.class)
@@ -786,7 +828,7 @@ public class SLInstrumentTest {
 
                 @Override
                 public void onReturnValue(EventContext context, VirtualFrame frame, Object result) {
-                    if (fceCode.equals(context.getInstrumentedSourceSection().getCharacters())) {
+                    if (fceCode.equals(getSourceSectionCharacters(context.getInstrumentedSourceSection()))) {
                         CompilerDirectives.transferToInterpreter();
                         throw context.createUnwind(null);
                     }
@@ -813,6 +855,9 @@ public class SLInstrumentTest {
      */
     @Test
     public void testReplaceNodeReturnValue() throws Exception {
+        if (System.getProperty("java.vm.name").contains("Graal:graal-enterprise")) {
+            return; // GR-16755
+        }
         String code = "function main() {\n" +
                         "  a = new();\n" +
                         "  b = a.rp1;\n" +
@@ -867,41 +912,33 @@ public class SLInstrumentTest {
             });
         }
 
+        @ExportLibrary(InteropLibrary.class)
+        @SuppressWarnings("static-method")
         static class ReplacedTruffleObject implements TruffleObject {
-            @Override
-            public ForeignAccess getForeignAccess() {
-                return ReplacedTruffleObjectMessageResolutionForeign.ACCESS;
+
+            @ExportMessage
+            final Object readMember(@SuppressWarnings("unused") String member) {
+                return "Replaced Value";
             }
 
-            public static boolean isInstance(TruffleObject obj) {
-                return obj instanceof ReplacedTruffleObject;
+            @ExportMessage
+            final boolean hasMembers() {
+                return true;
             }
 
-            @MessageResolution(receiverType = ReplacedTruffleObject.class)
-            static final class ReplacedTruffleObjectMessageResolution {
+            @ExportMessage
+            final Object getMembers(@SuppressWarnings("unused") boolean includeInternal) {
+                return new KeysArray(new String[]{"rp1, rp2"});
+            }
 
-                @Resolve(message = "KEYS")
-                abstract static class ReplacedKeysNode extends Node {
-
-                    @SuppressWarnings("unused")
-                    public Object access(ReplacedTruffleObject ato) {
-                        return new KeysArray(new String[]{"rp1, rp2"});
-                    }
-                }
-
-                @Resolve(message = "READ")
-                abstract static class ReplacedReadNode extends Node {
-
-                    @SuppressWarnings("unused")
-                    public Object access(ReplacedTruffleObject ato, String name) {
-                        return "Replaced Value";
-                    }
-                }
+            @ExportMessage
+            final boolean isMemberReadable(String member) {
+                return member.equals("rp1") || member.equals("rp2");
             }
         }
     }
 
-    @MessageResolution(receiverType = KeysArray.class)
+    @ExportLibrary(InteropLibrary.class)
     static final class KeysArray implements TruffleObject {
 
         private final String[] keys;
@@ -910,42 +947,30 @@ public class SLInstrumentTest {
             this.keys = keys;
         }
 
-        @Resolve(message = "HAS_SIZE")
-        abstract static class HasSize extends Node {
+        @SuppressWarnings("static-method")
+        @ExportMessage
+        boolean hasArrayElements() {
+            return true;
+        }
 
-            public Object access(@SuppressWarnings("unused") KeysArray receiver) {
-                return true;
+        @ExportMessage
+        boolean isArrayElementReadable(long index) {
+            return index >= 0 && index < keys.length;
+        }
+
+        @ExportMessage
+        long getArraySize() {
+            return keys.length;
+        }
+
+        @ExportMessage
+        Object readArrayElement(long index) throws InvalidArrayIndexException {
+            try {
+                return keys[(int) index];
+            } catch (IndexOutOfBoundsException e) {
+                CompilerDirectives.transferToInterpreter();
+                throw InvalidArrayIndexException.create(index);
             }
-        }
-
-        @Resolve(message = "GET_SIZE")
-        abstract static class GetSize extends Node {
-
-            public Object access(KeysArray receiver) {
-                return receiver.keys.length;
-            }
-        }
-
-        @Resolve(message = "READ")
-        abstract static class Read extends Node {
-
-            public Object access(KeysArray receiver, int index) {
-                try {
-                    return receiver.keys[index];
-                } catch (IndexOutOfBoundsException e) {
-                    CompilerDirectives.transferToInterpreter();
-                    throw UnknownIdentifierException.raise(String.valueOf(index));
-                }
-            }
-        }
-
-        @Override
-        public ForeignAccess getForeignAccess() {
-            return KeysArrayForeign.ACCESS;
-        }
-
-        static boolean isInstance(TruffleObject array) {
-            return array instanceof KeysArray;
         }
 
     }
@@ -1016,7 +1041,7 @@ public class SLInstrumentTest {
                 @Override
                 public void onEnter(EventContext context, VirtualFrame frame) {
                     SourceSection ss = context.getInstrumentedSourceSection();
-                    if (ss.getCharacters().toString().contains(error)) {
+                    if (getSourceSectionCharacters(ss).toString().contains(error)) {
                         if (unwind == null) {
                             CompilerDirectives.transferToInterpreterAndInvalidate();
                             unwind = context.createUnwind(null, reenterBinding);

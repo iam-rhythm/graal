@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2016, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,11 +40,10 @@
  */
 package com.oracle.truffle.api.instrumentation;
 
-import com.oracle.truffle.api.TruffleException;
 import com.oracle.truffle.api.frame.Frame;
-import com.oracle.truffle.api.frame.FrameSlot;
+import com.oracle.truffle.api.interop.InteropLibrary;
 import com.oracle.truffle.api.nodes.Node;
-import com.oracle.truffle.api.CallTarget;
+import com.oracle.truffle.api.source.SourceSection;
 
 /**
  * Set of standard tags usable by language agnostic tools. Language should {@link ProvidedTags
@@ -58,7 +57,8 @@ public final class StandardTags {
         /* No instances */
     }
 
-    @SuppressWarnings({"rawtypes"}) static final Class[] ALL_TAGS = new Class[]{StatementTag.class, CallTag.class, RootTag.class, ExpressionTag.class};
+    @SuppressWarnings({"rawtypes"}) static final Class[] ALL_TAGS = new Class[]{StatementTag.class, CallTag.class, RootTag.class, RootBodyTag.class, ExpressionTag.class, TryBlockTag.class,
+                    ReadVariableTag.class, WriteVariableTag.class};
 
     /**
      * Marks program locations that represent a statement of a language.
@@ -75,8 +75,8 @@ public final class StandardTags {
      * desired behavior.</li>
      * </ul>
      * The StatemenTag uses the {@link Tag.Identifier identifier} <code>"STATEMENT"</code>. A node
-     * tagged with {@link RootTag} must provide a {@link Node#getSourceSection() source section}, if
-     * its root node provides a source section.
+     * tagged with {@link StatementTag} must provide a {@link Node#getSourceSection() source
+     * section}, if its root node provides a source section.
      * <p>
      * If the a node tagged with {@link StatementTag statement} returns a non <code>null</code>
      * value then it must be an interop value. There are assertions in place verifying this when
@@ -103,12 +103,12 @@ public final class StandardTags {
      * </ul>
      *
      * The CallTag uses the {@link Tag.Identifier identifier} <code>"CALL"</code>. A node tagged
-     * with {@link RootTag} must provide a {@link Node#getSourceSection() source section}, if its
+     * with {@link CallTag} must provide a {@link Node#getSourceSection() source section}, if its
      * root node provides a source section.
      * <p>
-     * If the a node tagged with {@link CallTarget call} returns a non <code>null</code> value then
-     * it must be an interop value. There are assertions in place verifying this when Java
-     * assertions are enabled (-ea).
+     * If the a node tagged with {@link CallTag call} returns a non <code>null</code> value then it
+     * must be an interop value. There are assertions in place verifying this when Java assertions
+     * are enabled (-ea).
      *
      * @since 0.12
      */
@@ -122,12 +122,14 @@ public final class StandardTags {
     /**
      * Marks program locations as root of a function, method or closure. The root prolog should be
      * executed by this node. In particular, when the implementation copies
-     * {@link Frame#getArguments()} into {@link FrameSlot}s, it should do it here for the
-     * instrumentation to work correctly.
+     * {@link Frame#getArguments()} into frame slots, it should do it here for the instrumentation
+     * to work correctly. As a result, local scope might be incomplete for instruments, as the
+     * prolog does not run before this node is entered and epilog may do destructions before this
+     * node is exited.
      * <p>
      * Use case descriptions:
      * <ul>
-     * <li><b>Profiler:</b> Marks every root that should be profiled.</li>
+     * <li><b>Debugger:</b> Use this tag to unwind frames.</li>
      * </ul>
      *
      * The RootTag uses the {@link Tag.Identifier identifier} <code>"ROOT"</code>. A node tagged
@@ -143,6 +145,35 @@ public final class StandardTags {
     @Tag.Identifier("ROOT")
     public static final class RootTag extends Tag {
         private RootTag() {
+            /* No instances */
+        }
+    }
+
+    /**
+     * Marks program locations as bodies of a function, method or closure. The root prolog and
+     * epilog is not a part of this node, what makes a difference from {@link RootTag}. In
+     * particular, when the implementation copies {@link Frame#getArguments()} into frame slots, it
+     * should do it before this node for the instrumentation to work correctly.
+     * <p>
+     * Use case descriptions:
+     * <ul>
+     * <li><b>Profiler:</b> Marks body of every root that should be profiled and where local
+     * variables are initialized and ready to be retrieved.</li>
+     * </ul>
+     *
+     * The RootBodyTag uses the {@link Tag.Identifier identifier} <code>"ROOT_BODY"</code>. A node
+     * tagged with {@link RootBodyTag} must provide a {@link Node#getSourceSection() source section}
+     * , if its root node provides a source section.
+     * <p>
+     * If the a node tagged with {@link RootBodyTag root body} returns a non <code>null</code> value
+     * then it must be an interop value. There are assertions in place verifying this when Java
+     * assertions are enabled (-ea).
+     *
+     * @since 19.2.0
+     */
+    @Tag.Identifier("ROOT_BODY")
+    public static final class RootBodyTag extends Tag {
+        private RootBodyTag() {
             /* No instances */
         }
     }
@@ -166,12 +197,12 @@ public final class StandardTags {
      * </ul>
      *
      * The ExpressionTag uses the {@link Tag.Identifier identifier} <code>"EXPRESSION"</code>. A
-     * node tagged with {@link RootTag} must provide a {@link Node#getSourceSection() source
+     * node tagged with {@link ExpressionTag} must provide a {@link Node#getSourceSection() source
      * section}, if its root node provides a source section. *
      * <p>
-     * If the a node tagged with {@link RootTag root} returns a non <code>null</code> value then it
-     * must be an interop value. There are assertions in place verifying this when Java assertions
-     * are enabled (-ea).
+     * If the a node tagged with {@link ExpressionTag expression} returns a non <code>null</code>
+     * value then it must be an interop value. There are assertions in place verifying this when
+     * Java assertions are enabled (-ea).
      *
      * @since 0.33
      */
@@ -188,12 +219,12 @@ public final class StandardTags {
      * Marks program locations to be considered as try blocks, that are followed by catch. To
      * determine which exceptions are caught by {@link InstrumentableNode} tagged with this tag, the
      * node might provide a {@link InstrumentableNode#getNodeObject() node object} that has
-     * <code>catches</code> function, which takes a {@link TruffleException#getExceptionObject()}
-     * and returns a boolean return value indicating whether the try block catches the exception, or
-     * not. When this block catches all exceptions, no special node object or catches function needs
-     * to be provided.
+     * <code>catches</code> function, which takes a an interop value that returns <code>true</code>
+     * for {@link InteropLibrary#isException(Object)} and returns a boolean value indicating whether
+     * the try block catches the exception, or not. When this block catches all exceptions, no
+     * special node object or catches function needs to be provided.
      *
-     * @since 1.0
+     * @since 19.0
      */
     @Tag.Identifier("TRY_BLOCK")
     public static final class TryBlockTag extends Tag {
@@ -201,11 +232,96 @@ public final class StandardTags {
         /**
          * Name of the <code>catches</code> function.
          *
-         * @since 1.0
+         * @since 19.0
          */
         public static final String CATCHES = "catches";
 
         private TryBlockTag() {
+            /* No instances */
+        }
+
+    }
+
+    /**
+     * Marks program locations to be considered as reads of variables of the languages.
+     * <p>
+     * Use case descriptions:
+     * <ul>
+     * <li><b>Language Server Protocol:</b> Marks every read of a variable to support the
+     * <i>documentHighlight</i>, <i>hover</i>, <i>definition</i> and <i>references</i> requests.
+     * </li>
+     * </ul>
+     * To determine the name of the variable, it is required that a node tagged with
+     * {@link ReadVariableTag} also provides a {@link InstrumentableNode#getNodeObject() node
+     * object} that has {@link ReadVariableTag#NAME} property. The value of that property is either:
+     * <ul>
+     * <li>a String name of the variable (in that case the node's {@link Node#getSourceSection()
+     * source section} is considered as the variable's source section),
+     * <li>an object that provides name and {@link SourceSection} via
+     * {@link InteropLibrary#asString(Object)} and {@link InteropLibrary#getSourceLocation(Object)}
+     * respectively,
+     * <li>an array of objects when multiple variables are being read, where each array element
+     * provides name and {@link SourceSection} as specified above.
+     * </ul>
+     * Furthermore, nodes tagged with {@link ReadVariableTag} have to provide a
+     * {@link Node#getSourceSection() source section}.
+     *
+     * @since 20.0.0
+     */
+    @Tag.Identifier("READ_VARIABLE")
+    public static final class ReadVariableTag extends Tag {
+
+        /**
+         * Property of the node object that contains name of the variable.
+         *
+         * @since 20.0.0
+         */
+        public static final String NAME = "readVariableName";
+
+        private ReadVariableTag() {
+            /* No instances */
+        }
+
+    }
+
+    /**
+     * Marks program locations to be considered as writes of variables of the languages.
+     * <p>
+     * Use case descriptions:
+     * <ul>
+     * <li><b>Language Server Protocol:</b> Marks every write of a variable to support the
+     * <i>documentHighlight</i>, <i>hover</i>, <i>definition</i> and <i>references</i> requests.
+     * </li>
+     * </ul>
+     * To determine the name of the variable, it is required that a node tagged with
+     * {@link WriteVariableTag} also provides a {@link InstrumentableNode#getNodeObject() node
+     * object} that has {@link WriteVariableTag#NAME} property. The value of that property is
+     * either:
+     * <ul>
+     * <li>a String name of the variable (in that case the node's {@link Node#getSourceSection()
+     * source section} is considered as the variable's source section),
+     * <li>an object that provides name and {@link SourceSection} via
+     * {@link InteropLibrary#asString(Object)} and {@link InteropLibrary#getSourceLocation(Object)}
+     * respectively,
+     * <li>an array of objects when multiple variables are being read, where each array element
+     * provides name and {@link SourceSection} as specified above.
+     * </ul>
+     * Furthermore, nodes tagged with {@link WriteVariableTag} have to provide a
+     * {@link Node#getSourceSection() source section}.
+     *
+     * @since 20.0.0
+     */
+    @Tag.Identifier("WRITE_VARIABLE")
+    public static final class WriteVariableTag extends Tag {
+
+        /**
+         * Property of the node object that contains name of the variable.
+         *
+         * @since 20.0.0
+         */
+        public static final String NAME = "writeVariableName";
+
+        private WriteVariableTag() {
             /* No instances */
         }
 

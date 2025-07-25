@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -46,6 +46,7 @@ import java.util.function.Supplier;
 import com.oracle.truffle.api.CallTarget;
 import com.oracle.truffle.api.TruffleContext;
 import com.oracle.truffle.api.nodes.LanguageInfo;
+import com.oracle.truffle.api.nodes.Node;
 import com.oracle.truffle.api.source.Source;
 
 /**
@@ -73,17 +74,17 @@ public final class DebugContext {
      */
     public DebugValue evaluate(String code, String languageId) {
         assert code != null;
-        Object prevContext = context.enter();
+        Object prevContext = context.enter(null);
         try {
             Debugger debugger = executionLifecycle.getDebugger();
             CallTarget target = debugger.getEnv().parse(Source.newBuilder(languageId, code, "eval").build());
-            Object result = target.call();
+            Object result = target.call((Node) null);
             LanguageInfo languageInfo = debugger.getEnv().getLanguages().get(languageId);
             return new DebugValue.HeapValue(executionLifecycle.getSession(), languageInfo, null, result);
         } catch (IOException ex) {
             throw new RuntimeException(ex);
         } finally {
-            context.leave(prevContext);
+            context.leave(null, prevContext);
         }
     }
 
@@ -98,12 +99,12 @@ public final class DebugContext {
      */
     public <T> T runInContext(Supplier<T> run) {
         assert run != null;
-        Object prevContext = context.enter();
+        Object prevContext = context.enter(null);
         try {
             T ret = run.get();
             return ret;
         } finally {
-            context.leave(prevContext);
+            context.leave(null, prevContext);
         }
     }
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -36,9 +36,7 @@ import com.oracle.objectfile.LayoutDecisionMap;
 import com.oracle.objectfile.ObjectFile;
 import com.oracle.objectfile.ObjectFile.Element;
 import com.oracle.objectfile.ObjectFile.RelocationKind;
-import com.oracle.objectfile.ObjectFile.RelocationRecord;
 import com.oracle.objectfile.ObjectFile.Segment;
-import com.oracle.objectfile.ObjectFile.Symbol;
 import com.oracle.objectfile.io.AssemblyBuffer;
 import com.oracle.objectfile.macho.MachOObjectFile.MachOSection;
 import com.oracle.objectfile.macho.MachOObjectFile.SectionFlag;
@@ -155,34 +153,21 @@ public class MachOUserDefinedSection extends MachOSection implements ObjectFile.
     }
 
     @Override
-    public MachORelocationElement getOrCreateRelocationElement(boolean useImplicitAddend) {
-        return getOwner().getOrCreateRelocationElement(useImplicitAddend);
+    public MachORelocationElement getOrCreateRelocationElement(long addend) {
+        return getOwner().getOrCreateRelocationElement();
     }
 
-    @Override
-    public RelocationRecord markRelocationSite(int offset, int length, ByteBuffer bb, RelocationKind k, String symbolName, boolean useImplicitAddend, Long explicitAddend) {
-        MachORelocationElement el = getOrCreateRelocationElement(useImplicitAddend);
-        AssemblyBuffer sbb = new AssemblyBuffer(bb);
-        sbb.setByteOrder(getOwner().getByteOrder());
-        sbb.pushSeek(offset);
+    private static void handleAMD64RelocationAddend(AssemblyBuffer sbb, RelocationKind k, long addend) {
         /*
-         * NOTE: Mach-O does not support explicit addends, and inline addends are applied even
-         * during dynamic linking. So if the caller supplies an explicit addend, we turn it into an
-         * implicit one by updating our content.
+         * NOTE: x86-64 Mach-O does not support explicit addends, and inline addends are applied
+         * even during dynamic linking.
          */
-        long currentInlineAddendValue = sbb.readTruncatedLong(length);
-        long desiredInlineAddendValue;
-        if (explicitAddend != null) {
-            /*
-             * This assertion is conservatively disallowing double-addend (could
-             * "add currentValue to explicitAddend"), because that seems more likely to be a bug
-             * than a feature.
-             */
-            assert currentInlineAddendValue == 0;
-            desiredInlineAddendValue = explicitAddend;
-        } else {
-            desiredInlineAddendValue = currentInlineAddendValue;
-        }
+        int length = ObjectFile.RelocationKind.getRelocationSize(k);
+        /*
+         * The addend is passed as a method parameter. The initial implicit addend value within the
+         * instruction does not need to be read, as it is noise.
+         */
+        long desiredInlineAddendValue = addend;
 
         /*
          * One more complication: for PC-relative relocation, at least on x86-64, Mach-O linkers
@@ -193,27 +178,70 @@ public class MachOUserDefinedSection extends MachOSection implements ObjectFile.
          * amount we add is always the length in bytes of the relocation site (since on x86-64 the
          * reference is always the last field in a PC-relative instruction).
          */
-        if (k == RelocationKind.PC_RELATIVE) {
+        if (RelocationKind.isPCRelative(k)) {
             desiredInlineAddendValue += length;
         }
 
         // Write the inline addend back to the buffer.
-        sbb.seek(offset);
         sbb.writeTruncatedLong(desiredInlineAddendValue, length);
+    }
 
-        // set section flag to note that we have relocations
-        Symbol sym = getOwner().getSymbolTable().getSymbol(symbolName);
-        boolean symbolIsDefinedLocally = (sym != null && sym.isDefined());
-        // see note in MachOObjectFile's createDefinedSymbol
-        boolean createAsLocalReloc = false;
-        assert !createAsLocalReloc || symbolIsDefinedLocally;
-        flags.add(createAsLocalReloc ? SectionFlag.LOC_RELOC : SectionFlag.EXT_RELOC);
+    private void handleAArch64RelocationAddend(MachORelocationElement el, AssemblyBuffer sbb, int offset, RelocationKind k, String symbolName, long addend) {
+        switch (k) {
+            case DIRECT_4:
+            case DIRECT_8:
+                sbb.writeTruncatedLong(addend, ObjectFile.RelocationKind.getRelocationSize(k));
+                break;
+            case AARCH64_R_AARCH64_ADR_PREL_PG_HI21:
+            case AARCH64_R_AARCH64_LDST64_ABS_LO12_NC:
+            case AARCH64_R_AARCH64_LDST32_ABS_LO12_NC:
+            case AARCH64_R_AARCH64_LDST16_ABS_LO12_NC:
+            case AARCH64_R_AARCH64_LDST8_ABS_LO12_NC:
+            case AARCH64_R_AARCH64_ADD_ABS_LO12_NC:
+                if (addend != 0) {
+                    /*-
+                     * According to the Mach-O ld code at:
+                     *
+                     * https://opensource.apple.com/source/ld64/ld64-274.2/src/ld/parsers/macho_relocatable_file.cpp.auto.html
+                     *
+                     * These relocations should use an explicit addend relocation record (ARM64_RELOC_ADDEND) instead of an
+                     * implicit addend.
+                     */
+                    el.add(MachORelocationInfo.createARM64RelocAddend(el, this, offset, symbolName, addend));
+                }
+                break;
+            default:
+                throw new IllegalStateException("Unexpected relocation kind");
+        }
+    }
+
+    @Override
+    public void markRelocationSite(int offset, ByteBuffer bb, RelocationKind k, String symbolName, long addend) {
+        MachORelocationElement el = getOrCreateRelocationElement(addend);
+        AssemblyBuffer sbb = new AssemblyBuffer(bb);
+        sbb.setByteOrder(getOwner().getByteOrder());
+        sbb.pushSeek(offset);
+
+        switch (getOwner().cpuType) {
+            case X86_64:
+                handleAMD64RelocationAddend(sbb, k, addend);
+                break;
+            case ARM64:
+                handleAArch64RelocationAddend(el, sbb, offset, k, symbolName, addend);
+                break;
+            default:
+                throw new IllegalStateException("Unexpected CPU Type");
+        }
+
+        /*
+         * Set section flag to note that we have relocations. For now, we are always using external
+         * relocations.
+         */
+        assert symbolName != null;
+        flags.add(SectionFlag.EXT_RELOC);
 
         // return ByteBuffer cursor to where it was
         sbb.pop();
-        RelocationInfo rec = new RelocationInfo(el, this, offset, length, k, symbolName, createAsLocalReloc);
-        el.add(rec);
-
-        return rec;
+        el.add(MachORelocationInfo.createRelocation(el, this, offset, k, symbolName));
     }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -54,6 +54,10 @@ final class DefaultAssumption extends AbstractAssumption {
         super(name);
     }
 
+    private DefaultAssumption(Object name) {
+        super(name);
+    }
+
     @Override
     public void check() throws InvalidAssumptionException {
         if (!isValid) {
@@ -68,11 +72,35 @@ final class DefaultAssumption extends AbstractAssumption {
 
     @Override
     public void invalidate(String message) {
-        isValid = false;
+        if (name != Lazy.ALWAYS_VALID_NAME) {
+            isValid = false;
+        } else {
+            throw new UnsupportedOperationException("Cannot invalidate this assumption - it is always valid");
+        }
     }
 
     @Override
     public boolean isValid() {
         return isValid;
+    }
+
+    static DefaultAssumption createAlwaysValid() {
+        return new DefaultAssumption(Lazy.ALWAYS_VALID_NAME);
+    }
+
+    /*
+     * We use a lazy class as this is already needed when the assumption is initialized.
+     */
+    static class Lazy {
+        /*
+         * We use an Object instead of a String here to avoid accidently handing out the always
+         * valid string object in getName().
+         */
+        static final Object ALWAYS_VALID_NAME = new Object() {
+            @Override
+            public String toString() {
+                return "<always valid>";
+            }
+        };
     }
 }

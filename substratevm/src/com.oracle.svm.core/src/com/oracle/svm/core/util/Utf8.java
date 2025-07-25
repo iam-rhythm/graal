@@ -24,8 +24,11 @@
  */
 package com.oracle.svm.core.util;
 
-import java.io.CharConversionException;
 import java.nio.ByteBuffer;
+import java.util.function.Predicate;
+
+import org.graalvm.nativeimage.c.type.CCharPointer;
+import org.graalvm.nativeimage.c.type.CTypeConversion;
 
 /**
  * Implements UTF-8 encoding and decoding of strings with support for zero-bytes as string
@@ -36,8 +39,46 @@ public final class Utf8 {
     private Utf8() {
     }
 
+    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-24+16/src/hotspot/share/utilities/utf8.cpp#L479-L488")
+    private static int utf8Size(char c) {
+        if ((0x0001 <= c) && (c <= 0x007F)) {
+            // ASCII character
+            return 1;
+        } else if (c <= 0x07FF) {
+            return 2;
+        } else {
+            return 3;
+        }
+    }
+
     /**
-     * @return the length in bytes of the UTF8 representation of the string
+     * @return the length as {@code long} in bytes of the UTF8 representation of the string
+     */
+    public static long utf8LengthAsLong(String string) {
+        return utf8LengthAsLong(string, 0, string.length());
+    }
+
+    /**
+     * @param beginIndex first index that is part of the region, inclusive
+     * @param endIndex index at the end of the region, exclusive
+     * @return the length as {@code long} in bytes of the UTF8 representation of the string
+     */
+    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-24+16/src/hotspot/share/utilities/utf8.cpp#L502-L509")
+    public static long utf8LengthAsLong(String s, int beginIndex, int endIndex) {
+        if (beginIndex < 0 || endIndex > s.length() || beginIndex > endIndex) {
+            throw new StringIndexOutOfBoundsException();
+        }
+        int length = s.length();
+        long result = 0;
+        for (int index = 0; index < length; index++) {
+            result += utf8Size(s.charAt(index));
+        }
+        return result;
+    }
+
+    /**
+     * @return the length as {@code int} in bytes of the UTF8 representation of the string. Might
+     *         return a truncated size if the value does not fit into {@code int} (see JDK-8328877).
      */
     public static int utf8Length(String string) {
         return utf8Length(string, 0, string.length());
@@ -46,24 +87,27 @@ public final class Utf8 {
     /**
      * @param beginIndex first index that is part of the region, inclusive
      * @param endIndex index at the end of the region, exclusive
-     * @return the length in bytes of the UTF8 representation of the string region
+     * @return the length as {@code int} in bytes of the UTF8 representation of the string. Might
+     *         return a truncated size if the value does not fit into {@code int} (see JDK-8328877).
      */
+    @BasedOnJDKFile("https://github.com/openjdk/jdk/blob/jdk-24+16/src/hotspot/share/utilities/utf8.cpp#L511-L526")
     public static int utf8Length(String s, int beginIndex, int endIndex) {
         if (beginIndex < 0 || endIndex > s.length() || beginIndex > endIndex) {
             throw new StringIndexOutOfBoundsException();
         }
-        int length = 0;
-        for (int i = beginIndex; i < endIndex; i++) {
-            final int c = s.charAt(i);
-            if ((c >= 0x0001) && (c <= 0x007F)) {
-                length++;
-            } else if (c > 0x07FF) {
-                length += 3;
-            } else {
-                length += 2;
+        long result = 0;
+        for (int index = beginIndex; index < endIndex; index++) {
+            char c = s.charAt(index);
+            long sz = utf8Size(c);
+            // If the length is > INT_MAX-1 we truncate at a completed
+            // modified-UTF8 encoding. This allows for +1 to be added
+            // by the caller for NUL-termination, without overflow.
+            if (result + sz > Integer.MAX_VALUE - 1) {
+                break;
             }
+            result += sz;
         }
-        return length;
+        return (int) result;
     }
 
     /**
@@ -120,9 +164,9 @@ public final class Utf8 {
      * @param zeroTerminated if true, then a 0 byte marks the end of the string, and character '\0'
      *            in the input must be encoded as two bytes as opposed to one
      * @param source the byte buffer to read from
-     * @return the decoded string
+     * @return the decoded string, or null if the buffer is not a valid UTF-8 string.
      */
-    public static String utf8ToString(boolean zeroTerminated, ByteBuffer source) throws CharConversionException {
+    public static String utf8ToString(boolean zeroTerminated, ByteBuffer source) {
         final StringBuilder sb = new StringBuilder();
         while (source.hasRemaining()) {
             final int c0 = source.get() & 0xff;
@@ -147,7 +191,7 @@ public final class Utf8 {
                     /* 110x xxxx 10xx xxxx */
                     final int c1 = source.get();
                     if ((c1 & 0xC0) != 0x80) {
-                        throw new CharConversionException();
+                        return null;
                     }
                     sb.append((char) (((c0 & 0x1F) << 6) | (c1 & 0x3F)));
                     break;
@@ -157,18 +201,106 @@ public final class Utf8 {
                     final int c1 = source.get();
                     final int c2 = source.get();
                     if (((c1 & 0xC0) != 0x80) || ((c2 & 0xC0) != 0x80)) {
-                        throw new CharConversionException();
+                        return null;
                     }
                     sb.append((char) (((c0 & 0x0F) << 12) | ((c1 & 0x3F) << 6) | (c2 & 0x3F)));
                     break;
                 }
                 default: {
                     /* 10xx xxxx, 1111 xxxx */
-                    throw new CharConversionException();
+                    return null;
                 }
             }
         }
         return sb.toString();
     }
 
+    /**
+     * Converts a pointer to zero-terminated UTF-8 data to a String. If the provided data is the C
+     * null pointer, or the data is not a valid UTF-8 string, then a Java null value is returned.
+     *
+     * @param source the memory to read from
+     * @return the decoded string
+     */
+    public static String utf8ToString(CCharPointer source) {
+        if (source.isNull()) {
+            return null;
+        }
+        return utf8ToString(true, CTypeConversion.asByteBuffer(source, Integer.MAX_VALUE));
+    }
+
+    /**
+     * Wraps C memory with zero-terminated UTF-8 data or copies that data, returning a
+     * {@link CharSequence}. If the provided pointer is the C null pointer, or the data is not a
+     * valid UTF-8 string, then {@code null} is returned. The returned object is only safe to access
+     * while the C memory is, too.
+     *
+     * @see WrappedAsciiCString
+     */
+    public static CharSequence wrapUtf8CString(CCharPointer source) {
+        if (source.isNull()) {
+            return null;
+        }
+        int hash = 0;
+        int length = 0;
+        byte c = source.read(length);
+        while (c > 0) { // signed, so 1..127
+            length++;
+            hash = 31 * hash + c; // compatible with String.hashCode()
+            c = source.read(length);
+        }
+        if (c < 0) { // non-ASCII character: fallback to copying
+            return utf8ToString(source);
+        }
+        return new WrappedAsciiCString(source, length, hash);
+    }
+
+    /**
+     * Wraps C memory that contains a string consisting of only 7-bit ASCII characters. This should
+     * be the case with many Strings that are passed in via JNI, such as class and member names,
+     * which can then be used in lookups without having to be converted between character sets and
+     * copied. In order to do lookups efficiently, the {@link #hashCode} which is computed by
+     * {@link #wrapUtf8CString} is compatible with that of {@link String#hashCode}.
+     */
+    public static final class WrappedAsciiCString implements CharSequence {
+        private final CCharPointer chars;
+        private final int length;
+        private final int hashCode;
+
+        public WrappedAsciiCString(CCharPointer chars, int length, int hashCode) {
+            this.chars = chars;
+            this.length = length;
+            this.hashCode = hashCode;
+
+            assert ((Predicate<String>) (s -> s.length() == length() && s.hashCode() == hashCode() && CharSequence.compare(s, this) == 0)).test(utf8ToString(chars));
+        }
+
+        @Override
+        public int length() {
+            return length;
+        }
+
+        @Override
+        public char charAt(int index) {
+            if (index < 0 || index >= length) {
+                throw new IndexOutOfBoundsException(index);
+            }
+            return (char) chars.read(index);
+        }
+
+        @Override
+        public int hashCode() {
+            return hashCode;
+        }
+
+        @Override
+        public String toString() {
+            return new StringBuilder(this).toString();
+        }
+
+        @Override
+        public CharSequence subSequence(int start, int end) {
+            throw new UnsupportedOperationException();
+        }
+    }
 }

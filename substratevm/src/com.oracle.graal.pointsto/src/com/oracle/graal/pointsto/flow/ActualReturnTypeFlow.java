@@ -24,16 +24,20 @@
  */
 package com.oracle.graal.pointsto.flow;
 
-import org.graalvm.compiler.nodes.ValueNode;
-import com.oracle.graal.pointsto.BigBang;
+import com.oracle.graal.pointsto.PointsToAnalysis;
 import com.oracle.graal.pointsto.meta.AnalysisType;
 
-public class ActualReturnTypeFlow extends TypeFlow<ValueNode> {
+import jdk.vm.ci.code.BytecodePosition;
+
+public class ActualReturnTypeFlow extends TypeFlow<BytecodePosition> {
     private InvokeTypeFlow invokeFlow;
 
-    public ActualReturnTypeFlow(ValueNode source, AnalysisType declaredType) {
-        super(source, declaredType);
-        assert this.source != null : this;
+    public ActualReturnTypeFlow(AnalysisType declaredType) {
+        this(null, declaredType);
+    }
+
+    public ActualReturnTypeFlow(BytecodePosition source, AnalysisType declaredType) {
+        super(source, filterUncheckedInterface(declaredType));
     }
 
     public ActualReturnTypeFlow(ActualReturnTypeFlow original, MethodFlowsGraph methodFlows) {
@@ -43,15 +47,13 @@ public class ActualReturnTypeFlow extends TypeFlow<ValueNode> {
     }
 
     @Override
-    public TypeFlow<ValueNode> copy(BigBang bb, MethodFlowsGraph methodFlows) {
+    public TypeFlow<BytecodePosition> copy(PointsToAnalysis bb, MethodFlowsGraph methodFlows) {
         return new ActualReturnTypeFlow(this, methodFlows);
     }
 
     @Override
     public String toString() {
-        StringBuilder str = new StringBuilder();
-        str.append("ActualReturn<").append(getState()).append(">");
-        return str.toString();
+        return "ActualReturn<" + getStateDescription() + '>';
     }
 
     public void setInvokeFlow(InvokeTypeFlow invokeFlow) {
@@ -60,6 +62,13 @@ public class ActualReturnTypeFlow extends TypeFlow<ValueNode> {
 
     public InvokeTypeFlow invokeFlow() {
         return invokeFlow;
+    }
+
+    @Override
+    public String format(boolean withState, boolean withSource) {
+        return "Actual return of call to " + invokeFlow.targetMethod.format("%H.%n(%p)") +
+                        (withSource ? " at " + formatSource() : "") +
+                        (withState ? " with state <" + getStateDescription() + ">" : "");
     }
 
 }

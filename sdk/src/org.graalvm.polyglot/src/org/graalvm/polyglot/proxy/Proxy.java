@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -52,14 +52,40 @@ import org.graalvm.polyglot.PolyglotException;
  * Exceptions thrown by proxies are wrapped with a {@link PolyglotException} when the proxy is
  * invoked in a guest language. It is possible to unwrap the {@link PolyglotException} using
  * {@link PolyglotException#asHostException()}.
+ * <p>
+ * The interfaces {@link Proxy}, {@link ProxyArray}, {@link ProxyExecutable},
+ * {@link ProxyInstantiable}, {@link ProxyNativeObject}, {@link ProxyObject}, {@link ProxyIterable},
+ * {@link ProxyIterator} can be used in combination with any other proxy interfaces.
+ * <p>
+ * The following proxy interface combinations are exclusive and throw an {@link AssertionError} if
+ * used together:
+ * <ul>
+ * <li>{@link ProxyDuration}
+ * <li>{@link ProxyInstant}, {@link ProxyDate}, {@link ProxyTime} or {@link ProxyTimeZone}.
+ * </ul>
+ *
+ * The following proxy interface combinations are invalid and throw an {@link AssertionError} if
+ * used:
+ * <ul>
+ * <li>If {@link ProxyTimeZone} and {@link ProxyDate} without {@link ProxyTime}
+ * <li>If {@link ProxyTimeZone} and {@link ProxyTime} without {@link ProxyDate}.
+ * </ul>
  *
  * @see ProxyArray to mimic arrays
  * @see ProxyObject to mimic objects with members
  * @see ProxyExecutable to mimic objects that can be executed
  * @see ProxyNativeObject to mimic native objects
- * @see ProxyPrimitive to mimic lazy primitive values
+ * @see ProxyDate to mimic date objects
+ * @see ProxyTime to mimic time objects
+ * @see ProxyTimeZone to mimic timezone objects
+ * @see ProxyDuration to mimic duration objects
+ * @see ProxyInstant to mimic timestamp objects
+ * @see ProxyInstantiable to mimic objects that are instantiable
+ * @see ProxyIterable to mimic iterable objects
+ * @see ProxyIterator to mimic iterator objects
+ * @see ProxyHashMap to mimic map objects
  *
- * @since 1.0
+ * @since 19.0
  */
 public interface Proxy {
 

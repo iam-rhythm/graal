@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -54,7 +54,6 @@ import javax.lang.model.element.VariableElement;
 import javax.lang.model.type.ArrayType;
 import javax.lang.model.type.TypeMirror;
 
-import com.oracle.truffle.api.nodes.UnexpectedResultException;
 import com.oracle.truffle.dsl.processor.ProcessorContext;
 import com.oracle.truffle.dsl.processor.java.ElementUtils;
 
@@ -70,6 +69,9 @@ public class ExecutableTypeData extends MessageContainer implements Comparable<E
 
     private String uniqueName;
 
+    private final boolean ignoreUnexpected;
+    private final boolean reachableForRuntimeCompilation;
+
     public ExecutableTypeData(NodeData node, TypeMirror returnType, String uniqueName, TypeMirror frameParameter, List<TypeMirror> evaluatedParameters) {
         this.node = node;
         this.returnType = returnType;
@@ -77,12 +79,17 @@ public class ExecutableTypeData extends MessageContainer implements Comparable<E
         this.evaluatedParameters = evaluatedParameters;
         this.uniqueName = uniqueName;
         this.method = null;
+        this.ignoreUnexpected = false;
+        this.reachableForRuntimeCompilation = true;
     }
 
-    public ExecutableTypeData(NodeData node, ExecutableElement method, int signatureSize, List<TypeMirror> frameTypes) {
+    @SuppressWarnings("this-escape")
+    public ExecutableTypeData(NodeData node, ExecutableElement method, int signatureSize, List<TypeMirror> frameTypes, boolean ignoreUnexpected, boolean reachableForRuntimeCompilation) {
         this.node = node;
         this.method = method;
         this.returnType = method.getReturnType();
+        this.ignoreUnexpected = ignoreUnexpected;
+        this.reachableForRuntimeCompilation = reachableForRuntimeCompilation;
         TypeMirror foundFrameParameter = null;
         List<? extends VariableElement> parameters = method.getParameters();
 
@@ -118,7 +125,7 @@ public class ExecutableTypeData extends MessageContainer implements Comparable<E
     }
 
     public static String createName(ExecutableTypeData type) {
-        return "execute" + (ElementUtils.isObject(type.getReturnType()) ? "" : ElementUtils.getTypeId(type.getReturnType()));
+        return "execute" + (ElementUtils.isObject(type.getReturnType()) ? "" : ElementUtils.getTypeSimpleId(type.getReturnType()));
     }
 
     public void addDelegatedFrom(ExecutableTypeData child) {
@@ -168,6 +175,13 @@ public class ExecutableTypeData extends MessageContainer implements Comparable<E
         return signaturetypes;
     }
 
+    public TypeMirror getParameterTypeOrDie(NodeExecutionData execution) {
+        if (execution.getIndex() >= getEvaluatedCount()) {
+            throw new AssertionError("Parameter type not evaluated.");
+        }
+        return getEvaluatedParameters().get(execution.getIndex());
+    }
+
     public int getVarArgsIndex(int parameterIndex) {
         if (method.isVarArgs()) {
             int index = parameterIndex - (method.getParameters().size() - 1);
@@ -188,8 +202,11 @@ public class ExecutableTypeData extends MessageContainer implements Comparable<E
         return returnType;
     }
 
-    public boolean hasUnexpectedValue(ProcessorContext context) {
-        return method == null ? false : ElementUtils.canThrowType(method.getThrownTypes(), context.getType(UnexpectedResultException.class));
+    public boolean hasUnexpectedValue() {
+        if (ignoreUnexpected || method == null) {
+            return false;
+        }
+        return ElementUtils.canThrowTypeExact(method.getThrownTypes(), types.UnexpectedResultException);
     }
 
     public boolean isFinal() {
@@ -204,6 +221,10 @@ public class ExecutableTypeData extends MessageContainer implements Comparable<E
         return evaluatedParameters.size();
     }
 
+    public boolean isReachableForRuntimeCompilation() {
+        return reachableForRuntimeCompilation;
+    }
+
     public boolean canDelegateTo(ExecutableTypeData to) {
         ExecutableTypeData from = this;
         if (to.getEvaluatedCount() < from.getEvaluatedCount()) {
@@ -213,7 +234,7 @@ public class ExecutableTypeData extends MessageContainer implements Comparable<E
         ProcessorContext context = node.getContext();
 
         // we cannot delegate from generic to unexpected
-        if (!from.hasUnexpectedValue(context) && to.hasUnexpectedValue(context)) {
+        if (!from.hasUnexpectedValue() && to.hasUnexpectedValue()) {
             return false;
         }
 
@@ -266,7 +287,7 @@ public class ExecutableTypeData extends MessageContainer implements Comparable<E
             return result;
         }
 
-        result = Boolean.compare(o1.hasUnexpectedValue(context), o2.hasUnexpectedValue(context));
+        result = Boolean.compare(o1.hasUnexpectedValue(), o2.hasUnexpectedValue());
         if (result != 0) {
             return result;
         }
@@ -353,23 +374,6 @@ public class ExecutableTypeData extends MessageContainer implements Comparable<E
     @Override
     public String toString() {
         return String.format("%s %s(%s,%s)", formatType(getReturnType()), getName(), formatType(getFrameParameter()), getEvaluatedParameters());
-    }
-
-    public boolean sameParameters(ExecutableTypeData other) {
-        if (!typeEquals(other.getFrameParameter(), getFrameParameter())) {
-            return false;
-        }
-
-        if (getEvaluatedCount() != other.getEvaluatedCount()) {
-            return false;
-        }
-
-        for (int i = 0; i < getEvaluatedCount(); i++) {
-            if (!typeEquals(getEvaluatedParameters().get(i), other.getEvaluatedParameters().get(i))) {
-                return false;
-            }
-        }
-        return true;
     }
 
     public boolean sameSignature(ExecutableTypeData other) {

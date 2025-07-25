@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -52,6 +52,7 @@ import com.oracle.truffle.dsl.processor.model.GuardExpression;
 import com.oracle.truffle.dsl.processor.model.NodeData;
 import com.oracle.truffle.dsl.processor.model.SpecializationData;
 import com.oracle.truffle.dsl.processor.model.TemplateMethod.TypeSignature;
+import com.oracle.truffle.dsl.processor.model.TypeSystemData;
 
 /**
  * Class creates groups of specializations to optimize the layout of generated executeAndSpecialize
@@ -76,7 +77,7 @@ public final class SpecializationGroup {
 
         TypeSignature sig = data.getTypeSignature();
         for (int i = 1; i < sig.size(); i++) {
-            typeGuards.add(new TypeGuard(sig.get(i), i - 1));
+            typeGuards.add(new TypeGuard(node.getTypeSystem(), sig.get(i), i - 1));
         }
         this.guards.addAll(data.getGuards());
     }
@@ -112,48 +113,6 @@ public final class SpecializationGroup {
             specializations.addAll(group.collectSpecializations());
         }
         return specializations;
-    }
-
-    private List<GuardExpression> findElseConnectableGuards() {
-        if (!getTypeGuards().isEmpty()) {
-            return Collections.emptyList();
-        }
-
-        if (getGuards().isEmpty()) {
-            return Collections.emptyList();
-        }
-
-        List<GuardExpression> elseConnectableGuards = new ArrayList<>();
-        int guardIndex = 0;
-        while (guardIndex < getGuards().size() && findNegatedGuardInPrevious(getGuards().get(guardIndex)) != null) {
-            elseConnectableGuards.add(getGuards().get(guardIndex));
-            guardIndex++;
-        }
-
-        return elseConnectableGuards;
-    }
-
-    private GuardExpression findNegatedGuardInPrevious(GuardExpression guard) {
-        SpecializationGroup previous = this.getPreviousGroup();
-        if (previous == null) {
-            return null;
-        }
-        List<GuardExpression> elseConnectedGuards = previous.findElseConnectableGuards();
-
-        if (previous == null || previous.getGuards().size() != elseConnectedGuards.size() + 1) {
-            return null;
-        }
-
-        /* Guard is else branch can be connected in previous specialization. */
-        if (elseConnectedGuards.contains(guard)) {
-            return guard;
-        }
-
-        GuardExpression previousGuard = previous.getGuards().get(elseConnectedGuards.size());
-        if (guard.equalsNegated(previousGuard)) {
-            return guard;
-        }
-        return null;
     }
 
     private void updateChildren(List<SpecializationGroup> childs) {
@@ -226,7 +185,7 @@ public final class SpecializationGroup {
             if (!guardMatch.getExpression().findBoundVariables().isEmpty()) {
                 iterator.remove();
             }
-            // TODO we need to be smarter here with bound parameters.
+            // TODO GR-38632 we need to be smarter here with bound parameters.
         }
 
         if (typeGuardsMatches.isEmpty() && guardMatches.isEmpty()) {
@@ -309,7 +268,7 @@ public final class SpecializationGroup {
     public int getUncheckedSpecializationIndex() {
         int groupMaxIndex = getMaxSpecializationIndex();
 
-        int genericIndex = node.getSpecializations().indexOf(node.getGenericSpecialization());
+        int genericIndex = node.getSpecializations().indexOf(node.getFallbackSpecialization());
         if (groupMaxIndex >= genericIndex) {
             // no minimum state check for an generic index
             groupMaxIndex = -1;
@@ -342,12 +301,18 @@ public final class SpecializationGroup {
 
     public static final class TypeGuard {
 
+        private final TypeSystemData typeSystem;
         private final int signatureIndex;
         private final TypeMirror type;
 
-        public TypeGuard(TypeMirror type, int signatureIndex) {
+        public TypeGuard(TypeSystemData typeSystem, TypeMirror type, int signatureIndex) {
+            this.typeSystem = typeSystem;
             this.type = type;
             this.signatureIndex = signatureIndex;
+        }
+
+        public TypeSystemData getTypeSystem() {
+            return typeSystem;
         }
 
         @Override
@@ -443,4 +408,14 @@ public final class SpecializationGroup {
         return false;
     }
 
+    public boolean hasFallthroughInSlowPath() {
+        if (hasFallthrough) {
+            return true;
+        }
+        SpecializationGroup lastChild = getLast();
+        if (lastChild != null) {
+            return lastChild.hasFallthroughInSlowPath();
+        }
+        return false;
+    }
 }

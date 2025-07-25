@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, Oracle and/or its affiliates.
+ * Copyright (c) 2018, 2020, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -38,12 +38,11 @@ import java.util.Map;
 import com.oracle.truffle.api.source.Source;
 import com.oracle.truffle.api.source.SourceSection;
 import com.oracle.truffle.llvm.parser.LLVMParserRuntime;
-import com.oracle.truffle.llvm.runtime.LLVMContext;
 import com.oracle.truffle.llvm.runtime.LLVMScope;
 import com.oracle.truffle.llvm.runtime.LLVMSymbol;
 import com.oracle.truffle.llvm.runtime.debug.scope.LLVMSourceLocation;
 import com.oracle.truffle.llvm.runtime.global.LLVMGlobal;
-import com.oracle.truffle.llvm.runtime.types.PointerType;
+import com.oracle.truffle.llvm.runtime.types.symbols.LLVMIdentifier;
 
 final class LLSourceMap {
 
@@ -83,7 +82,7 @@ final class LLSourceMap {
             final SourceSection endSection = llSource.createSection(endLine);
             final int charLength = endSection.getCharEndIndex() - startCharIndex;
             final SourceSection totalSection = llSource.createSection(startCharIndex, charLength);
-            return LLVMSourceLocation.create(sourceMap.getGlobalScope(runtime.getContext(), runtime.getFileScope()), LLVMSourceLocation.Kind.FUNCTION, name, new LLSourceSection(totalSection), null);
+            return LLVMSourceLocation.create(sourceMap.getGlobalScope(runtime.getFileScope()), LLVMSourceLocation.Kind.FUNCTION, name, new LLSourceSection(totalSection), null);
         }
     }
 
@@ -127,17 +126,19 @@ final class LLSourceMap {
         globals.add(name);
     }
 
-    private LLVMSourceLocation getGlobalScope(LLVMContext context, LLVMScope moduleScope) {
+    private LLVMSourceLocation getGlobalScope(LLVMScope moduleScope) {
         if (globalScope == null) {
             globalScope = LLVMSourceLocation.createLLModule(llSource.getName(), llSource.createSection(0, llSource.getLength()));
         }
         if (!globals.isEmpty()) {
             for (String globalName : globals) {
-                final LLVMSymbol actualSymbol = moduleScope.get(globalName);
+                assert globalName.startsWith("@");
+                final LLVMSymbol actualSymbol = moduleScope.get(globalName.substring(1));
                 if (actualSymbol != null && actualSymbol.isGlobalVariable()) {
                     globalScope.addGlobal(actualSymbol.asGlobalVariable());
                 } else {
-                    globalScope.addGlobal(LLVMGlobal.create(context, globalName + " (unavailable)", PointerType.VOID, null, true));
+                    LLVMGlobal global = LLVMGlobal.createUnavailable(globalName);
+                    globalScope.addGlobal(global);
                 }
             }
             globals.clear();
@@ -146,11 +147,11 @@ final class LLSourceMap {
     }
 
     Function getFunction(String name) {
-        return functions.get(name);
+        return functions.get(LLVMIdentifier.toGlobalIdentifier(name));
     }
 
     void clearFunction(Function function) {
-        functions.remove(function.getName());
+        functions.remove(LLVMIdentifier.toGlobalIdentifier(function.getName()));
     }
 
     Source getLLSource() {

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2023, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,18 +24,21 @@
  */
 package com.oracle.svm.hosted.substitute;
 
-import static com.oracle.svm.core.util.VMError.shouldNotReachHere;
-import static com.oracle.svm.core.util.VMError.unimplemented;
+import static com.oracle.svm.core.util.VMError.intentionallyUnimplemented;
+import static com.oracle.svm.core.util.VMError.shouldNotReachHereAtRuntime;
 
 import java.lang.annotation.Annotation;
+import java.lang.reflect.AnnotatedElement;
 import java.lang.reflect.Type;
 
-import org.graalvm.compiler.debug.DebugContext;
-import org.graalvm.compiler.nodes.StructuredGraph;
-
 import com.oracle.graal.pointsto.infrastructure.GraphProvider;
+import com.oracle.graal.pointsto.infrastructure.OriginalMethodProvider;
+import com.oracle.graal.pointsto.meta.AnalysisMethod;
 import com.oracle.graal.pointsto.meta.HostedProviders;
+import com.oracle.svm.hosted.annotation.AnnotationWrapper;
 
+import jdk.graal.compiler.debug.DebugContext;
+import jdk.graal.compiler.nodes.StructuredGraph;
 import jdk.vm.ci.meta.Constant;
 import jdk.vm.ci.meta.ConstantPool;
 import jdk.vm.ci.meta.ExceptionHandler;
@@ -48,21 +51,24 @@ import jdk.vm.ci.meta.ResolvedJavaType;
 import jdk.vm.ci.meta.Signature;
 import jdk.vm.ci.meta.SpeculationLog;
 
-public class SubstitutionMethod implements ResolvedJavaMethod, GraphProvider {
+public class SubstitutionMethod implements ResolvedJavaMethod, GraphProvider, OriginalMethodProvider, AnnotationWrapper {
 
     private final ResolvedJavaMethod original;
     private final ResolvedJavaMethod annotated;
     private final LocalVariableTable localVariableTable;
     private final boolean inClassSubstitution;
 
-    public SubstitutionMethod(ResolvedJavaMethod original, ResolvedJavaMethod annotated) {
-        this(original, annotated, false);
-    }
+    /**
+     * This field is used in the {@link com.oracle.svm.hosted.SubstitutionReportFeature} class to
+     * determine {@link SubstitutionMethod} objects which correspond to annotated substitutions.
+     */
+    private final boolean isUserSubstitution;
 
-    public SubstitutionMethod(ResolvedJavaMethod original, ResolvedJavaMethod annotated, boolean inClassSubstitution) {
+    public SubstitutionMethod(ResolvedJavaMethod original, ResolvedJavaMethod annotated, boolean inClassSubstitution, boolean isUserSubstitution) {
         this.original = original;
         this.annotated = annotated;
         this.inClassSubstitution = inClassSubstitution;
+        this.isUserSubstitution = isUserSubstitution;
 
         LocalVariableTable newLocalVariableTable = null;
         if (annotated.getLocalVariableTable() != null) {
@@ -83,12 +89,21 @@ public class SubstitutionMethod implements ResolvedJavaMethod, GraphProvider {
         localVariableTable = newLocalVariableTable;
     }
 
+    public boolean isUserSubstitution() {
+        return isUserSubstitution;
+    }
+
     public ResolvedJavaMethod getOriginal() {
         return original;
     }
 
     public ResolvedJavaMethod getAnnotated() {
         return annotated;
+    }
+
+    @Override
+    public ResolvedJavaMethod unwrapTowardsOriginalMethod() {
+        return original;
     }
 
     @Override
@@ -102,11 +117,19 @@ public class SubstitutionMethod implements ResolvedJavaMethod, GraphProvider {
     }
 
     @Override
-    public StructuredGraph buildGraph(DebugContext debug, ResolvedJavaMethod method, HostedProviders providers, Purpose purpose) {
-        if (annotated instanceof GraphProvider) {
-            return ((GraphProvider) annotated).buildGraph(debug, method, providers, purpose);
+    public StructuredGraph buildGraph(DebugContext debug, AnalysisMethod method, HostedProviders providers, Purpose purpose) {
+        if (annotated instanceof GraphProvider graphProvider) {
+            return graphProvider.buildGraph(debug, method, providers, purpose);
         }
         return null;
+    }
+
+    @Override
+    public boolean allowRuntimeCompilation() {
+        if (annotated instanceof GraphProvider graphProvider) {
+            return graphProvider.allowRuntimeCompilation();
+        }
+        return true;
     }
 
     @Override
@@ -155,6 +178,11 @@ public class SubstitutionMethod implements ResolvedJavaMethod, GraphProvider {
     }
 
     @Override
+    public boolean isDeclared() {
+        return original.isDeclared();
+    }
+
+    @Override
     public boolean isClassInitializer() {
         return original.isClassInitializer();
     }
@@ -181,7 +209,7 @@ public class SubstitutionMethod implements ResolvedJavaMethod, GraphProvider {
 
     @Override
     public ProfilingInfo getProfilingInfo(boolean includeNormal, boolean includeOSR) {
-        throw unimplemented();
+        return annotated.getProfilingInfo(includeNormal, includeOSR);
     }
 
     @Override
@@ -190,23 +218,18 @@ public class SubstitutionMethod implements ResolvedJavaMethod, GraphProvider {
     }
 
     @Override
-    public Annotation[] getAnnotations() {
-        return annotated.getAnnotations();
-    }
-
-    @Override
-    public Annotation[] getDeclaredAnnotations() {
-        return annotated.getDeclaredAnnotations();
-    }
-
-    @Override
-    public <T extends Annotation> T getAnnotation(Class<T> annotationClass) {
-        return annotated.getAnnotation(annotationClass);
+    public AnnotatedElement getAnnotationRoot() {
+        return annotated;
     }
 
     @Override
     public Annotation[][] getParameterAnnotations() {
         return annotated.getParameterAnnotations();
+    }
+
+    @Override
+    public Parameter[] getParameters() {
+        return original.getParameters();
     }
 
     @Override
@@ -216,17 +239,17 @@ public class SubstitutionMethod implements ResolvedJavaMethod, GraphProvider {
 
     @Override
     public boolean canBeInlined() {
-        throw unimplemented();
+        throw intentionallyUnimplemented(); // ExcludeFromJacocoGeneratedReport
     }
 
     @Override
     public boolean hasNeverInlineDirective() {
-        throw unimplemented();
+        throw intentionallyUnimplemented(); // ExcludeFromJacocoGeneratedReport
     }
 
     @Override
     public boolean shouldBeInlined() {
-        throw unimplemented();
+        throw intentionallyUnimplemented(); // ExcludeFromJacocoGeneratedReport
     }
 
     @Override
@@ -246,12 +269,12 @@ public class SubstitutionMethod implements ResolvedJavaMethod, GraphProvider {
 
     @Override
     public void reprofile() {
-        throw unimplemented();
+        throw intentionallyUnimplemented(); // ExcludeFromJacocoGeneratedReport
     }
 
     @Override
     public Constant getEncoding() {
-        throw unimplemented();
+        throw intentionallyUnimplemented(); // ExcludeFromJacocoGeneratedReport
     }
 
     @Override
@@ -261,11 +284,11 @@ public class SubstitutionMethod implements ResolvedJavaMethod, GraphProvider {
 
     @Override
     public boolean isDefault() {
-        throw unimplemented();
+        throw intentionallyUnimplemented(); // ExcludeFromJacocoGeneratedReport
     }
 
     @Override
     public SpeculationLog getSpeculationLog() {
-        throw shouldNotReachHere();
+        throw shouldNotReachHereAtRuntime(); // ExcludeFromJacocoGeneratedReport
     }
 }

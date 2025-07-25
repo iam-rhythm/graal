@@ -32,16 +32,18 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.stream.Collectors;
 
-import com.oracle.graal.pointsto.typestate.PointsToStats;
-import org.graalvm.compiler.nodes.ParameterNode;
-
-import com.oracle.graal.pointsto.BigBang;
+import com.oracle.graal.pointsto.PointsToAnalysis;
+import com.oracle.graal.pointsto.flow.AlwaysEnabledPredicateFlow;
 import com.oracle.graal.pointsto.flow.TypeFlow;
 import com.oracle.graal.pointsto.meta.AnalysisMethod;
+import com.oracle.graal.pointsto.typestate.PointsToStats;
 import com.oracle.graal.pointsto.util.AnalysisError;
+import com.oracle.svm.util.ClassUtil;
+
+import jdk.graal.compiler.nodes.ParameterNode;
 
 public class TypeFlowGraphBuilder {
-    private final BigBang bb;
+    private final PointsToAnalysis bb;
     /**
      * The data flow sink builders are the nodes that should not be removed. They are data flow
      * sinks in the context of type flows graph that it creates, i.e., they collect useful
@@ -51,7 +53,7 @@ public class TypeFlowGraphBuilder {
      */
     private final List<TypeFlowBuilder<?>> dataFlowSinkBuilders;
 
-    public TypeFlowGraphBuilder(BigBang bb) {
+    public TypeFlowGraphBuilder(PointsToAnalysis bb) {
         this.bb = bb;
         dataFlowSinkBuilders = new ArrayList<>();
     }
@@ -102,7 +104,7 @@ public class TypeFlowGraphBuilder {
      */
     public void checkFormalParameterBuilder(TypeFlowBuilder<?> paramBuilder) {
         AnalysisMethod method = (AnalysisMethod) ((ParameterNode) paramBuilder.getSource()).graph().method();
-        String methodFormat = method.format("%H.%n(%P)");
+        String methodFormat = method.getQualifiedName();
         for (String specialMethodFormat : waitNotifyHashCodeMethods) {
             if (methodFormat.equals(specialMethodFormat)) {
                 dataFlowSinkBuilders.add(paramBuilder);
@@ -113,8 +115,13 @@ public class TypeFlowGraphBuilder {
     /**
      * Materialize all reachable flows starting from the sinks and working backwards following the
      * dependency chains. Unreachable flows will be implicitly pruned.
+     *
+     * @return the list of type flows that need initialization
      */
-    public void build() {
+    public List<TypeFlow<?>> build() {
+        /* List of type flows that need to be initialized after the graph is materialized. */
+        List<TypeFlow<?>> postInitFlows = new ArrayList<>();
+
         /* Work queue used by the iterative graph traversal. */
         HashSet<TypeFlowBuilder<?>> processed = new HashSet<>();
         ArrayDeque<TypeFlowBuilder<?>> workQueue = new ArrayDeque<>();
@@ -134,14 +141,55 @@ public class TypeFlowGraphBuilder {
             workQueue.addLast(sinkBuilder);
             while (!workQueue.isEmpty()) {
                 TypeFlowBuilder<?> builder = workQueue.removeFirst();
+                if (!processed.add(builder)) {
+                    /* Skip if this builder was processed already. */
+                    continue;
+                }
                 /* Materialize the builder. */
                 TypeFlow<?> flow = builder.get();
 
-                /* The retain reason is the sink from which it was reached. */
-                PointsToStats.registerTypeFlowRetainReason(bb, flow, (sinkBuilder.isBuildingAnActualParameter() ? "ActualParam=" : "") + sinkBuilder.getFlowClass().getSimpleName());
+                var predicate = builder.getPredicate();
+                if (predicate != null) {
+                    assert bb.usePredicates() : "Predicates should only be used with -H:+UsePredicates.";
+                    if (predicate instanceof TypeFlowBuilder<?> singlePredicate) {
+                        singlePredicate.get().addPredicated(bb, flow);
+                        if (!processed.contains(singlePredicate)) {
+                            workQueue.addLast(singlePredicate);
+                        }
+                    } else {
+                        @SuppressWarnings("unchecked")
+                        var predicateList = ((List<TypeFlowBuilder<?>>) predicate);
+                        for (TypeFlowBuilder<?> p : predicateList) {
+                            p.get().addPredicated(bb, flow);
+                            if (!processed.contains(p)) {
+                                workQueue.addLast(p);
+                            }
+                        }
+                    }
+                } else {
+                    assert !bb.usePredicates() || flow instanceof AlwaysEnabledPredicateFlow : "Flow " + flow + " does not have a predicate.";
+                    /*
+                     * If there is no predicate, enable the flow immediately. However, we only want
+                     * to propagate updates in the context-insensitive analysis. In the
+                     * context-sensitive analysis, the original graph is used for cloning only, so
+                     * we do not want to send any updates through it, hence we pass null for bb.
+                     */
+                    flow.enableFlow(bb.analysisPolicy().isContextSensitiveAnalysis() ? null : bb);
+                }
+                if (bb.isBaseLayerAnalysisEnabled()) {
+                    /*
+                     * GR-58387 - Currently, we force enable all the flows in the base layer, which
+                     * is a workaround that should eventually be removed.
+                     */
+                    flow.enableFlow(bb.analysisPolicy().isContextSensitiveAnalysis() ? null : bb);
+                }
 
-                /* Mark the builder as materialized. */
-                processed.add(builder);
+                if (flow.needsInitialization()) {
+                    postInitFlows.add(flow);
+                }
+
+                /* The retain reason is the sink from which it was reached. */
+                PointsToStats.registerTypeFlowRetainReason(bb, flow, (sinkBuilder.isBuildingAnActualParameter() ? "ActualParam=" : "") + ClassUtil.getUnqualifiedName(sinkBuilder.getFlowClass()));
 
                 /*
                  * Iterate over use and observer dependencies. Add them to the workQueue only if
@@ -151,20 +199,18 @@ public class TypeFlowGraphBuilder {
                     if (!processed.contains(useDependency)) {
                         workQueue.addLast(useDependency);
                     }
-                    TypeFlow<?> useFlow = useDependency.get();
                     /* Convert the use dependency into a use data flow. */
-                    useFlow.addOriginalUse(bb, flow);
+                    bb.analysisPolicy().addOriginalUse(bb, useDependency.get(), flow);
                 }
                 for (TypeFlowBuilder<?> observerDependency : builder.getObserverDependencies()) {
                     if (!processed.contains(observerDependency)) {
                         workQueue.addLast(observerDependency);
                     }
-                    TypeFlow<?> observerFlow = observerDependency.get();
                     /* Convert the observer dependency into an observer data flow. */
-                    observerFlow.addOriginalObserver(bb, flow);
+                    bb.analysisPolicy().addOriginalObserver(bb, observerDependency.get(), flow);
                 }
-
             }
         }
+        return postInitFlows;
     }
 }

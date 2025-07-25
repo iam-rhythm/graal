@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,12 +40,12 @@
  */
 package com.oracle.truffle.sl.nodes;
 
-import com.oracle.truffle.api.CompilerDirectives.CompilationFinal;
 import com.oracle.truffle.api.frame.FrameDescriptor;
-import com.oracle.truffle.api.frame.VirtualFrame;
+import com.oracle.truffle.api.frame.FrameInstance;
 import com.oracle.truffle.api.nodes.NodeInfo;
 import com.oracle.truffle.api.nodes.RootNode;
 import com.oracle.truffle.api.source.SourceSection;
+import com.oracle.truffle.api.strings.TruffleString;
 import com.oracle.truffle.sl.SLLanguage;
 import com.oracle.truffle.sl.builtins.SLBuiltinNode;
 import com.oracle.truffle.sl.nodes.controlflow.SLFunctionBodyNode;
@@ -57,43 +57,26 @@ import com.oracle.truffle.sl.nodes.controlflow.SLFunctionBodyNode;
  * functions, the {@link #bodyNode} is a {@link SLFunctionBodyNode}.
  */
 @NodeInfo(language = "SL", description = "The root of all SL execution trees")
-public class SLRootNode extends RootNode {
-    /** The function body that is executed, and specialized during execution. */
-    @Child private SLExpressionNode bodyNode;
+public abstract class SLRootNode extends RootNode {
 
-    /** The name of the function, for printing purposes only. */
-    private final String name;
+    protected transient boolean isCloningAllowed;
 
-    @CompilationFinal private boolean isCloningAllowed;
-
-    private final SourceSection sourceSection;
-
-    public SLRootNode(SLLanguage language, FrameDescriptor frameDescriptor, SLExpressionNode bodyNode, SourceSection sourceSection, String name) {
+    public SLRootNode(SLLanguage language, FrameDescriptor frameDescriptor) {
         super(language, frameDescriptor);
-        this.bodyNode = bodyNode;
-        this.name = name;
-        this.sourceSection = sourceSection;
     }
 
     @Override
-    public SourceSection getSourceSection() {
-        return sourceSection;
-    }
+    public abstract SourceSection getSourceSection();
 
-    @Override
-    public Object execute(VirtualFrame frame) {
-        assert getLanguage(SLLanguage.class).getContextReference().get() != null;
-        return bodyNode.executeGeneric(frame);
-    }
-
-    public SLExpressionNode getBodyNode() {
-        return bodyNode;
-    }
+    public abstract SLExpressionNode getBodyNode();
 
     @Override
     public String getName() {
-        return name;
+        TruffleString name = getTSName();
+        return name == null ? null : name.toJavaStringUncached();
     }
+
+    public abstract TruffleString getTSName();
 
     public void setCloningAllowed(boolean isCloningAllowed) {
         this.isCloningAllowed = isCloningAllowed;
@@ -106,6 +89,21 @@ public class SLRootNode extends RootNode {
 
     @Override
     public String toString() {
-        return "root " + name;
+        return "root " + getTSName();
     }
+
+    /*
+     * The way local values work is very different between AST and bytecode interpreter. For example
+     * the AST interpreter just uses the FrameDescriptor from the frame, where as the bytecode
+     * interpreter implements scoping of values and hence requires additional logic to find the
+     * current set of locals.
+     */
+    public abstract Object[] getLocalValues(FrameInstance frame);
+
+    public abstract Object[] getLocalNames(FrameInstance frame);
+
+    public abstract void setLocalValues(FrameInstance frame, Object[] args);
+
+    public abstract SourceSection ensureSourceSection();
+
 }

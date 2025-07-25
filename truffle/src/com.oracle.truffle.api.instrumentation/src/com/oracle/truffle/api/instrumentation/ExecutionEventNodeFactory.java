@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2016, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -53,7 +53,7 @@ import com.oracle.truffle.api.CompilerDirectives.CompilationFinal;
  * stored as a {@link CompilationFinal compilation final}, so no peak performance overhead persists
  * for looking up the counter on the fast path.
  * </p>
- * 
+ *
  * @since 0.12
  */
 public interface ExecutionEventNodeFactory {

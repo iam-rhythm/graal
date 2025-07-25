@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,13 +40,14 @@
  */
 package com.oracle.truffle.api.test.nodes;
 
-import static org.hamcrest.CoreMatchers.is;
+import static com.oracle.truffle.api.test.OSUtils.toUnixString;
+import static com.oracle.truffle.api.test.polyglot.AbstractPolyglotTest.assertFails;
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertThat;
-
-import java.util.Iterator;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertTrue;
 
 import org.junit.Assert;
+import org.junit.BeforeClass;
 import org.junit.Test;
 
 import com.oracle.truffle.api.frame.VirtualFrame;
@@ -54,21 +55,61 @@ import com.oracle.truffle.api.nodes.Node;
 import com.oracle.truffle.api.nodes.NodeUtil;
 import com.oracle.truffle.api.nodes.NodeVisitor;
 import com.oracle.truffle.api.nodes.RootNode;
+import com.oracle.truffle.tck.tests.TruffleTestAssumptions;
 
 public class NodeUtilTest {
 
     @Test
-    public void testRecursiveIterator1() {
-        TestRootNode root = new TestRootNode();
-        TestNode testNode = new TestNode();
-        root.child0 = testNode;
-        root.adoptChildren();
+    public void testAssertAdoptedSuccess() {
+        TestRootNode rootNode = new TestRootNode();
+        TestNode replacedNode = new TestNode();
+        replacedNode.child0 = new TestNode();
+        rootNode.child0 = rootNode.insert(replacedNode);
+        assertTrue(NodeUtil.assertAdopted(replacedNode));
+        assertTrue(NodeUtil.assertAdopted(rootNode));
+        assertNotNull(replacedNode.child0.getParent());
+    }
 
-        int count = iterate(NodeUtil.makeRecursiveIterator(root));
+    @Test
+    public void testAssertNotAdopted() {
+        TestRootNode rootNode = new TestRootNode();
+        TestNode replacedNode = new TestNode();
+        rootNode.child0 = rootNode.insert(replacedNode);
+        replacedNode.child0 = new TestNode();
+        assertFails(() -> NodeUtil.assertAdopted(replacedNode.child0), AssertionError.class);
+        replacedNode.insert(replacedNode.child0);
 
-        assertThat(count, is(2));
-        assertThat(root.visited, is(0));
-        assertThat(testNode.visited, is(1));
+        TestNode disconnectedNode = new TestNode();
+        assertFails(() -> disconnectedNode.insert(replacedNode.child0), AssertionError.class, (e) -> {
+            assertTrue(e.getMessage(), e.getMessage().startsWith("Old parent was adopted, but new insertion parent is not adopted."));
+            assertEquals("Invalid node usage. Node must be adopted. Path to null parent: NodeUtilTest.TestNode.parent -> null", e.getCause().getMessage());
+        });
+    }
+
+    private static final class NotAdoptableNode extends Node {
+        @Override
+        public boolean isAdoptable() {
+            return false;
+        }
+    }
+
+    @Test
+    public void testAssertAdoptedNotAdoptable() {
+        TestRootNode rootNode = new TestRootNode();
+        NotAdoptableNode replacedNode = new NotAdoptableNode();
+        rootNode.child0 = rootNode.insert(replacedNode);
+
+        assertFails(() -> NodeUtil.assertAdopted(replacedNode), AssertionError.class);
+    }
+
+    @Test
+    public void testAssertAdoptedNull() {
+        assertFails(() -> NodeUtil.assertAdopted(null), NullPointerException.class);
+    }
+
+    @BeforeClass
+    public static void runWithWeakEncapsulationOnly() {
+        TruffleTestAssumptions.assumeWeakEncapsulation();
     }
 
     @Test
@@ -152,33 +193,6 @@ public class NodeUtilTest {
         });
 
         Assert.assertEquals(4, count[0]);
-        Assert.assertEquals(1, testForEachNode.visited);
-        Assert.assertEquals(1, testNode1.visited);
-        Assert.assertEquals(1, testNode2.visited);
-        Assert.assertEquals(1, testNode3.visited);
-    }
-
-    @Test
-    public void testRecursiveIterator() {
-        TestRootNode root = new TestRootNode();
-        TestForEachNode testForEachNode = new TestForEachNode(1);
-        root.child0 = testForEachNode;
-        TestNode testNode1 = new TestNode();
-        testForEachNode.firstChild = testNode1;
-        TestNode testNode2 = new TestNode();
-        testForEachNode.children[0] = testNode2;
-        TestNode testNode3 = new TestNode();
-        testForEachNode.lastChild = testNode3;
-        root.adoptChildren();
-
-        int count = 0;
-        Iterable<Node> iterable = () -> NodeUtil.makeRecursiveIterator(testForEachNode);
-        for (Node node : iterable) {
-            ((VisitableNode) node).visited++;
-            count++;
-        }
-
-        Assert.assertEquals(4, count);
         Assert.assertEquals(1, testForEachNode.visited);
         Assert.assertEquals(1, testNode1.visited);
         Assert.assertEquals(1, testNode2.visited);
@@ -279,7 +293,7 @@ public class NodeUtilTest {
         assertEquals("" +
                         "  " + testNodeSimpleName + "\n" +
                         "    child0 = " + testNodeSimpleName + "\n" +
-                        "    child1 = " + testNodeSimpleName + "\n", output);
+                        "    child1 = " + testNodeSimpleName + "\n", toUnixString(output));
 
         TestForEachNode test2 = new TestForEachNode(4);
         test2.firstChild = new TestNode();
@@ -294,26 +308,20 @@ public class NodeUtilTest {
                         "      child0 = " + testNodeSimpleName + "\n" +
                         "      child1 = " + testNodeSimpleName + "\n" +
                         "    children[3] = " + testNodeSimpleName + "\n" +
-                        "    lastChild = " + testNodeSimpleName + "\n", output);
-    }
-
-    private static int iterate(Iterator<Node> iterator) {
-        int iterationCount = 0;
-        while (iterator.hasNext()) {
-            Node node = iterator.next();
-            if (node == null) {
-                continue;
-            }
-            if (node instanceof TestNode) {
-                ((TestNode) node).visited = iterationCount;
-            } else if (node instanceof TestRootNode) {
-                ((TestRootNode) node).visited = iterationCount;
-            } else {
-                throw new AssertionError();
-            }
-            iterationCount++;
-        }
-        return iterationCount;
+                        "    lastChild = " + testNodeSimpleName + "\n", toUnixString(output));
+        TestBlockResNode block = new TestBlockResNode(new Node[]{new TestNode(), new TestNode()}, new TestNode());
+        String testBlockResNodeSimpleName = getSimpleName(TestBlockResNode.class);
+        output = NodeUtil.printCompactTreeToString(block);
+        assertEquals("" +
+                        "  " + testBlockResNodeSimpleName + "\n" +
+                        "    children[0] = " + testNodeSimpleName + "\n" +
+                        "    children[1] = " + testNodeSimpleName + "\n" +
+                        "    resultNode = " + testNodeSimpleName + "\n", toUnixString(output));
+        block = new TestBlockResNode(null, new TestNode());
+        output = NodeUtil.printCompactTreeToString(block);
+        assertEquals("" +
+                        "  " + testBlockResNodeSimpleName + "\n" +
+                        "    resultNode = " + testNodeSimpleName + "\n", toUnixString(output));
     }
 
     private static String getSimpleName(Class<?> clazz) {
@@ -337,8 +345,6 @@ public class NodeUtilTest {
     private static class TestRootNode extends RootNode {
 
         @Child Node child0;
-
-        protected int visited;
 
         TestRootNode() {
             super(null);
@@ -364,6 +370,17 @@ public class NodeUtilTest {
             this.children = new Node[childrenSize];
         }
 
+    }
+
+    private static class TestBlockResNode extends VisitableNode {
+
+        private @Children Node[] children;
+        private @Child Node resultNode;
+
+        TestBlockResNode(Node[] body, Node resultNode) {
+            this.children = body;
+            this.resultNode = resultNode;
+        }
     }
 
 }

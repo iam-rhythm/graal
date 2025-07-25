@@ -27,20 +27,14 @@ package com.oracle.objectfile.pecoff;
 
 import com.oracle.objectfile.ObjectFile.RelocationKind;
 import com.oracle.objectfile.ObjectFile.RelocationMethod;
-import com.oracle.objectfile.pecoff.PECoffRelocationTable.PECoffRelocationMethod;
 import com.oracle.objectfile.pecoff.PECoff.IMAGE_FILE_HEADER;
 import com.oracle.objectfile.pecoff.PECoff.IMAGE_RELOCATION;
+import com.oracle.objectfile.pecoff.PECoffRelocationTable.PECoffRelocationMethod;
 
 /**
  * PECoff machine type (incomplete). Each machine type also defines its set of relocation types.
  */
 public enum PECoffMachine/* implements Integral */ {
-    NONE {
-        @Override
-        Class<? extends Enum<? extends RelocationMethod>> relocationTypes() {
-            return PECoffDummyRelocation.class;
-        }
-    },
     X86_64 {
         @Override
         Class<? extends Enum<? extends RelocationMethod>> relocationTypes() {
@@ -50,95 +44,58 @@ public enum PECoffMachine/* implements Integral */ {
 
     abstract Class<? extends Enum<? extends RelocationMethod>> relocationTypes();
 
-    public static PECoffRelocationMethod getRelocation(PECoffMachine m, RelocationKind k, int sizeInBytes) {
+    public static PECoffRelocationMethod getRelocation(PECoffMachine m, RelocationKind k) {
         switch (m) {
             case X86_64:
                 switch (k) {
-                    case DIRECT:
-                        switch (sizeInBytes) {
-                            case 8:
-                                return PECoffX86_64Relocation.ADDR64;
-                            default:
-                                throw new IllegalArgumentException("unsupported DIRECT relocation type, size: " + sizeInBytes);
-                        }
-                    case PC_RELATIVE:
-                        switch (sizeInBytes) {
-                            case 4:
-                                return PECoffX86_64Relocation.REL32;
-                            default:
-                                throw new IllegalArgumentException("unsupported relocation type: " + k + " size: " + sizeInBytes);
-                        }
-                    default:
+                    case DIRECT_8:
+                        return PECoffX86_64Relocation.ADDR64;
+                    case DIRECT_4:
+                        return PECoffX86_64Relocation.ADDR32;
+                    case PC_RELATIVE_4:
+                        return PECoffX86_64Relocation.REL32;
+                    case ADDR32NB_4:
+                        return PECoffX86_64Relocation.ADDR32NB;
+                    case SECTION_2:
+                        return PECoffX86_64Relocation.SECTION;
+                    case SECREL_4:
+                        return PECoffX86_64Relocation.SECREL;
                     case UNKNOWN:
-                        throw new IllegalArgumentException("cannot map unknown relocation kind to an PECoff x86-64 relocation type");
+                    default:
+                        throw new IllegalArgumentException("Cannot map unknown relocation kind to an PECoff x86-64 relocation type");
                 }
             default:
-            case NONE:
-                return PECoffDummyRelocation.R_NONE;
+                throw new IllegalStateException("Unknown PECoff machine type");
         }
     }
 
     public static PECoffMachine from(int m) {
         switch (m) {
-            case IMAGE_FILE_HEADER.IMAGE_FILE_MACHINE_UNKNOWN:
-                return NONE;
             case IMAGE_FILE_HEADER.IMAGE_FILE_MACHINE_AMD64:
                 return X86_64;
             default:
-                throw new IllegalStateException("unknown PECoff machine type");
+                throw new IllegalStateException("Unknown PECoff machine type");
         }
     }
 
     public short toShort() {
-        if (this == NONE) {
-            return (short) IMAGE_FILE_HEADER.IMAGE_FILE_MACHINE_UNKNOWN;
-        } else if (this == X86_64) {
+        if (this == X86_64) {
             return (short) IMAGE_FILE_HEADER.IMAGE_FILE_MACHINE_AMD64;
         } else {
-            throw new IllegalStateException("should not reach here");
+            throw new IllegalStateException("Should not reach here");
         }
     }
 
     public static PECoffMachine getSystemNativeValue() {
-        String archStr = System.getProperty("os.arch").toLowerCase();
-        if (archStr.equals("amd64") || archStr.equals("x86_64")) {
-            return X86_64;
-        }
-        throw new IllegalStateException("unknown PECoff machine type");
+        String arch = System.getProperty("os.arch");
+        return switch (arch) {
+            case "amd64", "x86_64" -> X86_64;
+            default -> throw new IllegalArgumentException("Unsupported PECoff machine type: " + arch);
+        };
     }
 }
 
-enum PECoffDummyRelocation implements PECoffRelocationMethod {
-    R_NONE;
-
-    @Override
-    public RelocationKind getKind() {
-        return RelocationKind.UNKNOWN;
-    }
-
-    @Override
-    public boolean canUseExplicitAddend() {
-        return true;
-    }
-
-    @Override
-    public boolean canUseImplicitAddend() {
-        return true;
-    }
-
-    @Override
-    public long toLong() {
-        return ordinal();
-    }
-
-    @Override
-    public int getRelocatedByteSize() {
-        throw new UnsupportedOperationException();
-    }
-}
-
-/**
- * @formatter:off
+/*-
  *
  * IMAGE_REL_AMD64_ABSOLUTE 0x0000 // Reference is absolute, no relocation is necessary
  * IMAGE_REL_AMD64_ADDR64 0x0001   // 64-bit address (VA).
@@ -156,63 +113,42 @@ enum PECoffDummyRelocation implements PECoffRelocationMethod {
  * IMAGE_REL_AMD64_TOKEN 0x000D    // 32 bit metadata token
  * IMAGE_REL_AMD64_SREL32 0x000E   // 32 bit signed span-dependent value emitted into object
  * IMAGE_REL_AMD64_PAIR 0x000F IMAGE_REL_AMD64_SSPAN32 0x0010 // 32 bit signed span-dependent value applied at link time
- *
- * @formatter:on
  */
 enum PECoffX86_64Relocation implements PECoffRelocationMethod {
     ADDR64 {
-        @Override
-        public RelocationKind getKind() {
-            return RelocationKind.DIRECT;
-        }
-
-        @Override
-        public int getRelocatedByteSize() {
-            return 8;
-        }
-
         @Override
         public long toLong() {
             return IMAGE_RELOCATION.IMAGE_REL_AMD64_ADDR64;
         }
     },
+    ADDR32 {
+        @Override
+        public long toLong() {
+            return IMAGE_RELOCATION.IMAGE_REL_AMD64_ADDR32;
+        }
+    },
+    ADDR32NB {
+        @Override
+        public long toLong() {
+            return IMAGE_RELOCATION.IMAGE_REL_AMD64_ADDR32NB;
+        }
+    },
     REL32 {
-        @Override
-        public RelocationKind getKind() {
-            return RelocationKind.PC_RELATIVE;
-        }
-
-        @Override
-        public int getRelocatedByteSize() {
-            return 4;
-        }
-
         @Override
         public long toLong() {
             return IMAGE_RELOCATION.IMAGE_REL_AMD64_REL32;
         }
+    },
+    SECTION {
+        @Override
+        public long toLong() {
+            return IMAGE_RELOCATION.IMAGE_REL_AMD64_SECTION;
+        }
+    },
+    SECREL {
+        @Override
+        public long toLong() {
+            return IMAGE_RELOCATION.IMAGE_REL_AMD64_SECREL;
+        }
     };
-
-    @Override
-    public RelocationKind getKind() {
-        return RelocationKind.UNKNOWN;
-    }
-
-    /*
-     * x86-64 relocs always use explicit addends.
-     */
-    @Override
-    public boolean canUseExplicitAddend() {
-        return true;
-    }
-
-    @Override
-    public boolean canUseImplicitAddend() {
-        return false;
-    }
-
-    @Override
-    public int getRelocatedByteSize() {
-        throw new UnsupportedOperationException(); // better safe than sorry
-    }
 }

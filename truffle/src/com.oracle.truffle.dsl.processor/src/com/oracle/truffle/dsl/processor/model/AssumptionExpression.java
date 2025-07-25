@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -49,12 +49,12 @@ import com.oracle.truffle.dsl.processor.java.ElementUtils;
 
 public final class AssumptionExpression extends MessageContainer {
 
-    private final TemplateMethod source;
+    private final SpecializationData specialization;
     private final DSLExpression expression;
     private final String id;
 
-    public AssumptionExpression(TemplateMethod source, DSLExpression expression, String id) {
-        this.source = source;
+    public AssumptionExpression(SpecializationData source, DSLExpression expression, String id) {
+        this.specialization = source;
         this.expression = expression;
         this.id = id;
     }
@@ -63,14 +63,24 @@ public final class AssumptionExpression extends MessageContainer {
         return id;
     }
 
+    /**
+     * Returns true if the assumption needs to be cached in a field.
+     */
+    public boolean needsCaching() {
+        if (specialization.isCompilationFinalExpression(expression)) {
+            return false;
+        }
+        return true;
+    }
+
     @Override
     public Element getMessageElement() {
-        return source.getMessageElement();
+        return specialization.getMessageElement();
     }
 
     @Override
     public AnnotationMirror getMessageAnnotation() {
-        return source.getMessageAnnotation();
+        return specialization.getMessageAnnotation();
     }
 
     @Override

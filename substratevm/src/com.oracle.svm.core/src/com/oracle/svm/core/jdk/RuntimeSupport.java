@@ -25,155 +25,154 @@
 package com.oracle.svm.core.jdk;
 
 import java.util.Arrays;
-import java.util.Collections;
-import java.util.Comparator;
 import java.util.Objects;
-import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicReference;
 
-import org.graalvm.compiler.api.replacements.Fold;
 import org.graalvm.nativeimage.ImageSingletons;
 import org.graalvm.nativeimage.Platform;
 import org.graalvm.nativeimage.Platforms;
-
-import com.oracle.svm.core.CompilerCommandPlugin;
-import com.oracle.svm.core.util.VMError;
+import org.graalvm.nativeimage.VMRuntime;
 import org.graalvm.nativeimage.impl.VMRuntimeSupport;
 
+import com.oracle.svm.core.IsolateArgumentParser;
+import com.oracle.svm.core.Isolates;
+import com.oracle.svm.core.feature.AutomaticallyRegisteredImageSingleton;
+import com.oracle.svm.core.heap.HeapSizeVerifier;
+import com.oracle.svm.core.option.RuntimeOptionValidationSupport;
+import com.oracle.svm.core.util.VMError;
+
+import jdk.graal.compiler.api.replacements.Fold;
+
+@AutomaticallyRegisteredImageSingleton({VMRuntimeSupport.class, RuntimeSupport.class})
 public final class RuntimeSupport implements VMRuntimeSupport {
 
-    /** A list of startup hooks. */
-    private AtomicReference<Runnable[]> startupHooks;
-
-    /** A list of shutdown hooks. */
-    private AtomicReference<Runnable[]> shutdownHooks;
-
-    /** A list of tear down hooks. */
-    private AtomicReference<Runnable[]> tearDownHooks;
-
-    /** A list of CompilerCommandPlugins. */
-    private static final Comparator<CompilerCommandPlugin> PluginComparator = Comparator.comparing(CompilerCommandPlugin::name);
-    private CopyOnWriteArrayList<CompilerCommandPlugin> commandPlugins;
-    @Platforms(Platform.HOSTED_ONLY.class)//
-    private boolean commandPluginsSorted;
-
-    /** A constructor for the singleton instance. */
-    private RuntimeSupport() {
-        super();
-        startupHooks = new AtomicReference<>();
-        shutdownHooks = new AtomicReference<>();
-        tearDownHooks = new AtomicReference<>();
-        commandPlugins = new CopyOnWriteArrayList<>();
-        commandPluginsSorted = false;
+    @FunctionalInterface
+    public interface Hook {
+        void execute(boolean isFirstIsolate);
     }
 
-    /** Construct and register the singleton instance, if necessary. */
-    public static void initializeRuntimeSupport() {
-        assert ImageSingletons.contains(RuntimeSupport.class) == false : "Initializing RuntimeSupport again.";
-        ImageSingletons.add(RuntimeSupport.class, new RuntimeSupport());
+    private final AtomicReference<InitializationState> initializationState = new AtomicReference<>(InitializationState.Uninitialized);
+
+    /** Hooks that run before calling Java {@code main} or in {@link VMRuntime#initialize()}. */
+    private final AtomicReference<Hook[]> startupHooks = new AtomicReference<>();
+
+    /**
+     * Hooks that run after the Java {@code main} method or when calling {@link Runtime#exit} (or
+     * {@link System#exit}).
+     *
+     * Note that it is possible for shutdownHooks to be called even if the {@link #startupHooks}
+     * have not executed.
+     */
+    private final AtomicReference<Hook[]> shutdownHooks = new AtomicReference<>();
+
+    /** Hooks that run during isolate initialization. */
+    private final AtomicReference<Hook[]> initializationHooks = new AtomicReference<>();
+
+    /**
+     * Hooks that run during isolate tear-down. Note it is possible for these hooks to run even if
+     * the {@link #initializationHooks} have not executed.
+     */
+    private final AtomicReference<Hook[]> tearDownHooks = new AtomicReference<>();
+
+    @Platforms(Platform.HOSTED_ONLY.class)
+    RuntimeSupport() {
     }
 
-    /** Get the singleton instance. */
     @Fold
     public static RuntimeSupport getRuntimeSupport() {
         return ImageSingletons.lookup(RuntimeSupport.class);
     }
 
     @Platforms(Platform.HOSTED_ONLY.class)
-    public void addStartupHook(Runnable hook) {
+    public void addStartupHook(Hook hook) {
         addHook(startupHooks, hook);
     }
 
-    @Override
-    public void executeStartupHooks() {
-        executeHooks(startupHooks);
+    public boolean isUninitialized() {
+        return initializationState.get() == InitializationState.Uninitialized;
     }
 
-    @Platforms(Platform.HOSTED_ONLY.class)
-    public void addShutdownHook(Runnable hook) {
-        addHook(shutdownHooks, hook);
+    @Override
+    public void initialize() {
+        boolean shouldInitialize = initializationState.compareAndSet(InitializationState.Uninitialized, InitializationState.InProgress);
+        if (shouldInitialize) {
+            RuntimeOptionValidationSupport.singleton().validate();
+
+            IsolateArgumentParser.singleton().verifyOptionValues();
+            HeapSizeVerifier.verifyHeapOptions();
+
+            executeHooks(startupHooks);
+            VMError.guarantee(initializationState.compareAndSet(InitializationState.InProgress, InitializationState.Done), "Only one thread can call the initialization");
+        } else if (initializationState.get() != InitializationState.Done) {
+            throw VMError.shouldNotReachHere("Only one thread can call the initialization");
+        }
     }
 
     /**
-     * Called only internally as part of the JDK shutdown process, use {@link #shutdown()} to
-     * trigger the whoke JDK shutdown process.
+     * Adds a hook which will execute during the shutdown process. Note it is possible for the
+     * {@link #shutdownHooks} to be called without the {@link #startupHooks} executing first.
      */
+    @Platforms(Platform.HOSTED_ONLY.class)
+    public void addShutdownHook(Hook hook) {
+        addHook(shutdownHooks, hook);
+    }
+
     static void executeShutdownHooks() {
         executeHooks(getRuntimeSupport().shutdownHooks);
     }
 
     /**
-     * Adds a tear down hook that is executed before the isolate torn down.
-     *
-     * @param tearDownHook hook to executed on isolate tear down.
+     * Initialization hooks are executed during isolate initialization, before runtime options are
+     * parsed. The executed code should therefore not try to access any runtime options. If it is
+     * necessary to access a runtime option, then its value must be accessed via
+     * {@link com.oracle.svm.core.IsolateArgumentParser}.
      */
-    public void addTearDownHook(Runnable tearDownHook) {
-        addHook(tearDownHooks, tearDownHook);
+    public void addInitializationHook(Hook initHook) {
+        addHook(initializationHooks, initHook);
+    }
+
+    /** Runs isolate initialization hooks. Although public, this method should not be public API. */
+    public static void executeInitializationHooks() {
+        executeHooks(getRuntimeSupport().initializationHooks);
     }
 
     /**
-     * Called only internally as part of the isolate tear down process. These hooks clean up all
-     * running threads to allow proper isolate tear down.
-     *
-     * Although public, this method should not go to the public API.
+     * Adds a hook which will execute during isolate tear-down. Note it is possible for the
+     * {@link #tearDownHooks} to be called without the {@link #initializationHooks} executing first.
      */
+    public void addTearDownHook(Hook tearDownHook) {
+        addHook(tearDownHooks, tearDownHook);
+    }
+
+    /** Runs isolate tear-down hooks. Although public, this method should not be public API. */
     public static void executeTearDownHooks() {
         executeHooks(getRuntimeSupport().tearDownHooks);
     }
 
-    private static void addHook(AtomicReference<Runnable[]> hooksReference, Runnable newHook) {
+    private static void addHook(AtomicReference<Hook[]> hooksReference, Hook newHook) {
         Objects.requireNonNull(newHook);
 
-        Runnable[] existingHooks;
-        Runnable[] newHooks;
+        Hook[] existingHooks;
+        Hook[] newHooks;
         do {
             existingHooks = hooksReference.get();
             if (existingHooks != null) {
                 newHooks = Arrays.copyOf(existingHooks, existingHooks.length + 1);
                 newHooks[newHooks.length - 1] = newHook;
             } else {
-                newHooks = new Runnable[]{newHook};
+                newHooks = new Hook[]{newHook};
             }
         } while (!hooksReference.compareAndSet(existingHooks, newHooks));
     }
 
-    private static void executeHooks(AtomicReference<Runnable[]> hooksReference) {
-        Runnable[] hooks = hooksReference.getAndSet(null);
+    private static void executeHooks(AtomicReference<Hook[]> hooksReference) {
+        Hook[] hooks = hooksReference.getAndSet(null);
         if (hooks != null) {
-            for (Runnable hook : hooks) {
-                hook.run();
+            boolean firstIsolate = Isolates.isCurrentFirst();
+            for (Hook hook : hooks) {
+                hook.execute(firstIsolate);
             }
         }
-    }
-
-    @Platforms(Platform.HOSTED_ONLY.class)
-    public void addCommandPlugin(CompilerCommandPlugin plugin) {
-        assert !commandPluginsSorted;
-        if (commandPlugins.stream().anyMatch(p -> p.name().equals(plugin.name()))) {
-            throw new IllegalArgumentException("CompilerCommandPlugin previously registered");
-        }
-
-        commandPlugins.add(plugin);
-    }
-
-    Object runCommand(String cmd, Object[] args) {
-        CompilerCommandPlugin key = new CompilerCommandPlugin() {
-
-            @Override
-            public String name() {
-                return cmd;
-            }
-
-            @Override
-            public Object apply(Object[] ignore) {
-                throw VMError.shouldNotReachHere();
-            }
-        };
-        int index = Collections.binarySearch(commandPlugins, key, PluginComparator);
-        if (index >= 0) {
-            return commandPlugins.get(index).apply(args);
-        }
-        throw new IllegalArgumentException("Could not find SVM command with the name " + cmd);
     }
 
     @Override
@@ -181,10 +180,9 @@ public final class RuntimeSupport implements VMRuntimeSupport {
         Target_java_lang_Shutdown.shutdown();
     }
 
-    @Platforms(Platform.HOSTED_ONLY.class)
-    void sortCommandPlugins() {
-        commandPlugins.sort(PluginComparator);
-        assert !commandPluginsSorted;
-        commandPluginsSorted = true;
+    private enum InitializationState {
+        Uninitialized,
+        InProgress,
+        Done
     }
 }

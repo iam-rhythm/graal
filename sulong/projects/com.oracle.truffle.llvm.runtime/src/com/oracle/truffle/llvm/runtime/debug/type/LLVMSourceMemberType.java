@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates.
+ * Copyright (c) 2017, 2023, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -34,7 +34,7 @@ import com.oracle.truffle.api.CompilerDirectives.CompilationFinal;
 import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
 import com.oracle.truffle.llvm.runtime.debug.scope.LLVMSourceLocation;
 
-public final class LLVMSourceMemberType extends LLVMSourceType {
+public class LLVMSourceMemberType extends LLVMSourceType {
 
     @CompilationFinal private LLVMSourceType elementType;
 
@@ -42,7 +42,7 @@ public final class LLVMSourceMemberType extends LLVMSourceType {
         this(name, size, align, offset, LLVMSourceType.UNKNOWN, location);
     }
 
-    private LLVMSourceMemberType(String name, long size, long align, long offset, LLVMSourceType elementType, LLVMSourceLocation location) {
+    protected LLVMSourceMemberType(String name, long size, long align, long offset, LLVMSourceType elementType, LLVMSourceLocation location) {
         super(() -> name, size, align, offset, location);
         this.elementType = elementType;
     }

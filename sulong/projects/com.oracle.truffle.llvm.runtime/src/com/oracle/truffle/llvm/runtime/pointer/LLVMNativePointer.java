@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, Oracle and/or its affiliates.
+ * Copyright (c) 2018, 2020, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -29,6 +29,7 @@
  */
 package com.oracle.truffle.llvm.runtime.pointer;
 
+import com.oracle.truffle.api.CompilerDirectives;
 import com.oracle.truffle.llvm.runtime.interop.access.LLVMInteropType;
 import com.oracle.truffle.llvm.runtime.nodes.api.LLVMNode;
 import com.oracle.truffle.llvm.runtime.nodes.api.LLVMTypes;
@@ -53,6 +54,11 @@ public interface LLVMNativePointer extends LLVMPointer {
     @Override
     LLVMNativePointer copy();
 
+    @Override
+    @Deprecated
+    @SuppressWarnings("deprecation")
+    boolean equals(Object obj);
+
     /**
      * Increment this pointer. The result is determined by simply adding the offset to the
      * {@link #asNative} address.
@@ -69,7 +75,11 @@ public interface LLVMNativePointer extends LLVMPointer {
      * Create a null pointer.
      */
     static LLVMNativePointer createNull() {
-        return new LLVMPointerImpl(null, 0, null);
+        if (CompilerDirectives.inCompiledCode()) {
+            return new LLVMPointerImpl(null, 0, null);
+        } else {
+            return LLVMPointerImpl.NULL;
+        }
     }
 
     /**
@@ -84,11 +94,7 @@ public interface LLVMNativePointer extends LLVMPointer {
      * the regular Java {@code instanceof} operator.
      */
     static boolean isInstance(Object object) {
-        if (object instanceof LLVMPointerImpl) {
-            return ((LLVMPointerImpl) object).isNative();
-        } else {
-            return false;
-        }
+        return object instanceof LLVMPointerImpl && ((LLVMPointerImpl) object).isNative();
     }
 
     /**

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2014, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -41,6 +41,7 @@
 package com.oracle.truffle.api.nodes;
 
 import com.oracle.truffle.api.CompilerDirectives;
+import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
 import com.oracle.truffle.api.TruffleRuntime;
 import com.oracle.truffle.api.frame.VirtualFrame;
 
@@ -50,8 +51,11 @@ import com.oracle.truffle.api.frame.VirtualFrame;
  * it returns <code>true</code>. Using the loop node in a guest language implementation allows the
  * Truffle runtime to optimize loops in a better way. For example a Truffle runtime implementation
  * might decide to optimize loop already during its first execution (also called on stack
- * replacement OSR). Loop nodes are not intended to be implemented by Truffle runtime
- * implementations and not by guest language implementations.
+ * replacement OSR). Loop nodes are intended to be implemented by Truffle runtime implementations
+ * and not by guest language implementations.
+ *
+ * Note: The loop condition is automatically profiled by the loop node, so the {@link RepeatingNode
+ * repeating node} should not use a loop condition profile.
  * </p>
  * <p>
  * Full usage example for guest language while node:
@@ -132,16 +136,22 @@ public abstract class LoopNode extends Node {
     }
 
     /**
-     * Invokes one loop invocation by repeatedly call
+     * Invokes one loop invocation by repeatedly calling
      * {@link RepeatingNode#executeRepeating(VirtualFrame) execute)} on the repeating node the loop
      * was initialized with. Any exceptions that occur in the execution of the repeating node will
      * just be forwarded to this method and will cancel the current loop invocation.
      *
      * @param frame the current execution frame or null if the repeating node does not require a
      *            frame
-     * @since 0.8 or earlier
+     * @return a value <code>v</code> returned by
+     *         {@link RepeatingNode#executeRepeating(VirtualFrame) execute} satisfying
+     *         {@link RepeatingNode#shouldContinue shouldContinue(v)}<code> == false</code>, which
+     *         can be used in a language-specific way (for example, to encode structured jumps)
+     * @since 19.3
      */
-    public abstract void executeLoop(VirtualFrame frame);
+    public Object execute(VirtualFrame frame) {
+        throw new AbstractMethodError("This method must be overridden in concrete subclasses.");
+    }
 
     /**
      * Returns the repeating node the loop node was created with.
@@ -152,39 +162,73 @@ public abstract class LoopNode extends Node {
 
     /**
      * <p>
-     * Reports the execution count of a loop for which a no {@link LoopNode} was used. The
+     * Reports the execution count of a loop for which no {@link LoopNode} was used. The
      * optimization heuristics can use the loop count from non Truffle loops to guide compilation
      * and inlining better. Do not use {@link LoopNode} and {@link #reportLoopCount(Node, int)} at
-     * the same time for one loop.
-     * </p>
+     * the same time for one loop. If the number of iterations needs to be counted and can overflow,
+     * only count if {@link CompilerDirectives#hasNextTier()} is <code>true</code> (reporting will
+     * have no effect in the last tier) and consider reporting {@link Integer#MAX_VALUE} in case of
+     * overflows. If the number is often zero and {@link #reportLoopCount(Node, int)} is called
+     * frequently (e.g. in a loop), consider adding a check to avoid the overhead of redundant calls
+     * with an <code>iterations</code> argument of zero in the interpreter.
      *
      * <p>
-     * Example usage with a custom loop: <code>
+     * Example usage for a custom loop iterating over an array: <code>
      * <pre>
      * public int executeCustomLoopSum(int[] data) {
-     *     try {
-     *         int sum = 0;
-     *         for (int i = 0; i < data.length; i++) {
-     *             sum += data[i];
-     *         }
-     *         return sum;
-     *     } finally {
-     *         LoopNode.reportLoopCount(this, data.length);
+     *     int sum = 0;
+     *     for (int i = 0; i &lt; data.length; i++) {
+     *         sum += data[i];
      *     }
+     *     LoopNode.reportLoopCount(this, data.length);
+     *     return sum;
      * }
+     * </pre>
+     * </code>
      *
+     * Example usage for a custom loop with an unknown number of iterations and a potential
+     * <code>int</code> overflow: <code>
+     * <pre>
+     * public Object executeCustomLoopWithUnknownIterations(int[] data) {
+     *     Object result;
+     *     int counter = 0;
+     *     while(true) {
+     *         if (isResultAvailable()) {
+     *             result = getResult();
+     *             break;
+     *         }
+     *         // do some work to calculate result
+     *         if (CompilerDirectives.hasNextTier()) {
+     *             counter++;
+     *         }
+     *     }
+     *     if (counter != 0) {
+     *         LoopNode.reportLoopCount(this, counter > 0 ? counter : Integer.MAX_VALUE);
+     *     }
+     *     return result;
+     * }
      * </pre>
      * </code>
      * </p>
      *
      * @param source the Node which invoked the loop.
-     * @param iterations the number iterations to report to the runtime system
+     * @param iterations the number iterations to report to the runtime system, must be >= 0
      * @since 0.12
      */
     public static void reportLoopCount(Node source, int iterations) {
-        if (CompilerDirectives.inInterpreter()) {
-            Node.ACCESSOR.onLoopCount(source, iterations);
+        assert iterations >= 0;
+        if (CompilerDirectives.hasNextTier()) {
+            if (CompilerDirectives.isPartialEvaluationConstant(source)) {
+                NodeAccessor.RUNTIME.onLoopCount(source, iterations);
+            } else {
+                onLoopCountBoundary(source, iterations);
+            }
         }
+    }
+
+    @TruffleBoundary
+    private static void onLoopCountBoundary(Node source, int iterations) {
+        NodeAccessor.RUNTIME.onLoopCount(source, iterations);
     }
 
 }

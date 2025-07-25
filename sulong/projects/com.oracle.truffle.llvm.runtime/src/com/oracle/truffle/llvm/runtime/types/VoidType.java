@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates.
+ * Copyright (c) 2017, 2020, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -29,21 +29,23 @@
  */
 package com.oracle.truffle.llvm.runtime.types;
 
+import com.oracle.truffle.llvm.runtime.GetStackSpaceFactory;
+import com.oracle.truffle.llvm.runtime.NodeFactory;
 import com.oracle.truffle.llvm.runtime.datalayout.DataLayout;
+import com.oracle.truffle.llvm.runtime.except.LLVMParserException;
+import com.oracle.truffle.llvm.runtime.nodes.api.LLVMExpressionNode;
 import com.oracle.truffle.llvm.runtime.types.visitors.TypeVisitor;
 
 public final class VoidType extends Type {
 
     public static final VoidType INSTANCE = new VoidType();
 
-    private final Object identity;
-
     private VoidType() {
-        this.identity = new Object();
+        // private constructor
     }
 
     @Override
-    public int getBitSize() {
+    public long getBitSize() {
         return 0;
     }
 
@@ -58,7 +60,7 @@ public final class VoidType extends Type {
     }
 
     @Override
-    public int getSize(DataLayout targetDataLayout) {
+    public long getSize(DataLayout targetDataLayout) {
         return 0;
     }
 
@@ -68,37 +70,17 @@ public final class VoidType extends Type {
     }
 
     @Override
-    public Type shallowCopy() {
-        return this;
+    public boolean equals(Object obj) {
+        return obj == this;
     }
 
     @Override
     public int hashCode() {
-        final int prime = 31;
-        int result = 1;
-        result = prime * result + ((identity == null) ? 0 : identity.hashCode());
-        return result;
+        return 123;
     }
 
     @Override
-    public boolean equals(Object obj) {
-        if (this == obj) {
-            return true;
-        }
-        if (obj == null) {
-            return false;
-        }
-        if (getClass() != obj.getClass()) {
-            return false;
-        }
-        VoidType other = (VoidType) obj;
-        if (identity == null) {
-            if (other.identity != null) {
-                return false;
-            }
-        } else if (!identity.equals(other.identity)) {
-            return false;
-        }
-        return true;
+    public LLVMExpressionNode createNullConstant(NodeFactory nodeFactory, DataLayout dataLayout, GetStackSpaceFactory stackFactory) {
+        throw new LLVMParserException("Unsupported Type for Zero Constant: " + this);
     }
 }

@@ -26,38 +26,31 @@ package com.oracle.graal.pointsto.flow;
 
 import static jdk.vm.ci.common.JVMCIError.shouldNotReachHere;
 
-import com.oracle.graal.pointsto.BigBang;
+import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
+
+import com.oracle.graal.pointsto.PointsToAnalysis;
 import com.oracle.graal.pointsto.flow.context.object.AnalysisObject;
 import com.oracle.graal.pointsto.meta.AnalysisField;
 import com.oracle.graal.pointsto.meta.AnalysisType;
 import com.oracle.graal.pointsto.typestate.TypeState;
 
-import jdk.vm.ci.meta.JavaKind;
+public class FieldTypeFlow extends TypeFlow<AnalysisField> implements GlobalFlow {
 
-public class FieldTypeFlow extends TypeFlow<AnalysisField> {
-
-    private static TypeState initialFieldState(AnalysisField field) {
-        if (field.getJavaKind() == JavaKind.Object && field.canBeNull()) {
-            /*
-             * All object type instance fields of a new object can be null. Instance fields are null
-             * in the time between the new-instance and the first write to a field. This is even
-             * true for non-null final fields because even final fields are null until they are
-             * initialized in a constructor.
-             */
-            return TypeState.forNull();
-        }
-        return TypeState.forEmpty();
-    }
+    private static final AtomicReferenceFieldUpdater<FieldTypeFlow, FieldFilterTypeFlow> FILTER_FLOW_UPDATER = AtomicReferenceFieldUpdater.newUpdater(FieldTypeFlow.class, FieldFilterTypeFlow.class,
+                    "filterFlow");
 
     /** The holder of the field flow (null for static fields). */
-    private AnalysisObject object;
+    private final AnalysisObject object;
+
+    /** A filter flow used for unsafe writes. */
+    private volatile FieldFilterTypeFlow filterFlow;
 
     public FieldTypeFlow(AnalysisField field, AnalysisType type) {
-        super(field, type, initialFieldState(field));
+        this(field, type, null);
     }
 
     public FieldTypeFlow(AnalysisField field, AnalysisType type, AnalysisObject object) {
-        this(field, type);
+        super(field, filterUncheckedInterface(type), TypeState.forEmpty());
         this.object = object;
     }
 
@@ -66,14 +59,52 @@ public class FieldTypeFlow extends TypeFlow<AnalysisField> {
     }
 
     @Override
-    public TypeFlow<AnalysisField> copy(BigBang bb, MethodFlowsGraph methodFlows) {
+    public TypeFlow<AnalysisField> copy(PointsToAnalysis bb, MethodFlowsGraph methodFlows) {
         // return this field flow
         throw shouldNotReachHere("The field flow should not be cloned. Use Load/StoreFieldTypeFlow.");
     }
 
     @Override
+    public boolean canSaturate(PointsToAnalysis bb) {
+        /* Fields declared with a closed type don't saturate, they track all input types. */
+        return !bb.isClosed(declaredType);
+    }
+
+    @Override
+    protected void onInputSaturated(PointsToAnalysis bb, TypeFlow<?> input) {
+        if (bb.isClosed(declaredType)) {
+            /*
+             * When a field store is saturated conservatively assume that the field state can
+             * contain any subtype of its declared type or any primitive value for primitive fields.
+             */
+            declaredType.getTypeFlow(bb, true).addUse(bb, this);
+        } else {
+            /* Propagate saturation stamp through the field flow. */
+            super.onInputSaturated(bb, input);
+        }
+    }
+
+    /** The filter flow is used for unsafe writes and initialized on demand. */
+    public FieldFilterTypeFlow filterFlow(PointsToAnalysis bb) {
+        assert source.isUnsafeAccessed() : "Filter flow requested for non unsafe accessed field.";
+
+        if (filterFlow == null) {
+            if (FILTER_FLOW_UPDATER.compareAndSet(this, null, new FieldFilterTypeFlow(source))) {
+                /*
+                 * The newly installed FieldFilterTypeFlow can be used by other threads before
+                 * addUse() is called / done. This is not a problem. The filterFlow stores its own
+                 * state and after the use is actually linked the state, if any, is transfered to
+                 * the use.
+                 */
+                filterFlow.addUse(bb, this);
+            }
+        }
+        return filterFlow;
+    }
+
+    @Override
     public String toString() {
-        return "FieldFlow<" + source.format("%h.%n") + "\n" + getState() + ">";
+        return "FieldFlow<" + source.format("%h.%n") + System.lineSeparator() + getStateDescription() + ">";
     }
 
 }

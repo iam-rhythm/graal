@@ -24,8 +24,11 @@
  */
 package com.oracle.svm.core.c.function;
 
+import org.graalvm.nativeimage.Isolates.CreateIsolateParameters;
 import org.graalvm.nativeimage.c.struct.CField;
 import org.graalvm.nativeimage.c.struct.CStruct;
+import org.graalvm.nativeimage.c.type.CCharPointer;
+import org.graalvm.nativeimage.c.type.CCharPointerPointer;
 import org.graalvm.word.PointerBase;
 import org.graalvm.word.UnsignedWord;
 
@@ -40,9 +43,71 @@ public interface CEntryPointCreateIsolateParameters extends PointerBase {
     @CField("version")
     void setVersion(int version);
 
+    /* fields below: version 1 */
+
     @CField("reserved_address_space_size")
     UnsignedWord reservedSpaceSize();
 
     @CField("reserved_address_space_size")
     void setReservedSpaceSize(UnsignedWord reservedSpaceSize);
+
+    /* fields below: version 2 */
+
+    @CField("auxiliary_image_path")
+    CCharPointer auxiliaryImagePath();
+
+    @CField("auxiliary_image_path")
+    void setAuxiliaryImagePath(CCharPointer filePath);
+
+    @CField("auxiliary_image_reserved_space_size")
+    UnsignedWord auxiliaryImageReservedSpaceSize();
+
+    @CField("auxiliary_image_reserved_space_size")
+    void setAuxiliaryImageReservedSpaceSize(UnsignedWord auxImageReservedSize);
+
+    /* fields below: version 3 */
+
+    @CField("pkey")
+    void setProtectionKey(int key);
+
+    @CField("pkey")
+    int protectionKey();
+
+    /**
+     * C arguments passed from the C main function into the isolate creation. These fields are not
+     * public API, therefore they are named "reserved" in the C header files, and they are not
+     * listed in the {@link CreateIsolateParameters} Java API to create isolates.
+     */
+
+    @CField("_reserved_1")
+    int getArgc();
+
+    @CField("_reserved_1")
+    void setArgc(int value);
+
+    @CField("_reserved_2")
+    CCharPointerPointer getArgv();
+
+    @CField("_reserved_2")
+    void setArgv(CCharPointerPointer value);
+
+    /* fields below: version 4 */
+    @CField("_reserved_3")
+    boolean getIgnoreUnrecognizedArguments();
+
+    @CField("_reserved_3")
+    void setIgnoreUnrecognizedArguments(boolean value);
+
+    @CField("_reserved_4")
+    boolean getExitWhenArgumentParsingFails();
+
+    @CField("_reserved_4")
+    void setExitWhenArgumentParsingFails(boolean value);
+
+    /* fields below: version 5 */
+    @CField("_reserved_5")
+    boolean getIsCompilationIsolate();
+
+    @CField("_reserved_5")
+    void setIsCompilationIsolate(boolean value);
 }

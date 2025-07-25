@@ -24,25 +24,28 @@
  */
 package com.oracle.svm.core.posix.headers.linux;
 
-import org.graalvm.nativeimage.Platform;
-import org.graalvm.nativeimage.Platforms;
 import org.graalvm.nativeimage.c.CContext;
 import org.graalvm.nativeimage.c.function.CFunction;
+import org.graalvm.nativeimage.c.function.CFunction.Transition;
 import org.graalvm.nativeimage.c.function.CLibrary;
 import org.graalvm.nativeimage.c.type.CCharPointer;
+import org.graalvm.nativeimage.c.type.CIntPointer;
+
 import com.oracle.svm.core.posix.headers.PosixDirectives;
+import com.oracle.svm.core.posix.headers.Pthread;
 import com.oracle.svm.core.posix.headers.Pthread.pthread_t;
+
+// Checkstyle: stop
 
 @CContext(PosixDirectives.class)
 @CLibrary("pthread")
-@Platforms(Platform.LINUX_AND_JNI.class)
 public class LinuxPthread {
-
-    /* { Allow names with underscores: Checkstyle: stop */
-
-    /** Set thread name visible in the kernel and its interfaces. */
     @CFunction
     public static native int pthread_setname_np(pthread_t target_thread, CCharPointer name);
 
-    /* } Allow names with underscores: Checkstyle: resume */
+    @CFunction(transition = Transition.NO_TRANSITION)
+    public static native int pthread_getcpuclockid(pthread_t pthread, CIntPointer clock_id);
+
+    @CFunction(transition = Transition.NO_TRANSITION)
+    public static native int pthread_condattr_setclock(Pthread.pthread_condattr_t attr, int clock_id);
 }

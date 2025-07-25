@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2019, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,13 +24,18 @@
  */
 package com.oracle.truffle.tools.chromeinspector.objects;
 
+import java.util.Arrays;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 import com.oracle.truffle.api.CompilerDirectives;
+import com.oracle.truffle.api.interop.InteropLibrary;
+import com.oracle.truffle.api.interop.InvalidArrayIndexException;
 import com.oracle.truffle.api.interop.TruffleObject;
 import com.oracle.truffle.api.interop.UnknownIdentifierException;
+import com.oracle.truffle.api.interop.UnsupportedMessageException;
 import com.oracle.truffle.api.interop.UnsupportedTypeException;
+import com.oracle.truffle.api.utilities.TriState;
 import com.oracle.truffle.tools.chromeinspector.server.InspectorServerConnection;
 
 /**
@@ -76,10 +81,12 @@ class Console extends AbstractInspectorObject {
     };
 
     private InspectorServerConnection connection;
+    private final UndefinedProvider undefinedProvider;
     private final Map<Object, Long> time = new ConcurrentHashMap<>();
 
-    Console(InspectorServerConnection connection) {
+    Console(InspectorServerConnection connection, UndefinedProvider undefinedProvider) {
         this.connection = connection;
+        this.undefinedProvider = undefinedProvider;
     }
 
     public static boolean isInstance(TruffleObject obj) {
@@ -91,7 +98,7 @@ class Console extends AbstractInspectorObject {
     }
 
     @Override
-    protected TruffleObject getKeys() {
+    protected TruffleObject getMembers(boolean includeInternal) {
         return KEYS;
     }
 
@@ -140,14 +147,11 @@ class Console extends AbstractInspectorObject {
 
     @Override
     @CompilerDirectives.TruffleBoundary
-    protected Object invokeMethod(String name, Object[] arguments) {
+    protected Object invokeMember(String name, Object[] arguments) throws UnsupportedTypeException, UnknownIdentifierException, UnsupportedMessageException {
         Object arg;
         if (arguments.length < 1) {
             arg = UNKNOWN;
         } else {
-            if (!(arguments[0] instanceof String || arguments[0] instanceof Number)) {
-                throw UnsupportedTypeException.raise(arguments);
-            }
             arg = arguments[0];
         }
         String type = name;
@@ -187,6 +191,15 @@ class Console extends AbstractInspectorObject {
             case METHOD_COUNT_RESET:
                 break;
             case METHOD_ASSERT:
+                // Report assertion only when false
+                if (isTrue(arguments[0])) {
+                    return undefinedProvider.get();
+                }
+                if (arguments.length > 1) {
+                    arg = arguments[1];
+                } else {
+                    arg = "console.assert";
+                }
                 break;
             case METHOD_MARK_TIMELINE:
                 break;
@@ -200,7 +213,7 @@ class Console extends AbstractInspectorObject {
                 break;
             case METHOD_TIME:
                 time.put(arg, System.nanoTime());
-                return NullObject.INSTANCE;
+                return undefinedProvider.get();
             case METHOD_TIME_END:
                 long t2 = System.nanoTime();
                 Long t1 = time.remove(arg);
@@ -223,26 +236,53 @@ class Console extends AbstractInspectorObject {
             case METHOD_TIME_STAMP:
                 break;
             default:
-                throw UnknownIdentifierException.raise(name);
+                throw UnknownIdentifierException.create(name);
+        }
+        if (connection == null) {
+            throw new InspectorStateException("The inspector is not connected.");
         }
         connection.consoleAPICall(type, arg);
-        return NullObject.INSTANCE;
+        return undefinedProvider.get();
+    }
+
+    private static boolean isTrue(Object obj) throws UnsupportedMessageException {
+        InteropLibrary interop = InteropLibrary.getFactory().getUncached();
+        if (interop.isBoolean(obj)) {
+            return interop.asBoolean(obj);
+        } else {
+            return !interop.isNull(obj);
+        }
     }
 
     static final class Keys extends AbstractInspectorArray {
 
         @Override
-        int getLength() {
+        int getArraySize() {
             return METHOD_NAMES.length;
         }
 
         @Override
-        Object getElementAt(int index) {
+        Object readArrayElement(long index) throws InvalidArrayIndexException {
             if (index < 0 || index >= METHOD_NAMES.length) {
                 CompilerDirectives.transferToInterpreter();
-                throw UnknownIdentifierException.raise(Integer.toString(index));
+                throw InvalidArrayIndexException.create(index);
             }
-            return METHOD_NAMES[index];
+            return METHOD_NAMES[(int) index];
+        }
+
+        @Override
+        TriState isIdenticalOrUndefined(Object other) {
+            if (other instanceof Keys) {
+                return TriState.TRUE;
+            } else {
+                return TriState.UNDEFINED;
+            }
+        }
+
+        @Override
+        @CompilerDirectives.TruffleBoundary
+        int identityHashCode() {
+            return Arrays.hashCode(METHOD_NAMES);
         }
     }
 

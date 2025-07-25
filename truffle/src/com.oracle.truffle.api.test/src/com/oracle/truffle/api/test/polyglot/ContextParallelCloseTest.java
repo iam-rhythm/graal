@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2019, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,6 +40,8 @@
  */
 package com.oracle.truffle.api.test.polyglot;
 
+import static com.oracle.truffle.api.TruffleLanguage.ContextPolicy;
+import static com.oracle.truffle.api.TruffleLanguage.Registration;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.fail;
 
@@ -55,9 +57,21 @@ import org.graalvm.polyglot.Context;
 import org.graalvm.polyglot.Engine;
 import org.junit.Test;
 
-import com.oracle.truffle.api.test.polyglot.PolyglotCachingTest.ReuseLanguage;
+import com.oracle.truffle.api.nodes.RootNode;
+import com.oracle.truffle.api.test.common.AbstractExecutableTestLanguage;
+import com.oracle.truffle.api.test.common.TestUtils;
 
 public class ContextParallelCloseTest {
+
+    @Registration(contextPolicy = ContextPolicy.REUSE)
+    public static class ReuseLanguage extends AbstractExecutableTestLanguage {
+        static final String ID = TestUtils.getDefaultLanguageId(ReuseLanguage.class);
+
+        @Override
+        protected Object execute(RootNode node, Env env, Object[] contextArguments, Object[] frameArguments) throws Exception {
+            return "";
+        }
+    }
 
     @Test
     public void testCloseDeadlock() throws InterruptedException, ExecutionException {
@@ -101,7 +115,7 @@ public class ContextParallelCloseTest {
                     context.eval(ReuseLanguage.ID, "");
                     fail();
                 } catch (IllegalStateException e) {
-                    assertEquals("Engine is already closed.", e.getMessage());
+                    assertEquals("The Context is already closed.", e.getMessage());
                 }
             }
         } finally {

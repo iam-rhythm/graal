@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2025, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,6 +40,8 @@
  */
 package org.graalvm.nativeimage;
 
+import org.graalvm.nativeimage.impl.InternalPlatform;
+
 /**
  * Root of the interface hierarchy for architectures, OS, and supported combinations of them.
  * <p>
@@ -55,193 +57,9 @@ package org.graalvm.nativeimage;
  * This system makes the set of platform groups and leaf platforms extensible. Some standard
  * platforms are defined as inner classes.
  *
- * @since 1.0
+ * @since 19.0
  */
 public interface Platform {
-
-    /*
-     * The standard architectures that we support.
-     */
-
-    /**
-     * Supported architecture: x86 64-bit.
-     *
-     * @since 1.0
-     */
-    interface AMD64 extends Platform {
-    }
-
-    /*
-     * The standard operating systems that we support.
-     */
-
-    /**
-     * Supported operating system: Linux.
-     *
-     * @since 1.0
-     */
-    interface LINUX extends Platform {
-    }
-
-    /**
-     * Supported operating system: Darwin (MacOS).
-     *
-     * @since 1.0
-     */
-    interface DARWIN extends Platform {
-    }
-
-    /**
-     * Supported operating system: Linux platform that uses JNI based native JDK libraries.
-     *
-     * @since 1.0
-     */
-    interface LINUX_JNI extends Platform {
-    }
-
-    /**
-     * Supported operating system: Darwin (MacOS) platform that uses JNI based native JDK libraries.
-     *
-     * @since 1.0
-     */
-    interface DARWIN_JNI extends Platform {
-    }
-
-    /**
-     * Temporary platform used to mark classes or methods that are used for LINUX and LINUX_JNI
-     * platforms.
-     *
-     * @since 1.0
-     */
-    interface LINUX_AND_JNI extends Platform {
-    }
-
-    /**
-     * Temporary platform used to mark classes or methods that are used for DARWIN (MacOS) and
-     * DARWIN_JNI platforms.
-     *
-     * @since 1.0
-     */
-    interface DARWIN_AND_JNI extends Platform {
-    }
-
-    /**
-     * Supported operating system: Windows.
-     *
-     * @since 1.0
-     */
-    interface WINDOWS extends Platform {
-    }
-
-    /*
-     * Standard leaf platforms, i.e., OS-architecture combinations that we support.
-     */
-
-    /**
-     * Supported leaf platform: Linux on x86 64-bit.
-     *
-     * @since 1.0
-     */
-    class LINUX_AMD64 implements LINUX, LINUX_AND_JNI, AMD64 {
-
-        /**
-         * Instantiates a marker instance of this platform.
-         *
-         * @since 1.0
-         */
-        public LINUX_AMD64() {
-        }
-    }
-
-    /**
-     * Supported leaf platform: Darwin (MacOS) on x86 64-bit.
-     *
-     * @since 1.0
-     */
-    class DARWIN_AMD64 implements DARWIN, DARWIN_AND_JNI, AMD64 {
-
-        /**
-         * Instantiates a marker instance of this platform.
-         *
-         * @since 1.0
-         */
-        public DARWIN_AMD64() {
-        }
-    }
-
-    /**
-     * Temporary leaf platform that is used to mark classes or methods that are used for LINUX_JNI
-     * platforms.
-     *
-     * @since 1.0
-     */
-    class LINUX_JNI_AMD64 implements LINUX_JNI, LINUX_AND_JNI, AMD64 {
-
-        /**
-         * Instantiates a marker instance of this platform.
-         *
-         * @since 1.0
-         */
-        public LINUX_JNI_AMD64() {
-        }
-    }
-
-    /**
-     * Temporary leaf platform that is used to mark classes or methods that are used for DARWIN_JNI
-     * platforms.
-     *
-     * @since 1.0
-     */
-    class DARWIN_JNI_AMD64 implements DARWIN_JNI, DARWIN_AND_JNI, AMD64 {
-
-        /**
-         * Instantiates a marker instance of this platform.
-         *
-         * @since 1.0
-         */
-        public DARWIN_JNI_AMD64() {
-        }
-    }
-
-    /**
-     * Supported leaf platform: Windows on x86 64-bit.
-     *
-     * @since 1.0
-     */
-    class WINDOWS_AMD64 implements WINDOWS, AMD64 {
-
-        /**
-         * Instantiates a marker instance of this platform.
-         *
-         * @since 1.0
-         */
-        public WINDOWS_AMD64() {
-        }
-    }
-
-    /**
-     * Marker for elements (types, methods, or fields) that are only visible during native image
-     * generation and cannot be used at run time, regardless of the actual platform.
-     *
-     * @since 1.0
-     */
-    final class HOSTED_ONLY implements Platform {
-        private HOSTED_ONLY() {
-        }
-    }
-
-    /**
-     * Returns true if the current platform (the platform that the native image is built for) is
-     * included in the provided platform group.
-     * <p>
-     * The platformGroup must be a compile time constant, so that the call to this method can be
-     * replaced with the constant boolean result.
-     *
-     * @since 1.0
-     */
-    static boolean includedIn(Class<? extends Platform> platformGroup) {
-        return platformGroup.isInstance(ImageSingletons.lookup(Platform.class));
-    }
 
     /**
      * The system property name that specifies the fully qualified name of the {@link Platform}
@@ -249,7 +67,399 @@ public interface Platform {
      * class is inferred from the standard architectures and operating systems specified in this
      * file, i.e., in most cases it is not necessary to use this property.
      *
-     * @since 1.0
+     * @since 19.0
      */
     String PLATFORM_PROPERTY_NAME = "svm.platform";
+
+    /**
+     * Returns true if the current platform (the platform that the native image is built for) is
+     * included in the provided platform group.
+     * <p>
+     * The platformGroup must be a compile-time constant, so that the call to this method can be
+     * replaced with the constant boolean result.
+     *
+     * @since 19.0
+     */
+    static boolean includedIn(Class<? extends Platform> platformGroup) {
+        return platformGroup.isInstance(ImageSingletons.lookup(Platform.class));
+    }
+
+    /**
+     * Returns the string representing Platform's OS name.
+     * <p>
+     * This method should be implemented either in a final class or as default method in respective
+     * OS interface.
+     *
+     * @since 21.0
+     */
+    default String getOS() {
+        throw new UnsupportedOperationException("Platform `" + this.getClass().getCanonicalName() + "`, doesn't implement getOS");
+    }
+
+    /**
+     * Returns the string representing Platform's architecture name. This value should be the same
+     * as desired os.arch system property.
+     * <p>
+     * This method should be implemented either in final class or as default method in respective
+     * architecture interface.
+     *
+     * @since 21.0
+     */
+    default String getArchitecture() {
+        throw new UnsupportedOperationException("Platform `" + this.getClass().getCanonicalName() + "`, doesn't implement getArchitecture");
+    }
+
+    /*
+     * The standard architectures that are supported.
+     */
+    /**
+     * Supported architecture: x86 64-bit.
+     *
+     * @since 19.0
+     */
+    interface AMD64 extends Platform, InternalPlatform.NATIVE_ONLY {
+
+        /**
+         * Returns string representing AMD64 architecture.
+         *
+         * @since 21.0
+         */
+        default String getArchitecture() {
+            return "amd64";
+        }
+    }
+
+    /**
+     * Supported architecture: ARMv8 64-bit.
+     *
+     * @since 19.0
+     */
+    interface AARCH64 extends Platform, InternalPlatform.NATIVE_ONLY {
+
+        /**
+         * Returns string representing AARCH64 architecture.
+         *
+         * @since 21.0
+         */
+        default String getArchitecture() {
+            return "aarch64";
+        }
+    }
+
+    /**
+     * Supported architecture: RISC-V 64-bit.
+     *
+     * @since 22.2
+     */
+    interface RISCV64 extends Platform {
+
+        /**
+         * Returns string representing RISCV64 architecture.
+         *
+         * @since 22.2
+         */
+        default String getArchitecture() {
+            return "riscv64";
+        }
+    }
+
+    /*
+     * The standard operating systems that are supported.
+     */
+    /**
+     * Supported operating system: Linux.
+     *
+     * @since 19.0
+     */
+    interface LINUX extends InternalPlatform.PLATFORM_JNI, InternalPlatform.NATIVE_ONLY {
+
+        /**
+         * Returns string representing LINUX OS.
+         *
+         * @since 21.0
+         */
+        default String getOS() {
+            return "linux";
+        }
+    }
+
+    /**
+     * Supported operating system: Android.
+     *
+     * @since 21.0
+     */
+    interface ANDROID extends LINUX {
+
+        /**
+         * Returns string representing ANDROID OS.
+         *
+         * @since 21.0
+         */
+        default String getOS() {
+            return "android";
+        }
+    }
+
+    /**
+     * Basis for all Apple operating systems (MacOS and iOS).
+     *
+     * @since 19.0
+     */
+    interface DARWIN extends InternalPlatform.PLATFORM_JNI, InternalPlatform.NATIVE_ONLY {
+    }
+
+    /**
+     * Supported operating system: iOS.
+     *
+     * @since 21.0
+     */
+    interface IOS extends DARWIN {
+
+        /**
+         * Returns string representing iOS OS.
+         *
+         * @since 21.0
+         */
+        default String getOS() {
+            return "ios";
+        }
+    }
+
+    /**
+     * Supported operating system: MacOS.
+     *
+     * @since 22.1
+     */
+    interface MACOS extends DARWIN {
+
+        /**
+         * Returns string representing MACOS OS.
+         *
+         * @since 21.0
+         */
+        default String getOS() {
+            return "darwin";
+        }
+    }
+
+    /**
+     * Supported operating system: Windows.
+     *
+     * @since 19.0
+     */
+    interface WINDOWS extends InternalPlatform.WINDOWS_BASE, InternalPlatform.PLATFORM_JNI {
+    }
+
+    /**
+     * Basis for all Linux operating systems on AMD64 (LINUX_AMD64).
+     *
+     * @since 22.1
+     */
+    interface LINUX_AMD64_BASE extends LINUX, AMD64 {
+    }
+
+    /**
+     * Basis for all Linux operating systems on AARCH64 (LINUX_AARCH64 &amp; ANDROID_AARCH64).
+     *
+     * @since 22.1
+     */
+    interface LINUX_AARCH64_BASE extends LINUX, AARCH64 {
+    }
+
+    /**
+     * Basis for all Apple operating systems on AMD64 (MACOS_AMD64 &amp; IOS_AMD64).
+     *
+     * @since 22.1
+     */
+    interface DARWIN_AMD64 extends DARWIN, AMD64 {
+    }
+
+    /**
+     * Basis for all Apple operating systems on AMD64 (MACOS_AMD64 &amp; IOS_AMD64).
+     *
+     * @since 22.1
+     */
+    interface DARWIN_AARCH64 extends DARWIN, AARCH64 {
+    }
+
+    /*
+     * The standard leaf platforms, i.e., OS-architecture combinations that we support.
+     */
+    /**
+     * Supported leaf platform: Linux on x86 64-bit.
+     *
+     * @since 19.0
+     */
+    class LINUX_AMD64 implements LINUX, LINUX_AMD64_BASE {
+
+        /**
+         * Instantiates a marker instance of this platform.
+         *
+         * @since 19.0
+         */
+        public LINUX_AMD64() {
+        }
+
+    }
+
+    /**
+     * Supported leaf platform: Linux on AArch64 64-bit.
+     *
+     * @since 19.0
+     */
+    final class LINUX_AARCH64 implements LINUX, LINUX_AARCH64_BASE {
+
+        /**
+         * Instantiates a marker instance of this platform.
+         *
+         * @since 19.0
+         */
+        public LINUX_AARCH64() {
+        }
+
+    }
+
+    /**
+     * Supported leaf platform: Linux on RISC-V 64-bit.
+     *
+     * @since 22.2
+     */
+    final class LINUX_RISCV64 implements LINUX, RISCV64 {
+
+        /**
+         * Instantiates a marker instance of this platform.
+         *
+         * @since 22.2
+         */
+        public LINUX_RISCV64() {
+        }
+
+    }
+
+    /**
+     * Supported leaf platform: Android on AArch64 64-bit.
+     *
+     * @since 21.0
+     */
+    final class ANDROID_AARCH64 implements ANDROID, LINUX_AARCH64_BASE {
+
+        /**
+         * Instantiates a marker instance of this platform.
+         *
+         * @since 21.0
+         */
+        public ANDROID_AARCH64() {
+        }
+
+    }
+
+    /**
+     * Supported leaf platform: iOS on x86 64-bit.
+     *
+     * @since 21.3
+     */
+    final class IOS_AMD64 implements IOS, DARWIN_AMD64 {
+
+        /**
+         * Instantiates a marker instance of this platform.
+         *
+         * @since 21.3
+         */
+        public IOS_AMD64() {
+        }
+    }
+
+    /**
+     * Supported leaf platform: iOS on AArch 64-bit.
+     *
+     * @since 21.0
+     */
+    final class IOS_AARCH64 implements IOS, DARWIN_AARCH64 {
+
+        /**
+         * Instantiates a marker instance of this platform.
+         *
+         * @since 21.0
+         */
+        public IOS_AARCH64() {
+        }
+    }
+
+    /**
+     * Supported leaf platform: MacOS on x86 64-bit.
+     *
+     * @since 22.1
+     */
+    final class MACOS_AMD64 implements MACOS, DARWIN_AMD64 {
+
+        /**
+         * Instantiates a marker instance of this platform.
+         *
+         * @since 22.1
+         */
+        public MACOS_AMD64() {
+        }
+    }
+
+    /**
+     * Supported leaf platform: MacOS on AArch 64-bit.
+     *
+     * @since 22.1
+     */
+    final class MACOS_AARCH64 implements MACOS, DARWIN_AARCH64 {
+
+        /**
+         * Instantiates a marker instance of this platform.
+         *
+         * @since 22.1
+         */
+        public MACOS_AARCH64() {
+        }
+    }
+
+    /**
+     * Supported leaf platform: Windows on x86 64-bit.
+     *
+     * @since 19.0
+     */
+    final class WINDOWS_AMD64 implements WINDOWS, AMD64 {
+
+        /**
+         * Instantiates a marker instance of this platform.
+         *
+         * @since 19.0
+         */
+        public WINDOWS_AMD64() {
+        }
+
+    }
+
+    /**
+     * Supported leaf platform: Windows on AArch 64-bit.
+     *
+     * @since 22.0
+     */
+    final class WINDOWS_AARCH64 implements WINDOWS, AARCH64 {
+
+        /**
+         * Instantiates a marker instance of this platform.
+         *
+         * @since 22.0
+         */
+        public WINDOWS_AARCH64() {
+        }
+
+    }
+
+    /**
+     * Marker for elements (types, methods, or fields) that are only visible during native image
+     * generation and cannot be used at run time, regardless of the actual platform.
+     *
+     * @since 19.0
+     */
+    final class HOSTED_ONLY implements Platform {
+        private HOSTED_ONLY() {
+        }
+    }
+
 }

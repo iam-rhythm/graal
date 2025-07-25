@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2023, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,34 +24,22 @@
  */
 package com.oracle.svm.core.heap;
 
-import java.lang.management.GarbageCollectorMXBean;
-import java.util.List;
-
 public interface GC {
-
     /** Cause a collection of the Heap's choosing. */
-    void collect(String cause);
+    void collect(GCCause cause);
 
     /** Cause a full collection. */
-    void collectCompletely(String cause);
+    void collectCompletely(GCCause cause);
 
-    /*
-     * Registered walkers of object reference roots. Since these walkers are used during collection,
-     * they must not move, either by being in the image heap, or by being pinned.
+    /**
+     * Notify the GC that it might be a good time to do a collection. The final decision is up to
+     * the GC and its policy.
      */
+    void collectionHint(boolean fullGC);
 
-    void registerObjectReferenceWalker(ObjectReferenceWalker walker);
+    /** Human-readable name. */
+    String getName();
 
-    void unregisterObjectReferenceWalker(ObjectReferenceWalker walker);
-
-    /*
-     * Registered collection watchers.
-     */
-
-    void registerCollectionWatcher(CollectionWatcher watcher);
-
-    void unregisterCollectionWatcher(CollectionWatcher watcher);
-
-    /** Get the list of GarbageCollectorMXBeans for this collector. */
-    List<GarbageCollectorMXBean> getGarbageCollectorMXBeanList();
+    /** Human-readable default heap size. */
+    String getDefaultMaxHeapSize();
 }

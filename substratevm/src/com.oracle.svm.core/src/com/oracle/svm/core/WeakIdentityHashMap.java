@@ -47,8 +47,12 @@ import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
 
+import com.oracle.svm.core.heap.ReferenceInternals;
 
-/**
+import jdk.graal.compiler.core.common.SuppressFBWarnings;
+
+
+/*
  * Hash table based implementation of the <tt>Map</tt> interface, with
  * <em>weak keys</em>.
  * An entry in a <tt>WeakHashMap</tt> will automatically be removed when
@@ -164,7 +168,7 @@ import java.util.function.Consumer;
  * <li>Copying in the declarations of {@link #keySet} and {@link #values}
  *     from {@link AbstractMap}, which are otherwise package-private.</li>
  * <li>Changing {@link #hash(Object)} to use {@link System#identityHashCode(Object)}.</li>
- * <li>Changing {@link #eq(Object, Object)} to compare objects with reference equality.</li>
+ * <li>Changing {@link #entryKeyIs(Entry, Object)} to compare objects with reference equality.</li>
  * <li>Changing {@link Entry#hashCode()} to use {@link System#identityHashCode(Object)}
  *     to contribute to the hash code of an {@link Entry}.</li>
  * <li>Changing {@link Entry#equals(Object)} to compare keys using reference equality
@@ -295,6 +299,7 @@ public class WeakIdentityHashMap<K,V>
      * @throws  NullPointerException if the specified map is null
      * @since   1.3
      */
+    @SuppressWarnings("this-escape")
     public WeakIdentityHashMap(Map<? extends K, ? extends V> m) {
         this(Math.max((int) (m.size() / DEFAULT_LOAD_FACTOR) + 1,
                 DEFAULT_INITIAL_CAPACITY),
@@ -324,11 +329,10 @@ public class WeakIdentityHashMap<K,V>
     }
 
     /**
-     * Checks for equality of non-null reference x and possibly-null y.  By
-     * default uses Object.equals.
+     * Checks for equality of possibly-null reference x and non-null object y.
      */
-    private static boolean eq(Object x, Object y) {
-        return x == y;
+    private static boolean entryKeyIs(Entry<?,?> x, Object y) {
+        return ReferenceInternals.refersTo(x, y);
     }
 
     /**
@@ -358,6 +362,7 @@ public class WeakIdentityHashMap<K,V>
     /**
      * Expunges stale entries from the table.
      */
+    @SuppressFBWarnings(value = "SA_FIELD_SELF_ASSIGNMENT", justification = "inherited from upstream")
     private void expungeStaleEntries() {
         for (Object x; (x = queue.poll()) != null; ) {
             synchronized (queue) {
@@ -442,7 +447,7 @@ public class WeakIdentityHashMap<K,V>
         int index = indexFor(h, tab.length);
         Entry<K,V> e = tab[index];
         while (e != null) {
-            if (e.hash == h && eq(k, e.get()))
+            if (e.hash == h && entryKeyIs(e, k))
                 return e.value;
             e = e.next;
         }
@@ -471,7 +476,7 @@ public class WeakIdentityHashMap<K,V>
         Entry<K,V>[] tab = getTable();
         int index = indexFor(h, tab.length);
         Entry<K,V> e = tab[index];
-        while (e != null && !(e.hash == h && eq(k, e.get())))
+        while (e != null && !(e.hash == h && entryKeyIs(e, k)))
             e = e.next;
         return e;
     }
@@ -495,7 +500,7 @@ public class WeakIdentityHashMap<K,V>
         int i = indexFor(h, tab.length);
 
         for (Entry<K,V> e = tab[i]; e != null; e = e.next) {
-            if (h == e.hash && eq(k, e.get())) {
+            if (h == e.hash && entryKeyIs(e, k)) {
                 V oldValue = e.value;
                 if (value != oldValue)
                     e.value = value;
@@ -640,7 +645,7 @@ public class WeakIdentityHashMap<K,V>
 
         while (e != null) {
             Entry<K,V> next = e.next;
-            if (h == e.hash && eq(k, e.get())) {
+            if (h == e.hash && entryKeyIs(e, k)) {
                 modCount++;
                 size--;
                 if (prev == e)
@@ -823,6 +828,7 @@ public class WeakIdentityHashMap<K,V>
             index = isEmpty() ? 0 : table.length;
         }
 
+        @SuppressFBWarnings(value = "SA_FIELD_SELF_ASSIGNMENT", justification = "inherited from upstream")
         public boolean hasNext() {
             Entry<K,V>[] t = table;
 

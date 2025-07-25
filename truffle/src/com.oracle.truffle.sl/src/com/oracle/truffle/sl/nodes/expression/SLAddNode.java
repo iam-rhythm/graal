@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,15 +40,33 @@
  */
 package com.oracle.truffle.sl.nodes.expression;
 
+import static com.oracle.truffle.api.CompilerDirectives.shouldNotReachHere;
+
+import java.math.BigInteger;
+
 import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
+import com.oracle.truffle.api.HostCompilerDirectives;
+import com.oracle.truffle.api.HostCompilerDirectives.InliningCutoff;
+import com.oracle.truffle.api.bytecode.OperationProxy;
+import com.oracle.truffle.api.dsl.Bind;
+import com.oracle.truffle.api.dsl.Cached;
 import com.oracle.truffle.api.dsl.Fallback;
+import com.oracle.truffle.api.dsl.GenerateInline;
+import com.oracle.truffle.api.dsl.GenerateUncached;
 import com.oracle.truffle.api.dsl.ImplicitCast;
 import com.oracle.truffle.api.dsl.Specialization;
+import com.oracle.truffle.api.interop.InteropLibrary;
+import com.oracle.truffle.api.interop.UnsupportedMessageException;
+import com.oracle.truffle.api.library.CachedLibrary;
+import com.oracle.truffle.api.nodes.Node;
 import com.oracle.truffle.api.nodes.NodeInfo;
+import com.oracle.truffle.api.strings.TruffleString;
 import com.oracle.truffle.sl.SLException;
+import com.oracle.truffle.sl.SLLanguage;
 import com.oracle.truffle.sl.nodes.SLBinaryNode;
 import com.oracle.truffle.sl.nodes.SLTypes;
-import com.oracle.truffle.sl.runtime.SLBigNumber;
+import com.oracle.truffle.sl.nodes.util.SLToTruffleStringNode;
+import com.oracle.truffle.sl.runtime.SLBigInteger;
 
 /**
  * SL node that performs the "+" operation, which performs addition on arbitrary precision numbers,
@@ -61,12 +79,13 @@ import com.oracle.truffle.sl.runtime.SLBigNumber;
  * is generated that provides, e.g., {@link SLAddNodeGen#create node creation}.
  */
 @NodeInfo(shortName = "+")
+@OperationProxy.Proxyable(allowUncached = true)
 public abstract class SLAddNode extends SLBinaryNode {
 
     /**
      * Specialization for primitive {@code long} values. This is the fast path of the
      * arbitrary-precision arithmetic. We need to check for overflows of the addition, and switch to
-     * the {@link #add(SLBigNumber, SLBigNumber) slow path}. Therefore, we use an
+     * the {@link #doSLBigInteger(SLBigInteger, SLBigInteger) slow path}. Therefore, we use an
      * {@link Math#addExact(long, long) addition method that throws an exception on overflow}. The
      * {@code rewriteOn} attribute on the {@link Specialization} annotation automatically triggers
      * the node rewriting on the exception.
@@ -79,52 +98,127 @@ public abstract class SLAddNode extends SLBinaryNode {
      * operand are {@code long} values.
      */
     @Specialization(rewriteOn = ArithmeticException.class)
-    protected long add(long left, long right) {
+    public static long doLong(long left, long right) {
         return Math.addExact(left, right);
     }
 
     /**
-     * This is the slow path of the arbitrary-precision arithmetic. The {@link SLBigNumber} type of
+     * This is the slow path of the arbitrary-precision arithmetic. The {@link SLBigInteger} type of
      * Java is doing everything we need.
      * <p>
      * This specialization is automatically selected by the Truffle DSL if both the left and right
-     * operand are {@link SLBigNumber} values. Because the type system defines an
-     * {@link ImplicitCast implicit conversion} from {@code long} to {@link SLBigNumber} in
+     * operand are {@link SLBigInteger} values. Because the type system defines an
+     * {@link ImplicitCast implicit conversion} from {@code long} to {@link SLBigInteger} in
      * {@link SLTypes#castBigNumber(long)}, this specialization is also taken if the left or the
-     * right operand is a {@code long} value. Because the {@link #add(long, long) long}
+     * right operand is a {@code long} value. Because the {@link #doLong(long, long) long}
      * specialization} has the {@code rewriteOn} attribute, this specialization is also taken if
      * both input values are {@code long} values but the primitive addition overflows.
      */
-    @Specialization
-    @TruffleBoundary
-    protected SLBigNumber add(SLBigNumber left, SLBigNumber right) {
-        return new SLBigNumber(left.getValue().add(right.getValue()));
+    @Specialization(replaces = "doLong")
+    public static SLBigInteger doSLBigInteger(SLBigInteger left, SLBigInteger right) {
+        BigInteger castLeft = left.getValue();
+        BigInteger castRight = right.getValue();
+        BigInteger result = addBoundary(castLeft, castRight);
+        return new SLBigInteger(result);
     }
 
     /**
-     * Specialization for String concatenation. The SL specification says that String concatenation
-     * works if either the left or the right operand is a String. The non-string operand is
-     * converted then automatically converted to a String.
+     * We have to mark this method as boundary as {@link BigInteger#add(BigInteger)} does not
+     * support partial evaluation. Since this path might still be relatively common indicate
+     * allowInling=true to allow the Graal compiler to inline this method after partial evaluation
+     * using the inlining heuristics of the compiler.
+     */
+    @TruffleBoundary(allowInlining = true)
+    private static BigInteger addBoundary(BigInteger castLeft, BigInteger castRight) {
+        return castLeft.add(castRight);
+    }
+
+    /**
+     * Guard for TruffleString concatenation: returns true if either the left or the right operand
+     * is a {@link TruffleString}.
+     */
+    public static boolean isString(Object a, Object b) {
+        return a instanceof TruffleString || b instanceof TruffleString;
+    }
+
+    /**
+     * Specialization for TruffleString concatenation. The SL specification says that TruffleString
+     * concatenation works if either the left or the right operand is a TruffleString. The
+     * non-string operand is converted then automatically converted to a TruffleString.
      * <p>
      * To implement these semantics, we tell the Truffle DSL to use a custom guard. The guard
      * function is defined in {@link #isString this class}, but could also be in any superclass.
      */
     @Specialization(guards = "isString(left, right)")
-    @TruffleBoundary
-    protected String add(Object left, Object right) {
-        return left.toString() + right.toString();
+    @HostCompilerDirectives.InliningCutoff
+    public static TruffleString doString(Object left, Object right,
+                    @Bind Node node,
+                    @Cached SLToTruffleStringNode toTruffleStringNodeLeft,
+                    @Cached SLToTruffleStringNode toTruffleStringNodeRight,
+                    @Cached TruffleString.ConcatNode concatNode) {
+        return concatNode.execute(toTruffleStringNodeLeft.execute(node, left), toTruffleStringNodeRight.execute(node, right), SLLanguage.STRING_ENCODING, true);
     }
 
     /**
-     * Guard for String concatenation: returns true if either the left or the right operand is a
-     * {@link String}.
+     * It is good practice to group cases that are uncommon into separate fallback node. We mark
+     * them using {@link InliningCutoff} in order to indicate that this path must not be as heavily
+     * optimized as other paths.
      */
-    protected boolean isString(Object a, Object b) {
-        return a instanceof String || b instanceof String;
+    @Fallback
+    @HostCompilerDirectives.InliningCutoff
+    public static Object doFallback(Object left, Object right,
+                    @Cached SlowPathNode fallback,
+                    @Bind Node node) {
+        return fallback.execute(node, left, right);
     }
 
-    @Fallback
-    protected Object typeError(Object left, Object right) {
-        throw SLException.typeError(this, left, right);
+    /**
+     * Using a helper node like this triggers a warning for node object inlining. We disable node
+     * object inlining here explicitly to document that we don't want inlining for this node. Node
+     * object inlining should only be used for nodes that are important for memory footprint. As the
+     * name suggests this node is a slow-path node, so should only have little relevance for memory
+     * footprint.
+     */
+    @GenerateInline(false)
+    @GenerateUncached
+    public abstract static class SlowPathNode extends Node {
+
+        abstract Object execute(Node node, Object left, Object right);
+
+        /**
+         * This is the most general slow path of the arbitrary-precision arithmetic. In addition to
+         * what {@link #doSLBigInteger(SLBigInteger, SLBigInteger)} can handle, it also handles
+         * foreign objects that fit into {@link java.math.BigInteger}, e.g. host objects
+         * representing {@link java.math.BigInteger} instances or big integer representations from
+         * other languages.
+         * <p>
+         * This specialization is automatically selected by the Truffle DSL if both the left and the
+         * right operand {@link InteropLibrary#fitsInBigInteger(Object) fit} into
+         * {@link java.math.BigInteger}, but at least one of them cannot be coverted to
+         * {@link SLBigInteger} by {@link ImplicitCast implicit conversion}. Once this
+         * specialization has been selected, it replaces the
+         * {@link #doSLBigInteger(SLBigInteger, SLBigInteger)} specialization which is then never
+         * used again.
+         */
+        @Specialization(guards = {"leftLibrary.fitsInBigInteger(left)", "rightLibrary.fitsInBigInteger(right)"}, limit = "3")
+        @SuppressWarnings("unused")
+        static SLBigInteger doInteropBigInteger(Node node, Object left, Object right,
+                        @CachedLibrary("left") InteropLibrary leftLibrary,
+                        @CachedLibrary("right") InteropLibrary rightLibrary) {
+            try {
+                BigInteger castLeft = leftLibrary.asBigInteger(left);
+                BigInteger castRight = rightLibrary.asBigInteger(right);
+                BigInteger result = addBoundary(castLeft, castRight);
+                return new SLBigInteger(result);
+            } catch (UnsupportedMessageException e) {
+                throw shouldNotReachHere(e);
+            }
+        }
+
+        @Fallback
+        static Object typeError(Node node, Object left, Object right) {
+            throw SLException.typeError(node, "+", left, right);
+        }
     }
+
 }

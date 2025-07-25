@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -69,9 +69,6 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
-import java.util.function.BiFunction;
-import java.util.function.Function;
-import java.util.function.Supplier;
 
 import com.oracle.truffle.api.CallTarget;
 import com.oracle.truffle.api.CompilerAsserts;
@@ -81,13 +78,15 @@ import com.oracle.truffle.api.Truffle;
 import com.oracle.truffle.api.frame.VirtualFrame;
 import com.oracle.truffle.api.nodes.DirectCallNode;
 import com.oracle.truffle.api.nodes.ExplodeLoop;
-import com.oracle.truffle.api.nodes.ExplodeLoop.LoopExplosionKind;
 import com.oracle.truffle.api.nodes.Node;
 import com.oracle.truffle.api.nodes.RootNode;
 import com.oracle.truffle.api.profiles.ConditionProfile;
 import com.oracle.truffle.api.test.parser.PELexer.LexerList;
+import com.oracle.truffle.api.test.parser.PEParser.Function1;
+import com.oracle.truffle.api.test.parser.PEParser.Function2;
 import com.oracle.truffle.api.test.parser.PEParser.Function3;
 import com.oracle.truffle.api.test.parser.PEParser.Function4;
+import com.oracle.truffle.api.test.parser.PEParser.Provider;
 import com.oracle.truffle.api.test.parser.PEParser.TokenFunction;
 
 abstract class Element<T> extends Node {
@@ -202,7 +201,7 @@ final class Rule<T> extends Element<T> {
 
     public CallTarget getCallTarget() {
         if (target == null) {
-            target = Truffle.getRuntime().createCallTarget(new RuleRootNode(this));
+            target = new RuleRootNode(this).getCallTarget();
         }
         return target;
     }
@@ -285,9 +284,9 @@ abstract class SequenceBase<T> extends Element<T> {
 final class Sequence2<T, A, B> extends SequenceBase<T> {
     @Child private Element<A> a;
     @Child private Element<B> b;
-    private final BiFunction<A, B, T> action;
+    private final Function2<A, B, T> action;
 
-    Sequence2(BiFunction<A, B, T> action, Element<A> a, Element<B> b) {
+    Sequence2(Function2<A, B, T> action, Element<A> a, Element<B> b) {
         this.action = action;
         this.a = a;
         this.b = b;
@@ -356,7 +355,7 @@ final class Sequence4<T, A, B, C, D> extends SequenceBase<T> {
 
 final class Alternative<T> extends Element<T> {
     @Children private final Element<? extends T>[] options;
-    private final ConditionProfile seenEof = ConditionProfile.createBinaryProfile();
+    private final ConditionProfile seenEof = ConditionProfile.create();
 
     Alternative(Element<? extends T>[] options) {
         this.options = options;
@@ -380,7 +379,7 @@ final class Alternative<T> extends Element<T> {
     }
 
     @Override
-    @ExplodeLoop(kind = LoopExplosionKind.FULL_EXPLODE_UNTIL_RETURN)
+    @ExplodeLoop
     public T consume(PELexer lexer) {
         byte lookahead = lexer.peek(seenEof);
         for (Element<? extends T> element : options) {
@@ -396,12 +395,12 @@ final class Alternative<T> extends Element<T> {
 
 final class Repetition<T, ListT, R> extends Element<R> {
     @Child private Element<T> element;
-    private final Supplier<ListT> createList;
-    private final BiFunction<ListT, T, ListT> addToList;
-    private final Function<ListT, R> createResult;
-    private final ConditionProfile seenEof = ConditionProfile.createBinaryProfile();
+    private final Provider<ListT> createList;
+    private final Function2<ListT, T, ListT> addToList;
+    private final Function1<ListT, R> createResult;
+    private final ConditionProfile seenEof = ConditionProfile.create();
 
-    Repetition(Element<T> element, Supplier<ListT> createList, BiFunction<ListT, T, ListT> addToList, Function<ListT, R> createResult) {
+    Repetition(Element<T> element, Provider<ListT> createList, Function2<ListT, T, ListT> addToList, Function1<ListT, R> createResult) {
         this.element = element;
         this.createList = createList;
         this.addToList = addToList;
@@ -434,7 +433,7 @@ final class Repetition<T, ListT, R> extends Element<R> {
 
 final class StackRepetition<T> extends Element<LexerList<T>> {
     @Child private Element<T> element;
-    private final ConditionProfile seenEof = ConditionProfile.createBinaryProfile();
+    private final ConditionProfile seenEof = ConditionProfile.create();
 
     StackRepetition(Element<T> element) {
         this.element = element;
@@ -468,11 +467,11 @@ final class StackRepetition<T> extends Element<LexerList<T>> {
 
 final class OptionalElement<T, R> extends Element<R> {
     @Child Element<T> element;
-    private final Function<T, R> hasValueAction;
-    private final Supplier<R> hasNoValueAction;
-    private final ConditionProfile seenEof = ConditionProfile.createBinaryProfile();
+    private final Function1<T, R> hasValueAction;
+    private final Provider<R> hasNoValueAction;
+    private final ConditionProfile seenEof = ConditionProfile.create();
 
-    OptionalElement(Element<T> element, Function<T, R> hasValueAction, Supplier<R> hasNoValueAction) {
+    OptionalElement(Element<T> element, Function1<T, R> hasValueAction, Provider<R> hasNoValueAction) {
         this.element = element;
         this.hasValueAction = hasValueAction;
         this.hasNoValueAction = hasNoValueAction;
@@ -502,7 +501,7 @@ final class OptionalElement<T, R> extends Element<R> {
 final class TokenReference<T> extends Element<T> {
     private final byte token;
     private final TokenFunction<T> action;
-    private final ConditionProfile seenEof = ConditionProfile.createBinaryProfile();
+    private final ConditionProfile seenEof = ConditionProfile.create();
 
     TokenReference(byte token, TokenFunction<T> action) {
         this.token = token;
@@ -566,7 +565,7 @@ public final class PEParser {
         return new Alternative<>(options);
     }
 
-    public static <A, B, R> Element<R> seq(Element<A> a, Element<B> b, BiFunction<A, B, R> action) {
+    public static <A, B, R> Element<R> seq(Element<A> a, Element<B> b, Function2<A, B, R> action) {
         return new Sequence2<>(action, replaceRule(a), replaceRule(b));
     }
 
@@ -582,7 +581,7 @@ public final class PEParser {
         return new StackRepetition<>(replaceRule(element));
     }
 
-    public static <T, ListT, R> Repetition<T, ListT, R> rep(Element<T> element, Supplier<ListT> createList, BiFunction<ListT, T, ListT> addToList, Function<ListT, R> createResult) {
+    public static <T, ListT, R> Repetition<T, ListT, R> rep(Element<T> element, Provider<ListT> createList, Function2<ListT, T, ListT> addToList, Function1<ListT, R> createResult) {
         return new Repetition<>(replaceRule(element), createList, addToList, createResult);
     }
 
@@ -603,6 +602,18 @@ public final class PEParser {
         Rule<T> rule = new Rule<>(name);
         rules.add(rule);
         return rule;
+    }
+
+    public interface Provider<T> {
+        T get();
+    }
+
+    public interface Function1<A, R> {
+        R apply(A a);
+    }
+
+    public interface Function2<A, B, R> {
+        R apply(A a, B b);
     }
 
     public interface Function3<A, B, C, R> {

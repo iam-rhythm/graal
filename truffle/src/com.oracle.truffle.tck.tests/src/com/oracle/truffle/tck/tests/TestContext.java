@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,7 +40,6 @@
  */
 package com.oracle.truffle.tck.tests;
 
-import com.oracle.truffle.tck.common.inline.InlineVerifier;
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.OutputStream;
@@ -58,17 +57,22 @@ import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
-import org.junit.Assert;
-
 import org.graalvm.polyglot.Context;
+import org.graalvm.polyglot.Engine;
 import org.graalvm.polyglot.Instrument;
 import org.graalvm.polyglot.Value;
 import org.graalvm.polyglot.tck.InlineSnippet;
+import org.graalvm.polyglot.tck.LanguageProvider;
 import org.graalvm.polyglot.tck.Snippet;
 import org.graalvm.polyglot.tck.TypeDescriptor;
-import org.graalvm.polyglot.tck.LanguageProvider;
+import org.junit.Assert;
+
+import com.oracle.truffle.tck.common.inline.InlineVerifier;
 
 final class TestContext implements Closeable {
+    private static final Object contextCacheLock = new Object();
+    private static RefCountedContextReference contextCache;
+
     private Map<String, LanguageProvider> providers;
     private final Map<String, Collection<? extends Snippet>> valueConstructors;
     private final Map<String, Collection<? extends Snippet>> expressions;
@@ -88,8 +92,12 @@ final class TestContext implements Closeable {
         this.statements = new HashMap<>();
         this.scripts = new HashMap<>();
         this.inlineScripts = new HashMap<>();
-        boolean verbose = Boolean.getBoolean("tck.verbose");
-        String propValue = System.getProperty(String.format("tck.%s.verbose", testClass.getSimpleName()));
+        boolean verbose = true;
+        String propValue = System.getProperty("tck.verbose");
+        if (propValue != null) {
+            verbose = Boolean.parseBoolean(propValue);
+        }
+        propValue = System.getProperty(String.format("tck.%s.verbose", testClass.getSimpleName()));
         if (propValue != null) {
             verbose = Boolean.parseBoolean(propValue);
         }
@@ -103,15 +111,7 @@ final class TestContext implements Closeable {
         if (providers == null) {
             state = State.INITIALIZING;
             try {
-                final Map<String, LanguageProvider> tmpProviders = new HashMap<>();
-                final Set<String> languages = getContext().getEngine().getLanguages().keySet();
-                for (LanguageProvider provider : ServiceLoader.load(LanguageProvider.class)) {
-                    final String id = provider.getId();
-                    if (languages.contains(id) || isHost(provider)) {
-                        tmpProviders.put(id, provider);
-                    }
-                }
-                providers = Collections.unmodifiableMap(tmpProviders);
+                providers = getInstalledProvidersForEngine(getContext().getEngine());
             } finally {
                 state = State.INITIALIZED;
             }
@@ -119,23 +119,69 @@ final class TestContext implements Closeable {
         return providers;
     }
 
+    private static Map<String, LanguageProvider> getInstalledProvidersForEngine(Engine engine) {
+        final Map<String, LanguageProvider> tmpProviders = new HashMap<>();
+        final Set<String> languages = engine.getLanguages().keySet();
+        for (LanguageProvider provider : ServiceLoader.load(LanguageProvider.class)) {
+            final String id = provider.getId();
+            if (languages.contains(id) || isHost(provider)) {
+                tmpProviders.put(id, provider);
+            } else {
+                throw new IllegalStateException("Provider " + provider.getClass().getName() + " requires a non installed language " + id + "\n" +
+                                "Installed languages: " + String.join(", ", languages));
+            }
+        }
+        return Collections.unmodifiableMap(tmpProviders);
+    }
+
     @Override
-    public void close() throws IOException {
+    public void close() {
         checkState(State.NEW, State.INITIALIZED);
         state = State.CLOSED;
         if (context != null) {
-            context.close();
+            synchronized (contextCacheLock) {
+                contextCache.close();
+                if (!contextCache.isValid()) {
+                    context.close();
+                    contextCache = null;
+                }
+            }
         }
     }
 
     Context getContext() {
         checkState(State.NEW, State.INITIALIZING, State.INITIALIZED);
         if (context == null) {
-            final Context.Builder builder = Context.newBuilder().allowAllAccess(true);
-            if (!printOutput) {
-                builder.out(NullOutputStream.INSTANCE).err(NullOutputStream.INSTANCE);
+            synchronized (contextCacheLock) {
+                if (contextCache != null) {
+                    this.context = contextCache.retain();
+                    try {
+                        contextCache.out().setDelegate(printOutput ? System.out : NullOutputStream.INSTANCE);
+                        contextCache.err().setDelegate(printOutput ? System.err : NullOutputStream.INSTANCE);
+                    } catch (IOException ioe) {
+                        throw new RuntimeException("Failed to flush stdout, stderr.", ioe);
+                    }
+                } else {
+                    ProxyOutputStream out = new ProxyOutputStream(printOutput ? System.out : NullOutputStream.INSTANCE);
+                    ProxyOutputStream err = new ProxyOutputStream(printOutput ? System.err : NullOutputStream.INSTANCE);
+
+                    Map<String, LanguageProvider> knownProviders;
+                    // Get known providers from a dummy context
+                    try (Engine dummyCtx = Engine.newBuilder().build()) {
+                        knownProviders = getInstalledProvidersForEngine(dummyCtx);
+                    }
+                    Context.Builder builder = Context.newBuilder();
+                    knownProviders.forEach((id, provider) -> {
+                        Map<String, String> languageOptions = provider.additionalOptions();
+                        checkAdditionalOptions(languageOptions, provider.getId());
+                        builder.options(languageOptions);
+                    });
+                    this.context = builder.allowExperimentalOptions(true).allowAllAccess(true).out(out).err(err).build();
+
+                    assert contextCache == null;
+                    contextCache = new RefCountedContextReference(context, out, err);
+                }
             }
-            this.context = builder.build();
             if (enableInlineVerifier) {
                 Instrument instrument = context.getEngine().getInstruments().get(InlineVerifier.ID);
                 this.inlineVerifier = instrument.lookup(InlineVerifier.class);
@@ -267,6 +313,15 @@ final class TestContext implements Closeable {
         return provider.getClass() == JavaHostLanguageProvider.class;
     }
 
+    private static void checkAdditionalOptions(Map<String, String> languageOptions, String languageId) {
+        String prefix = languageId + ".";
+        for (String key : languageOptions.keySet()) {
+            if (!key.startsWith(prefix)) {
+                throw new IllegalArgumentException("Provider for language '" + languageId + "' attempts to set option " + key);
+            }
+        }
+    }
+
     Value getValue(Object object) {
         return context.asValue(object);
     }
@@ -285,7 +340,7 @@ final class TestContext implements Closeable {
     }
 
     private static final class LanguageIdPredicate implements Predicate<Map.Entry<String, ? extends LanguageProvider>> {
-        private static final Predicate<Map.Entry<String, ? extends LanguageProvider>> TRUE = new Predicate<Map.Entry<String, ? extends LanguageProvider>>() {
+        private static final Predicate<Map.Entry<String, ? extends LanguageProvider>> TRUE = new Predicate<>() {
             @Override
             public boolean test(Map.Entry<String, ? extends LanguageProvider> e) {
                 return true;
@@ -349,6 +404,92 @@ final class TestContext implements Closeable {
 
         @Override
         public void write(int b) throws IOException {
+        }
+    }
+
+    private static final class ProxyOutputStream extends OutputStream {
+
+        private OutputStream delegate;
+
+        ProxyOutputStream(OutputStream delegate) {
+            Objects.requireNonNull(delegate, "Delegate must be non null.");
+            this.delegate = delegate;
+        }
+
+        void setDelegate(OutputStream newDelegate) throws IOException {
+            this.delegate.flush();
+            this.delegate = newDelegate;
+        }
+
+        @Override
+        public void write(int b) throws IOException {
+            delegate.write(b);
+        }
+
+        @Override
+        public void write(byte[] b) throws IOException {
+            delegate.write(b);
+        }
+
+        @Override
+        public void write(byte[] b, int off, int len) throws IOException {
+            delegate.write(b, off, len);
+        }
+
+        @Override
+        public void flush() throws IOException {
+            delegate.flush();
+        }
+
+        @Override
+        public void close() throws IOException {
+            delegate.close();
+        }
+    }
+
+    private static final class RefCountedContextReference implements Closeable {
+
+        private final ProxyOutputStream out;
+        private final ProxyOutputStream err;
+        private Context context;
+        private int refCount;
+
+        RefCountedContextReference(Context context, ProxyOutputStream out, ProxyOutputStream err) {
+            this.context = context;
+            this.refCount = 1;
+            this.out = out;
+            this.err = err;
+        }
+
+        ProxyOutputStream out() {
+            return out;
+        }
+
+        ProxyOutputStream err() {
+            return err;
+        }
+
+        Context retain() {
+            if (refCount == 0) {
+                throw new IllegalStateException("Released reference");
+            }
+            refCount++;
+            return context;
+        }
+
+        boolean isValid() {
+            return refCount > 0;
+        }
+
+        @Override
+        public void close() {
+            if (refCount == 0) {
+                throw new IllegalStateException("Released reference");
+            }
+            refCount--;
+            if (refCount == 0) {
+                context = null;
+            }
         }
     }
 }

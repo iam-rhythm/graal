@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2023, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -45,12 +45,13 @@ import java.util.Map;
 
 import org.graalvm.polyglot.Context;
 import org.graalvm.polyglot.Value;
+import org.graalvm.polyglot.HostAccess;
 
 /**
  * Interface to be implemented to mimic guest language objects that contain members.
  *
  * @see Proxy
- * @since 1.0
+ * @since 19.0
  */
 public interface ProxyObject extends Proxy {
 
@@ -58,21 +59,21 @@ public interface ProxyObject extends Proxy {
      * Returns the value of the member.
      *
      * @throws UnsupportedOperationException if the operation is unsupported
-     * @since 1.0
+     * @since 19.0
      */
     Object getMember(String key);
 
     /**
-     * Returns array of member keys. The returned array must be interpreted as having array elements
-     * using the semantics of {@link Context#asValue(Object)} otherwise and
-     * {@link IllegalStateException} is thrown. If one of the return values of the array is not a
-     * {@link String} then a {@link ClassCastException} is thrown. Examples for valid return values
-     * are:
+     * Returns an array of member keys. The returned array must be interpreted as having array
+     * elements using the semantics of {@link Context#asValue(Object)} and taking host access into
+     * consideration. Otherwise, an {@link IllegalStateException} is thrown. If one of the return
+     * values of the array is not a {@link String} then a {@link ClassCastException} is thrown.
+     * Examples for valid return values are:
      * <ul>
      * <li><code>null</code> for no member keys
      * <li>{@link ProxyArray} that returns {@link String} values for each array element
-     * <li>{@link List } with exclusively String elements
-     * <li>{@link String String[]}
+     * <li>{@link List } with exclusively String elements ({@link HostAccess} must allowListAccess)
+     * <li>{@link String String[]} ({@link HostAccess} must allowArrayAccess)
      * <li>A guest language object representing an array of strings.
      * </ul>
      * Every member key returned by the {@link #getMemberKeys()} method must return
@@ -80,7 +81,7 @@ public interface ProxyObject extends Proxy {
      *
      * @see #hasMember(String)
      * @see Context#asValue(Object)
-     * @since 1.0
+     * @since 19.0
      */
     Object getMemberKeys();
 
@@ -91,7 +92,7 @@ public interface ProxyObject extends Proxy {
      * members to list member keys.
      *
      * @see #getMemberKeys()
-     * @since 1.0
+     * @since 19.0
      */
     boolean hasMember(String key);
 
@@ -101,7 +102,7 @@ public interface ProxyObject extends Proxy {
      * an {@link UnsupportedOperationException} is thrown.
      *
      * @throws UnsupportedOperationException if the operation is unsupported
-     * @since 1.0
+     * @since 19.0
      */
     void putMember(String key, Value value);
 
@@ -112,7 +113,7 @@ public interface ProxyObject extends Proxy {
      * @return <code>true</code> when the member was removed, <code>false</code> when the member
      *         didn't exist.
      * @throws UnsupportedOperationException if the operation is unsupported
-     * @since 1.0
+     * @since 19.0
      */
     @SuppressWarnings("unused")
     default boolean removeMember(String key) {
@@ -123,7 +124,7 @@ public interface ProxyObject extends Proxy {
      * Creates a proxy backed by a {@link Map}. If the set values of the map are host values then
      * the they will be {@link Value#asHostObject() unboxed}.
      *
-     * @since 1.0
+     * @since 19.0
      */
     static ProxyObject fromMap(Map<String, Object> values) {
         return new ProxyObject() {
@@ -137,7 +138,25 @@ public interface ProxyObject extends Proxy {
             }
 
             public Object getMemberKeys() {
-                return values.keySet().toArray();
+                return new ProxyArray() {
+                    private final Object[] keys = values.keySet().toArray();
+
+                    public void set(long index, Value value) {
+                        throw new UnsupportedOperationException();
+                    }
+
+                    public long getSize() {
+                        return keys.length;
+                    }
+
+                    public Object get(long index) {
+                        if (index < 0 || index > Integer.MAX_VALUE) {
+                            throw new ArrayIndexOutOfBoundsException();
+                        }
+                        return keys[(int) index];
+                    }
+
+                };
             }
 
             public Object getMember(String key) {

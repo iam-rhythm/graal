@@ -24,14 +24,13 @@
  */
 package com.oracle.truffle.tools.profiler;
 
-import static com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
-
 import java.io.Closeable;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.function.BiConsumer;
 import java.util.function.Function;
@@ -40,6 +39,8 @@ import java.util.function.Supplier;
 import org.graalvm.polyglot.Context;
 import org.graalvm.polyglot.Engine;
 
+import com.oracle.truffle.api.CompilerDirectives;
+import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
 import com.oracle.truffle.api.TruffleLogger;
 import com.oracle.truffle.api.instrumentation.AllocationEvent;
 import com.oracle.truffle.api.instrumentation.AllocationEventFilter;
@@ -48,6 +49,8 @@ import com.oracle.truffle.api.instrumentation.EventBinding;
 import com.oracle.truffle.api.instrumentation.SourceSectionFilter;
 import com.oracle.truffle.api.instrumentation.StandardTags;
 import com.oracle.truffle.api.instrumentation.TruffleInstrument;
+import com.oracle.truffle.api.interop.InteropLibrary;
+import com.oracle.truffle.api.interop.UnsupportedMessageException;
 import com.oracle.truffle.api.nodes.LanguageInfo;
 import com.oracle.truffle.api.source.Source;
 import com.oracle.truffle.tools.profiler.impl.CPUTracerInstrument;
@@ -66,12 +69,14 @@ import com.oracle.truffle.tools.profiler.impl.ProfilerToolFactory;
  * <p>
  * NOTE: This profiler is still experimental with limited capabilities.
  * <p>
- * Usage example: {@codesnippet MemoryTracerSnippets#example}
- * </p>
+ * Usage example: {@snippet file = "com/oracle/truffle/tools/profiler/MemoryTracer.java" region =
+ * "MemoryTracerSnippets#example"}
  *
  * @since 0.30
  */
 public final class MemoryTracer implements Closeable {
+
+    private static final InteropLibrary INTEROP = InteropLibrary.getFactory().getUncached();
 
     MemoryTracer(TruffleInstrument.Env env) {
         this.env = env;
@@ -128,7 +133,7 @@ public final class MemoryTracer implements Closeable {
      *
      * @param engine the engine to find debugger for
      * @return an instance of associated {@link MemoryTracer}
-     * @since 1.0
+     * @since 19.0
      */
     public static MemoryTracer find(Engine engine) {
         return MemoryTracerInstrument.getTracer(engine);
@@ -142,7 +147,7 @@ public final class MemoryTracer implements Closeable {
      */
     public synchronized void setCollecting(boolean collecting) {
         if (closed) {
-            throw new IllegalStateException("Memory Tracer is already closed.");
+            throw new ProfilerException("Memory Tracer is already closed.");
         }
         if (this.collecting != collecting) {
             this.collecting = collecting;
@@ -172,7 +177,7 @@ public final class MemoryTracer implements Closeable {
 
     /**
      * @return The roots of the trees representing the profile of the execution per thread.
-     * @since 1.0
+     * @since 19.0
      */
     public synchronized Map<Thread, Collection<ProfilerNode<Payload>>> getThreadToNodesMap() {
         Map<Thread, Collection<ProfilerNode<Payload>>> returnValue = new HashMap<>();
@@ -184,14 +189,14 @@ public final class MemoryTracer implements Closeable {
         return Collections.unmodifiableMap(returnValue);
     }
 
-    Supplier<Payload> payloadFactory = new Supplier<Payload>() {
+    Supplier<Payload> payloadFactory = new Supplier<>() {
         @Override
         public Payload get() {
             return new Payload();
         }
     };
 
-    Function<Payload, Payload> copyPayload = new Function<Payload, Payload>() {
+    Function<Payload, Payload> copyPayload = new Function<>() {
         @Override
         public Payload apply(Payload payload) {
             Payload copy = new Payload();
@@ -203,7 +208,7 @@ public final class MemoryTracer implements Closeable {
         }
     };
 
-    BiConsumer<Payload, Payload> mergePayload = new BiConsumer<Payload, Payload>() {
+    BiConsumer<Payload, Payload> mergePayload = new BiConsumer<>() {
         @Override
         public void accept(Payload source, Payload dest) {
             dest.totalAllocations += source.totalAllocations;
@@ -258,7 +263,7 @@ public final class MemoryTracer implements Closeable {
     public synchronized void setStackLimit(int stackLimit) {
         verifyConfigAllowed();
         if (stackLimit < 1) {
-            throw new IllegalArgumentException(String.format("Invalid stack limit %s.", stackLimit));
+            throw new ProfilerException(String.format(Locale.ENGLISH, "Invalid stack limit %s.", stackLimit));
         }
         this.stackLimit = stackLimit;
     }
@@ -291,6 +296,7 @@ public final class MemoryTracer implements Closeable {
     @Override
     public synchronized void close() {
         assert Thread.holdsLock(this);
+        closed = true;
         if (stacksBinding != null) {
             stacksBinding.dispose();
             stacksBinding = null;
@@ -303,9 +309,9 @@ public final class MemoryTracer implements Closeable {
     private void verifyConfigAllowed() {
         assert Thread.holdsLock(this);
         if (closed) {
-            throw new IllegalStateException("Memory Tracer is already closed.");
+            throw new ProfilerException("Memory Tracer is already closed.");
         } else if (collecting) {
-            throw new IllegalStateException("Cannot change tracer configuration while collecting. Call setCollecting(false) to disable collection first.");
+            throw new ProfilerException("Cannot change tracer configuration while collecting. Call setCollecting(false) to disable collection first.");
         }
     }
 
@@ -339,9 +345,15 @@ public final class MemoryTracer implements Closeable {
             LanguageInfo languageInfo = event.getLanguage();
             String metaObjectString;
             gettingMetaObject.set(true);
-            Object metaObject = env.findMetaObject(languageInfo, event.getValue());
-            if (metaObject != null) {
-                metaObjectString = env.toString(languageInfo, metaObject);
+            Object view = env.getLanguageView(languageInfo, event.getValue());
+            InteropLibrary viewLib = InteropLibrary.getFactory().getUncached(view);
+            if (viewLib.hasMetaObject(view)) {
+                try {
+                    metaObjectString = INTEROP.asString(INTEROP.getMetaQualifiedName(viewLib.getMetaObject(view)));
+                } catch (UnsupportedMessageException e) {
+                    CompilerDirectives.transferToInterpreter();
+                    throw new AssertionError(e);
+                }
             } else {
                 metaObjectString = "null";
             }
@@ -467,9 +479,6 @@ public final class MemoryTracer implements Closeable {
         }
 
         /**
-         * @return A String representation of the
-         *         {@linkplain com.oracle.truffle.api.instrumentation.TruffleInstrument.Env#findMetaObject(LanguageInfo, Object)
-         *         meta object}
          * @since 0.30
          */
         public String getMetaObjectString() {
@@ -491,8 +500,8 @@ class MemoryTracerSnippets {
 
     @SuppressWarnings("unused")
     public void example() {
-        // @formatter:off
-        // BEGIN: MemoryTracerSnippets#example
+        // @formatter:off // @replace regex='.*' replacement=''
+        // @start region="MemoryTracerSnippets#example"
         Context context = Context.create();
 
         MemoryTracer tracer = MemoryTracer.find(context.getEngine());
@@ -507,7 +516,7 @@ class MemoryTracerSnippets {
             final String rootName = node.getRootName();
             final long allocCount = node.getPayload().getTotalAllocations();
         }
-        // END: MemoryTracerSnippets#example
-        // @formatter:on
+        // @end region="MemoryTracerSnippets#example"
+        // @formatter:on // @replace regex='.*' replacement=''
     }
 }

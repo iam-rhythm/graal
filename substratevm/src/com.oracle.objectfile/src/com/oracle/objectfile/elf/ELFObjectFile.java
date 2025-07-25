@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2023, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -35,6 +35,9 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.Set;
 
+import org.graalvm.nativeimage.ImageSingletons;
+import org.graalvm.nativeimage.Platform;
+
 import com.oracle.objectfile.BuildDependency;
 import com.oracle.objectfile.ElementImpl;
 import com.oracle.objectfile.LayoutDecision;
@@ -42,6 +45,17 @@ import com.oracle.objectfile.LayoutDecisionMap;
 import com.oracle.objectfile.ObjectFile;
 import com.oracle.objectfile.StringTable;
 import com.oracle.objectfile.SymbolTable;
+import com.oracle.objectfile.debuginfo.DebugInfoProvider;
+import com.oracle.objectfile.elf.dwarf.DwarfARangesSectionImpl;
+import com.oracle.objectfile.elf.dwarf.DwarfAbbrevSectionImpl;
+import com.oracle.objectfile.elf.dwarf.DwarfDebugInfo;
+import com.oracle.objectfile.elf.dwarf.DwarfFrameSectionImpl;
+import com.oracle.objectfile.elf.dwarf.DwarfInfoSectionImpl;
+import com.oracle.objectfile.elf.dwarf.DwarfLineSectionImpl;
+import com.oracle.objectfile.elf.dwarf.DwarfLineStrSectionImpl;
+import com.oracle.objectfile.elf.dwarf.DwarfLocSectionImpl;
+import com.oracle.objectfile.elf.dwarf.DwarfRangesSectionImpl;
+import com.oracle.objectfile.elf.dwarf.DwarfStrSectionImpl;
 import com.oracle.objectfile.io.AssemblyBuffer;
 import com.oracle.objectfile.io.OutputAssembler;
 
@@ -68,23 +82,33 @@ public class ELFObjectFile extends ObjectFile {
     private ELFOsAbi osabi = ELFOsAbi.getSystemNativeValue();
     private char abiVersion;
     private ELFClass fileClass = ELFClass.getSystemNativeValue();
-    private ELFMachine machine = ELFMachine.getSystemNativeValue();
-    private long processorSpecificFlags; // FIXME: to encapsulate (EF_* in elf.h)
+    private ELFMachine machine;
+    private long processorFlags; // FIXME: to encapsulate (EF_* in elf.h)
     private final boolean runtimeDebugInfoGeneration;
 
-    public ELFObjectFile(boolean runtimeDebugInfoGeneration) {
+    private ELFObjectFile(int pageSize, ELFMachine machine, boolean runtimeDebugInfoGeneration) {
+        super(pageSize);
         this.runtimeDebugInfoGeneration = runtimeDebugInfoGeneration;
         // Create the elements of an empty ELF file:
         // 1. create header
-        header = new ELFHeader("ELFHeader");
+        header = new ELFHeader("ELFHeader", machine.flags());
+        this.machine = machine;
         // 2. create shstrtab
         shstrtab = new SectionHeaderStrtab();
         // 3. create section header table
         sht = new SectionHeaderTable(/* shstrtab */);
     }
 
-    public ELFObjectFile() {
-        this(false);
+    public ELFObjectFile(int pageSize, ELFMachine machine) {
+        this(pageSize, machine, false);
+    }
+
+    public ELFObjectFile(int pageSize) {
+        this(pageSize, false);
+    }
+
+    public ELFObjectFile(int pageSize, boolean runtimeDebugInfoGeneration) {
+        this(pageSize, ELFMachine.from(ImageSingletons.lookup(Platform.class).getArchitecture()), runtimeDebugInfoGeneration);
     }
 
     @Override
@@ -94,10 +118,6 @@ public class ELFObjectFile extends ObjectFile {
 
     public void setFileClass(ELFClass fileClass) {
         this.fileClass = fileClass;
-    }
-
-    @Override
-    public void setMainEntryPoint(String name) {
     }
 
     /**
@@ -122,7 +142,7 @@ public class ELFObjectFile extends ObjectFile {
                 @Override
                 public Iterator<String> iterator() {
                     final Iterator<Section> underlyingIterator = elements.sectionsIterator();
-                    return new Iterator<String>() {
+                    return new Iterator<>() {
 
                         @Override
                         public boolean hasNext() {
@@ -148,7 +168,7 @@ public class ELFObjectFile extends ObjectFile {
     private ELFSymtab getSymtab(boolean isDynamic) {
         ELFSymtab symtab = (ELFSymtab) (isDynamic ? elementForName(".dynsym") : elementForName(".symtab"));
         if (symtab == null) {
-            throw new IllegalStateException("no appropriate symtab");
+            throw new IllegalStateException("No appropriate symtab");
         }
         return symtab;
     }
@@ -367,7 +387,7 @@ public class ELFObjectFile extends ObjectFile {
                         return (short) 0xFFFF;
                 }
             }
-            throw new IllegalStateException("should not reach here");
+            throw new IllegalStateException("Should not reach here");
         }
     }
 
@@ -453,9 +473,9 @@ public class ELFObjectFile extends ObjectFile {
          */
         class Struct {
 
-            IdentStruct ident = new IdentStruct();
-            ELFType type;
-            ELFMachine machine;
+            final IdentStruct ident;
+            final ELFType type;
+            final ELFMachine machine;
             int version;
             long entry;
             long phoff;
@@ -468,10 +488,10 @@ public class ELFObjectFile extends ObjectFile {
             short shnum;
             short shstrndx;
 
-            Struct() {
+            Struct(ELFType type, ELFMachine machine) {
                 ident = new IdentStruct();
-                type = ELFType.NONE;
-                machine = ELFMachine.NONE;
+                this.type = type;
+                this.machine = machine;
             }
 
             /**
@@ -524,7 +544,7 @@ public class ELFObjectFile extends ObjectFile {
 
                 @Override
                 public String toString() {
-                    return String.format("ELF Ident:\n\t[class %s, encoding %s, version %d, OS/ABI %s, ABI version %d]", fileClass, dataEncoding, (int) version, osabi, (int) abiVersion);
+                    return String.format("ELF Ident:%n\t[class %s, encoding %s, version %d, OS/ABI %s, ABI version %d]", fileClass, dataEncoding, (int) version, osabi, (int) abiVersion);
                 }
             }
 
@@ -566,11 +586,13 @@ public class ELFObjectFile extends ObjectFile {
         }
 
         public ELFHeader(String name) { // create an "empty" default ELF header
+            this(name, 0);
+        }
+
+        public ELFHeader(String name, int processorFlags) { // create an "empty" default ELF header
             super(name);
-            // FIXME: is it really appropriate to initialize the owning ELFObjectFile's fields here?
-            ELFObjectFile.this.machine = ELFMachine.X86_64;
             ELFObjectFile.this.version = 1;
-            ELFObjectFile.this.processorSpecificFlags = 0;
+            ELFObjectFile.this.processorFlags = processorFlags;
         }
 
         @Override
@@ -604,7 +626,8 @@ public class ELFObjectFile extends ObjectFile {
         public byte[] getOrDecideContent(Map<Element, LayoutDecisionMap> alreadyDecided, byte[] contentHint) {
             // we serialize ourselves by writing a Struct to a bytebuffer
             OutputAssembler oa = AssemblyBuffer.createOutputAssembler(getDataEncoding().toByteOrder());
-            Struct contents = new Struct(); // also creates ident struct, which we need to populate
+            /* Also creates ident struct, which we need to populate. */
+            Struct contents = new Struct(getType(), getMachine());
 
             // don't assign magic -- its default value is correct
             contents.ident.fileClass = getFileClass();
@@ -612,8 +635,6 @@ public class ELFObjectFile extends ObjectFile {
             contents.ident.version = getVersion();
             contents.ident.osabi = getOsAbi();
             contents.ident.abiVersion = (char) getAbiVersion();
-            contents.type = getType();
-            contents.machine = getMachine();
             contents.version = getVersion();
             contents.entry = 0;
             contents.shoff = (int) alreadyDecided.get(sht).getDecidedValue(LayoutDecision.Kind.OFFSET);
@@ -654,7 +675,7 @@ public class ELFObjectFile extends ObjectFile {
 
         @Override
         public int getOrDecideSize(Map<Element, LayoutDecisionMap> alreadyDecided, int sizeHint) {
-            int size = (new Struct()).getWrittenSize();
+            int size = (new Struct(getType(), getMachine())).getWrittenSize();
             assert sizeHint == -1 || sizeHint == size;
             return size;
         }
@@ -704,7 +725,7 @@ public class ELFObjectFile extends ObjectFile {
                         return 0x7fffffff;
                 }
             }
-            throw new IllegalStateException("should not reach here");
+            throw new IllegalStateException("Should not reach here");
         }
     }
 
@@ -866,15 +887,13 @@ public class ELFObjectFile extends ObjectFile {
             if (isNullEntry()) {
                 return "SHT NULL Entry";
             }
-            //@formatter:off
-            return new StringBuilder("SHT Entry: ").
-             append(String.format("\n  %s", type)).
-             append(String.format("\n  flags %#x", flags)).
-             append(String.format("\n  virtual address %#x", virtualAddress)).
-             append(String.format("\n  offset %#x (%1$d), size %d", fileOffset, sectionSize)).
-             append(String.format("\n  link %#x, info %#x, align %#x, entry size %#x (%4$d)", link, info, addrAlign, entrySize)).
-             append("\n").toString();
-            //@formatter:on
+            return new StringBuilder("SHT Entry: ")
+                            .append(String.format("%n  %s", type))
+                            .append(String.format("%n  flags %#x", flags))
+                            .append(String.format("%n  virtual address %#x", virtualAddress))
+                            .append(String.format("%n  offset %#x (%1$d), size %d", fileOffset, sectionSize))
+                            .append(String.format("%n  link %#x, info %#x, align %#x, entry size %#x (%4$d)", link, info, addrAlign, entrySize))
+                            .append(String.format("%n")).toString();
         }
 
         public boolean isNullEntry() {
@@ -1116,12 +1135,12 @@ public class ELFObjectFile extends ObjectFile {
     }
 
     public long getFlags() {
-        return processorSpecificFlags;
+        return processorFlags;
     }
 
     @SuppressWarnings("unused")
     public ELFRelocationSection getOrCreateDynamicRelocSection(ELFSymtab syms, boolean withExplicitAddends) {
-        throw new AssertionError("can't create dynamic relocations in this kind of ELF file");
+        throw new AssertionError("Can't create dynamic relocations in this kind of ELF file");
     }
 
     public ELFRelocationSection getOrCreateRelocSection(ELFUserDefinedSection elfUserDefinedSection, ELFSymtab syms, boolean withExplicitAddends) {
@@ -1151,5 +1170,70 @@ public class ELFObjectFile extends ObjectFile {
     @Override
     protected int getMinimumFileSize() {
         return 0;
+    }
+
+    @Override
+    public void installDebugInfo(DebugInfoProvider debugInfoProvider) {
+        DwarfDebugInfo dwarfSections = new DwarfDebugInfo(getMachine(), getByteOrder());
+
+        /* We need an implementation for each generated DWARF section. */
+        DwarfStrSectionImpl elfStrSectionImpl = dwarfSections.getStrSectionImpl();
+        DwarfLineStrSectionImpl elfLineStrSectionImpl = dwarfSections.getLineStrSectionImpl();
+        DwarfAbbrevSectionImpl elfAbbrevSectionImpl = dwarfSections.getAbbrevSectionImpl();
+        DwarfFrameSectionImpl frameSectionImpl = dwarfSections.getFrameSectionImpl();
+        DwarfLocSectionImpl elfLocSectionImpl = dwarfSections.getLocSectionImpl();
+        DwarfInfoSectionImpl elfInfoSectionImpl = dwarfSections.getInfoSectionImpl();
+        DwarfARangesSectionImpl elfARangesSectionImpl = dwarfSections.getARangesSectionImpl();
+        DwarfRangesSectionImpl elfRangesSectionImpl = dwarfSections.getRangesSectionImpl();
+        DwarfLineSectionImpl elfLineSectionImpl = dwarfSections.getLineSectionImpl();
+        /* Now we can create the section elements with empty content. */
+        newDebugSection(elfStrSectionImpl.getSectionName(), elfStrSectionImpl);
+        newDebugSection(elfLineStrSectionImpl.getSectionName(), elfLineStrSectionImpl);
+        newDebugSection(elfAbbrevSectionImpl.getSectionName(), elfAbbrevSectionImpl);
+        newDebugSection(frameSectionImpl.getSectionName(), frameSectionImpl);
+        newDebugSection(elfLocSectionImpl.getSectionName(), elfLocSectionImpl);
+        newDebugSection(elfInfoSectionImpl.getSectionName(), elfInfoSectionImpl);
+        newDebugSection(elfARangesSectionImpl.getSectionName(), elfARangesSectionImpl);
+        newDebugSection(elfRangesSectionImpl.getSectionName(), elfRangesSectionImpl);
+        newDebugSection(elfLineSectionImpl.getSectionName(), elfLineSectionImpl);
+        /*
+         * Add symbols for the base of all DWARF sections whose content may need to be referenced
+         * using a section global offset. These need to be written using a base relative reloc so
+         * that they get updated if the section is merged with DWARF content from other ELF objects
+         * during image linking.
+         */
+        createDefinedSymbol(elfAbbrevSectionImpl.getSectionName(), elfAbbrevSectionImpl.getElement(), 0, 0, false, false);
+        createDefinedSymbol(elfInfoSectionImpl.getSectionName(), elfInfoSectionImpl.getElement(), 0, 0, false, false);
+        createDefinedSymbol(elfLineSectionImpl.getSectionName(), elfLineSectionImpl.getElement(), 0, 0, false, false);
+        createDefinedSymbol(elfStrSectionImpl.getSectionName(), elfStrSectionImpl.getElement(), 0, 0, false, false);
+        createDefinedSymbol(elfLineStrSectionImpl.getSectionName(), elfLineStrSectionImpl.getElement(), 0, 0, false, false);
+        createDefinedSymbol(elfRangesSectionImpl.getSectionName(), elfRangesSectionImpl.getElement(), 0, 0, false, false);
+        createDefinedSymbol(elfLocSectionImpl.getSectionName(), elfLocSectionImpl.getElement(), 0, 0, false, false);
+        /*
+         * The byte[] for each implementation's content are created and written under
+         * getOrDecideContent. Doing that ensures that all dependent sections are filled in and then
+         * sized according to the declared dependencies. However, if we leave it at that then
+         * associated reloc sections only get created when the first reloc is inserted during
+         * content write that's too late for them to have layout constraints included in the layout
+         * decision set and causes an NPE during reloc section write. So we need to create the
+         * relevant reloc sections here in advance.
+         */
+        elfStrSectionImpl.getOrCreateRelocationElement(0);
+        elfLineStrSectionImpl.getOrCreateRelocationElement(0);
+        elfAbbrevSectionImpl.getOrCreateRelocationElement(0);
+        frameSectionImpl.getOrCreateRelocationElement(0);
+        elfInfoSectionImpl.getOrCreateRelocationElement(0);
+        elfLocSectionImpl.getOrCreateRelocationElement(0);
+        elfARangesSectionImpl.getOrCreateRelocationElement(0);
+        elfRangesSectionImpl.getOrCreateRelocationElement(0);
+        elfLineSectionImpl.getOrCreateRelocationElement(0);
+        /* Ok now we can populate the debug info model. */
+        dwarfSections.installDebugInfo(debugInfoProvider);
+    }
+
+    @SuppressWarnings("unused")
+    static boolean useExplicitAddend(long addend) {
+        // For now, we are always using explicit addends
+        return true;
     }
 }

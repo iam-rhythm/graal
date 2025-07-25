@@ -24,13 +24,29 @@
  */
 package com.oracle.graal.pointsto.api;
 
+import static jdk.graal.compiler.options.OptionType.Expert;
 import static jdk.vm.ci.common.JVMCIError.shouldNotReachHere;
 
+import java.util.Locale;
+
 import org.graalvm.collections.EconomicMap;
-import org.graalvm.compiler.options.Option;
-import org.graalvm.compiler.options.OptionKey;
+
+import jdk.graal.compiler.options.Option;
+import jdk.graal.compiler.options.OptionKey;
 
 public class PointstoOptions {
+
+    @Option(help = "Track primitive values using the infrastructure of points-to analysis.")//
+    public static final OptionKey<Boolean> TrackPrimitiveValues = new OptionKey<>(true);
+
+    @Option(help = "Use predicates in points-to analysis.")//
+    public static final OptionKey<Boolean> UsePredicates = new OptionKey<>(true);
+
+    @Option(help = "Use experimental Reachability Analysis instead of points-to.")//
+    public static final OptionKey<Boolean> UseExperimentalReachabilityAnalysis = new OptionKey<>(false);
+
+    @Option(help = "Use method summaries for Reachability Analysis.")//
+    public static final OptionKey<Boolean> UseReachabilityMethodSummaries = new OptionKey<>(false);
 
     @Option(help = "Enable hybrid context for static methods, i.e. uses invocation site as context for static methods.")//
     public static final OptionKey<Boolean> HybridStaticContext = new OptionKey<>(false);
@@ -62,8 +78,9 @@ public class PointstoOptions {
     @Option(help = "The maximum number of objects recorded for each type of a type state before disabling heap sensitivity for that type. The analysis must be heap sensitive. It has a minimum value of 1.")//
     public static final OptionKey<Integer> MaxObjectSetSize = new OptionKey<>(100);
 
-    @Option(help = "The maximum number of constant objects recorded for each type before merging the constants into one unique constant object per type. The analysis must be heap sensitive. It has a minimum value of 1.")//
-    public static final OptionKey<Integer> MaxConstantObjectsPerType = new OptionKey<>(100);
+    @Option(help = "The maximum number of constant objects recorded for each type before merging the constants into one unique constant object per type. " +
+                    "If the value is 0 there is no limit.")//
+    public static final OptionKey<Integer> MaxConstantObjectsPerType = new OptionKey<>(0);
 
     @Option(help = "Track the progress of the static analysis.")//
     public static final OptionKey<Boolean> ProfileAnalysisOperations = new OptionKey<>(false);
@@ -75,13 +92,13 @@ public class PointstoOptions {
     public static final OptionKey<Boolean> PrintSynchronizedAnalysis = new OptionKey<>(false);
 
     @Option(help = "Analysis: Detect methods that return one of their parameters and hardwire the parameter straight to the return.")//
-    public static final OptionKey<Boolean> DivertParameterReturningMethod = new OptionKey<>(true);
-
-    @Option(help = "Enable extended asserts which slow down analysis.")//
-    public static final OptionKey<Boolean> ExtendedAsserts = new OptionKey<>(false);
+    public static final OptionKey<Boolean> OptimizeReturnedParameter = new OptionKey<>(true);
 
     @Option(help = "Track the callers for methods and accessing methods for fields.")//
     public static final OptionKey<Boolean> TrackAccessChain = new OptionKey<>(false);
+
+    @Option(help = "Limit the parsing context depth. Default value is arbitrary set at 100.")//
+    public static final OptionKey<Integer> ParsingContextMaxDepth = new OptionKey<>(100);
 
     @Option(help = "Track the input for type flows.")//
     public static final OptionKey<Boolean> TrackInputFlows = new OptionKey<>(false);
@@ -89,17 +106,63 @@ public class PointstoOptions {
     @Option(help = "The maximum size of type and method profiles returned by the static analysis. -1 indicates no limitation.")//
     public static final OptionKey<Integer> AnalysisSizeCutoff = new OptionKey<>(8);
 
-    @Option(help = "Unsupported features are fatal.")//
-    public static final OptionKey<Boolean> ReportUnsupportedFeaturesDuringAnalysis = new OptionKey<>(true);
+    @Option(help = "The maximum number of types recorded in a type flow. -1 indicates no limitation.")//
+    public static final OptionKey<Integer> TypeFlowSaturationCutoff = new OptionKey<>(20);
 
-    @Option(help = "Report unresolved elements as errors.")//
-    public static final OptionKey<Boolean> UnresolvedIsError = new OptionKey<>(true);
+    @Option(help = "Enable the type flow saturation analysis performance optimization.")//
+    public static final OptionKey<Boolean> RemoveSaturatedTypeFlows = new OptionKey<>(true) {
+        @Override
+        protected void onValueUpdate(EconomicMap<OptionKey<?>, Object> values, Boolean oldValue, Boolean newValue) {
+            if (newValue) {
+                /* Removing saturated type flows needs array type flows aliasing. */
+                AliasArrayTypeFlows.update(values, true);
+            }
+        }
+    };
+
+    @Option(help = "Model all array type flows using a unique elements type flow abstraction.")//
+    public static final OptionKey<Boolean> AliasArrayTypeFlows = new OptionKey<>(true) {
+        @Override
+        protected void onValueUpdate(EconomicMap<OptionKey<?>, Object> values, Boolean oldValue, Boolean newValue) {
+            if (newValue) {
+                /* Aliasing array type flows implies relaxation of type flow constraints. */
+                RelaxTypeFlowStateConstraints.update(values, true);
+            }
+        }
+    };
+
+    @Option(help = "Allow a type flow state to contain types not compatible with its declared type.")//
+    public static final OptionKey<Boolean> RelaxTypeFlowStateConstraints = new OptionKey<>(true);
+
+    /**
+     * This flag enables conservative modeling of unsafe access during the analysis. First, the type
+     * state of unsafe accessed fields now contains all instantiated subtypes of their declared
+     * type. Second, all unsafe loads are saturated by default; we do this because we assume we
+     * cannot accurately track which fields can be unsafe accessed.
+     */
+    @Option(help = "Conservative unsafe access injects all unsafe accessed fields with the instantiated subtypes of their declared type and saturates all unsafe loads.")//
+    public static final OptionKey<Boolean> UseConservativeUnsafeAccess = new OptionKey<>(false);
+
+    @Option(help = "Deprecated, option no longer has any effect.", deprecated = true)//
+    static final OptionKey<Boolean> UnresolvedIsError = new OptionKey<>(true);
 
     @Option(help = "Report analysis statistics.")//
-    public static final OptionKey<Boolean> ReportAnalysisStatistics = new OptionKey<>(false);
+    public static final OptionKey<Boolean> PrintPointsToStatistics = new OptionKey<>(false);
 
     @Option(help = "Path to the contents of the Inspect web server.")//
     public static final OptionKey<String> InspectServerContentPath = new OptionKey<>("inspect");
+
+    @Option(help = "Object scanning in parallel")//
+    public static final OptionKey<Boolean> ScanObjectsParallel = new OptionKey<>(true);
+
+    @Option(help = "Run partial escape analysis on compiler graphs before static analysis.", type = Expert)//
+    public static final OptionKey<Boolean> EscapeAnalysisBeforeAnalysis = new OptionKey<>(true);
+
+    @Option(help = "Run conditional elimination before static analysis.", type = Expert)//
+    public static final OptionKey<Boolean> ConditionalEliminationBeforeAnalysis = new OptionKey<>(true);
+
+    @Option(help = "Track in the static analysis whether an instance field is never null.")//
+    public static final OptionKey<Boolean> TrackNeverNullInstanceFields = new OptionKey<>(true);
 
     /**
      * Controls the static analysis context sensitivity. Available values:
@@ -116,10 +179,10 @@ public class PointstoOptions {
      */
     @Option(help = "Controls the static analysis context sensitivity. Available values: insens (context insensitive analysis), allocsens (context insensitive analysis, context insensitive heap, allocation site sensitive heap), " +
                     "_1obj (1 object sensitive analysis with a context insensitive heap), _2obj1h (2 object sensitive with a 1 context sensitive heap)")//
-    public static final OptionKey<String> AnalysisContextSensitivity = new OptionKey<String>("insens") {
+    public static final OptionKey<String> AnalysisContextSensitivity = new OptionKey<>("insens") {
         @Override
         protected void onValueUpdate(EconomicMap<OptionKey<?>, Object> values, String oldValue, String newValue) {
-            switch (newValue.toLowerCase()) {
+            switch (newValue.toLowerCase(Locale.ROOT)) {
                 case "insens":
                     AllocationSiteSensitiveHeap.update(values, false);
                     MinHeapContextDepth.update(values, 0);
@@ -170,6 +233,11 @@ public class PointstoOptions {
 
                 default:
                     throw shouldNotReachHere("Unknown context sensitivity setting:" + newValue);
+            }
+            if (!newValue.toLowerCase(Locale.ROOT).equals("insens")) {
+                /* GR-58495: WP-SCCP is not yet compatible with context-sensitive analysis. */
+                TrackPrimitiveValues.update(values, false);
+                UsePredicates.update(values, false);
             }
         }
     };

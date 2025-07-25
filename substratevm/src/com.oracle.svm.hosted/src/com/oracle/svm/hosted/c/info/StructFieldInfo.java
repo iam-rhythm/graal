@@ -36,6 +36,7 @@ public class StructFieldInfo extends SizableInfo {
     private final PropertyInfo<Integer> offset;
     private LocationIdentity locationIdentity;
 
+    @SuppressWarnings("this-escape")
     public StructFieldInfo(String name, ElementKind kind) {
         super(name, kind);
         this.offset = adoptChild(new PropertyInfo<Integer>("offset"));
@@ -45,14 +46,28 @@ public class StructFieldInfo extends SizableInfo {
         return offset;
     }
 
-    public AccessorInfo getAccessorInfo() {
+    public AccessorInfo getAnyAccessorInfo() {
+        return getAccessorInfo(false);
+    }
+
+    public AccessorInfo getAccessorInfoWithSize() {
+        return getAccessorInfo(true);
+    }
+
+    private AccessorInfo getAccessorInfo(boolean withSize) {
         for (ElementInfo child : getChildren()) {
             if (child instanceof AccessorInfo) {
+                if (withSize) {
+                    AccessorInfo.AccessorKind kind = ((AccessorInfo) child).getAccessorKind();
+                    if (kind != AccessorInfo.AccessorKind.GETTER && kind != AccessorInfo.AccessorKind.SETTER) {
+                        continue;
+                    }
+                }
                 return (AccessorInfo) child;
             }
         }
 
-        throw shouldNotReachHere("must have at least one accessor method that defined the field");
+        throw shouldNotReachHere("must have at least one accessor method that defines the field with a type for: " + this);
     }
 
     @Override

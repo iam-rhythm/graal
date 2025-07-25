@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -183,7 +183,8 @@ public class MethodSpec {
         b.append(")");
 
         if (typeDefinitions != null && !typeDefinitions.isEmpty()) {
-            b.append("\n\n");
+            b.append(System.lineSeparator());
+            b.append(System.lineSeparator());
 
             String lineSep = "";
             for (TypeDef def : typeDefinitions) {
@@ -196,7 +197,7 @@ public class MethodSpec {
                     separator = ", ";
                 }
                 b.append("}");
-                lineSep = "\n";
+                lineSep = System.lineSeparator();
 
             }
         }

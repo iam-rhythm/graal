@@ -24,14 +24,14 @@
  */
 package com.oracle.svm.core.c.function;
 
+import jdk.graal.compiler.word.Word;
 import org.graalvm.nativeimage.Isolate;
 import org.graalvm.nativeimage.IsolateThread;
 import org.graalvm.nativeimage.c.function.CEntryPoint;
 import org.graalvm.nativeimage.c.type.CCharPointer;
-import org.graalvm.word.WordBase;
-import org.graalvm.word.WordFactory;
 
-import com.oracle.svm.core.annotate.Uninterruptible;
+import com.oracle.svm.core.Uninterruptible;
+import com.oracle.svm.core.thread.PlatformThreads;
 
 /**
  * Advanced entry and leave actions for entry point methods annotated with {@link CEntryPoint}.
@@ -48,12 +48,12 @@ public final class CEntryPointActions {
     }
 
     /**
-     * Creates a new isolate, then {@linkplain #enterAttachThread(Isolate) attaches} the current
-     * thread to the created isolate, creating a context for the thread in the isolate, and then
-     * enters that context before returning.
+     * Creates a new isolate, then {@linkplain #enterAttachThread attaches} the current thread to
+     * the created isolate, creating a context for the thread in the isolate, and then enters that
+     * context before returning.
      *
      * @param params initialization parameters.
-     * @return 0 on success, otherwise non-zero.
+     * @return 0 on success, otherwise non-zero (see {@link CEntryPointErrors})
      */
     public static native int enterCreateIsolate(CEntryPointCreateIsolateParameters params);
 
@@ -62,16 +62,27 @@ public final class CEntryPointActions {
      * context. If the thread has already been attached, this does not cause the operation to fail.
      *
      * @param isolate an existing isolate.
-     * @return 0 on success, otherwise non-zero.
+     * @param startedByIsolate Whether the current thread has been launched directly by the isolate
+     *            (as opposed to being an externally started thread), which makes the isolate
+     *            responsible for cleanups when the thread detaches.
+     * @param ensureJavaThread when set to true, {@link PlatformThreads#ensureCurrentAssigned()} is
+     *            called to ensure that the Java {@link Thread} is fully initialized. If the
+     *            parameter is set to false, the initialization must be done manually (early after
+     *            the prologue).
+     *
+     * @return 0 on success, otherwise non-zero (see {@link CEntryPointErrors})
      */
-    public static native int enterAttachThread(Isolate isolate);
+    public static native int enterAttachThread(Isolate isolate, boolean startedByIsolate, boolean ensureJavaThread);
+
+    /** @see #enterAttachThread(Isolate, boolean, boolean) */
+    public static native int enterAttachThread(Isolate isolate, boolean ensureJavaThread);
 
     /**
      * Enters an existing context for the current thread (for example, one created with
-     * {@link #enterAttachThread(Isolate)}).
+     * {@link #enterAttachThread}).
      *
      * @param thread existing context for the current thread.
-     * @return 0 on success, otherwise non-zero.
+     * @return 0 on success, otherwise non-zero (see {@link CEntryPointErrors})
      */
     public static native int enter(IsolateThread thread);
 
@@ -80,54 +91,21 @@ public final class CEntryPointActions {
      * isolate.
      *
      * @param isolate isolate in which a context for the current thread exists.
-     * @return 0 on success, otherwise non-zero.
+     * @return 0 on success, otherwise non-zero (see {@link CEntryPointErrors})
      */
-    public static native int enterIsolate(Isolate isolate);
-
-    /**
-     * In the prologue, stop execution and return to the entry point method's caller with the given
-     * return value. The passed word is cast to the entry point method's return type, which must be
-     * a {@link WordBase} type.
-     */
-    public static native void bailoutInPrologue(WordBase value);
-
-    /**
-     * In the prologue, stop execution and return to the entry point method's caller with the given
-     * return value. The passed integer is narrowed to the entry point method's return type, which
-     * must be one of {@code long}, {@code int}, {@code short}, {@code char}, or {@code byte}.
-     */
-    public static native void bailoutInPrologue(long value);
-
-    /**
-     * In the prologue, stop execution and return to the entry point method's caller with the given
-     * return value. The entry point method's return type must be {@code double}, or can also be
-     * {@code float}, in which case a cast is applied.
-     */
-    public static native void bailoutInPrologue(double value);
-
-    /**
-     * In the prologue, stop execution and return to the entry point method's caller with the given
-     * return value. The entry point method's return type must be {@code boolean}.
-     */
-    public static native void bailoutInPrologue(boolean value);
-
-    /**
-     * In the prologue, stop execution and return to the entry point method's caller. The entry
-     * point method's return type must be {@code void}.
-     */
-    public static native void bailoutInPrologue();
+    public static native int enterByIsolate(Isolate isolate);
 
     /**
      * Leaves the current thread's current context.
      *
-     * @return 0 on success, otherwise non-zero.
+     * @return 0 on success, otherwise non-zero (see {@link CEntryPointErrors})
      */
     public static native int leave();
 
     /**
      * Leaves the current thread's current context, then discards that context.
      *
-     * @return 0 on success, otherwise non-zero.
+     * @return 0 on success, otherwise non-zero (see {@link CEntryPointErrors})
      */
     public static native int leaveDetachThread();
 
@@ -135,7 +113,7 @@ public final class CEntryPointActions {
      * Leaves the current thread's current context, then waits for all attached threads in the
      * context's isolate to detach and discards that isolate entirely.
      *
-     * @return 0 on success, otherwise non-zero.
+     * @return 0 on success, otherwise non-zero (see {@link CEntryPointErrors})
      */
     public static native int leaveTearDownIsolate();
 
@@ -146,7 +124,7 @@ public final class CEntryPointActions {
      *
      * @param code An integer representing the cause (should be non-zero by convention).
      * @param message A message describing the cause (may be omitted by passing
-     *            {@link WordFactory#nullPointer() null}).
+     *            {@link Word#nullPointer() null}).
      */
     public static native void failFatally(int code, CCharPointer message);
 

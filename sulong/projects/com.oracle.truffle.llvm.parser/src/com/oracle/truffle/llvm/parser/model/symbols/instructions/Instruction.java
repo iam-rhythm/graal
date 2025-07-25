@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2018, Oracle and/or its affiliates.
+ * Copyright (c) 2016, 2025, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -40,11 +40,19 @@ import java.util.List;
 
 public abstract class Instruction implements SymbolImpl, MetadataAttachmentHolder {
 
-    private MDLocation debugLocation = null;
+    private MDLocation debugLocation;
     private List<MDAttachment> mdAttachments = null;
     private LLVMSourceLocation sourceLocation = null;
 
-    public MDLocation getDebugLocation() {
+    protected Instruction() {
+        this(null);
+    }
+
+    protected Instruction(MDLocation debugLocation) {
+        this.debugLocation = debugLocation;
+    }
+
+    public final MDLocation getDebugLocation() {
         return debugLocation;
     }
 
@@ -52,21 +60,21 @@ public abstract class Instruction implements SymbolImpl, MetadataAttachmentHolde
         this.debugLocation = debugLocation;
     }
 
-    public LLVMSourceLocation getSourceLocation() {
+    public final LLVMSourceLocation getSourceLocation() {
         return sourceLocation;
     }
 
-    public void setSourceLocation(LLVMSourceLocation sourceLocation) {
+    public final void setSourceLocation(LLVMSourceLocation sourceLocation) {
         this.sourceLocation = sourceLocation;
     }
 
     @Override
-    public boolean hasAttachedMetadata() {
+    public final boolean hasAttachedMetadata() {
         return mdAttachments != null;
     }
 
     @Override
-    public List<MDAttachment> getAttachedMetadata() {
+    public final List<MDAttachment> getAttachedMetadata() {
         if (mdAttachments == null) {
             mdAttachments = new ArrayList<>(1);
         }

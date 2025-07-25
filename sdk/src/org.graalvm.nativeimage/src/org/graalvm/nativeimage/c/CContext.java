@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2016, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -47,6 +47,8 @@ import java.lang.annotation.Target;
 import java.util.Collections;
 import java.util.List;
 
+import org.graalvm.nativeimage.Platform;
+import org.graalvm.nativeimage.Platforms;
 import org.graalvm.nativeimage.c.function.CLibrary;
 
 /**
@@ -54,23 +56,24 @@ import org.graalvm.nativeimage.c.function.CLibrary;
  * to be imported, the C macros that need to be defined to properly configure these headers, and
  * additional flags that should be passed to the C compiler when analyzing the definitions.
  *
- * @since 1.0
+ * @since 19.0
  */
 @Retention(RetentionPolicy.RUNTIME)
 @Target({ElementType.TYPE})
+@Platforms(Platform.HOSTED_ONLY.class)
 public @interface CContext {
 
     /**
      * Specifies which directives are used with the annotated element.
      *
-     * @since 1.0
+     * @since 19.0
      */
     Class<? extends Directives> value();
 
     /**
      * Describes a C context.
      *
-     * @since 1.0
+     * @since 19.0
      */
     interface Directives {
 
@@ -79,7 +82,7 @@ public @interface CContext {
          * part of the configuration or not. If this method returns false, all elements registered
          * inside this context are ignored.
          *
-         * @since 1.0
+         * @since 19.0
          */
         default boolean isInConfiguration() {
             return true;
@@ -90,17 +93,17 @@ public @interface CContext {
          * surrounded with &lt;...&gt;, or "...". One of them must be used for every element in the
          * returned list.
          *
-         * @since 1.0
+         * @since 19.0
          */
         default List<String> getHeaderFiles() {
             return Collections.emptyList();
         }
 
         /**
-         * Unparameterized macro-definitions. Each entry is in the form of <macro-name> or
-         * <macro-name> <macro-value>.
+         * Unparameterized macro-definitions. Each entry is in the form of &lt;macro-name&gt; or
+         * &lt;macro-name&gt; &lt;macro-value&gt;.
          *
-         * @since 1.0
+         * @since 19.0
          */
         default List<String> getMacroDefinitions() {
             return Collections.emptyList();
@@ -110,7 +113,7 @@ public @interface CContext {
          * Returns options to be passed to the C compiler when processing the directives. For
          * example, the option "-Ipath" can be used to add a path for the lookup of header files.
          *
-         * @since 1.0
+         * @since 19.0
          */
         default List<String> getOptions() {
             return Collections.emptyList();
@@ -120,7 +123,7 @@ public @interface CContext {
          * Returns a collection of libraries. They are treated the same way as libraries added via
          * the {@link CLibrary} annotation.
          *
-         * @since 1.0
+         * @since 19.0
          */
         default List<String> getLibraries() {
             return Collections.emptyList();
@@ -129,7 +132,7 @@ public @interface CContext {
         /**
          * Returns a list of library paths.
          *
-         * @since 1.0
+         * @since 19.0
          */
         default List<String> getLibraryPaths() {
             return Collections.emptyList();

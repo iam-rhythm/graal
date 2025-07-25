@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -25,6 +25,8 @@
 package com.oracle.truffle.tools.chromeinspector.test;
 
 import java.io.PrintWriter;
+import java.lang.ref.Reference;
+import java.lang.ref.WeakReference;
 import java.net.URI;
 import java.util.List;
 
@@ -40,21 +42,26 @@ public final class InspectorTestInstrument extends TruffleInstrument {
 
     public static final String ID = "InspectorTestInstrument";
 
+    private volatile Reference<InspectServerSession> lastServerSession;
+
     @Override
     protected void onCreate(final Env env) {
         env.registerService(new InspectSessionInfoProvider() {
             @Override
-            public InspectSessionInfo getSessionInfo(final boolean suspend, final boolean inspectInternal, final boolean inspectInitialization, final List<URI> sourcePath) {
+            public InspectSessionInfo getSessionInfo(final boolean suspend, final boolean inspectInternal, final boolean inspectInitialization, final List<URI> sourcePath, Long suspensionTimeout) {
                 return new InspectSessionInfo() {
 
                     private InspectServerSession iss;
+                    private InspectorExecutionContext context;
                     private ConnectionWatcher connectionWatcher;
                     private long id;
 
                     InspectSessionInfo init() {
-                        InspectorExecutionContext context = new InspectorExecutionContext("test", inspectInternal, inspectInitialization, env, sourcePath, new PrintWriter(env.err(), true));
+                        PrintWriter err = new PrintWriter(env.err(), true);
+                        this.context = new InspectorExecutionContext("test", inspectInternal, inspectInitialization, env, sourcePath, err, err, suspensionTimeout);
                         this.connectionWatcher = new ConnectionWatcher();
-                        this.iss = InspectServerSession.create(context, suspend, connectionWatcher);
+                        this.iss = InspectServerSession.create(context, suspend, connectionWatcher, () -> this.iss.dispose());
+                        lastServerSession = new WeakReference<>(iss);
                         this.id = context.getId();
                         // Fake connection open
                         ReflectionUtils.invoke(connectionWatcher, "notifyOpen");
@@ -64,6 +71,11 @@ public final class InspectorTestInstrument extends TruffleInstrument {
                     @Override
                     public InspectServerSession getInspectServerSession() {
                         return iss;
+                    }
+
+                    @Override
+                    public InspectorExecutionContext getInspectorContext() {
+                        return context;
                     }
 
                     @Override
@@ -80,14 +92,26 @@ public final class InspectorTestInstrument extends TruffleInstrument {
         });
     }
 
+    @Override
+    protected void onFinalize(Env env) {
+        Reference<InspectServerSession> sessionRef = lastServerSession;
+        InspectServerSession session = (sessionRef != null) ? sessionRef.get() : null;
+        if (session != null) {
+            session.notifyClosing();
+            session.dispose();
+        }
+    }
+
 }
 
 interface InspectSessionInfoProvider {
-    InspectSessionInfo getSessionInfo(boolean suspend, boolean inspectInternal, boolean inspectInitialization, List<URI> sourcePath);
+    InspectSessionInfo getSessionInfo(boolean suspend, boolean inspectInternal, boolean inspectInitialization, List<URI> sourcePath, Long suspensionTimeout);
 }
 
 interface InspectSessionInfo {
     InspectServerSession getInspectServerSession();
+
+    InspectorExecutionContext getInspectorContext();
 
     ConnectionWatcher getConnectionWatcher();
 

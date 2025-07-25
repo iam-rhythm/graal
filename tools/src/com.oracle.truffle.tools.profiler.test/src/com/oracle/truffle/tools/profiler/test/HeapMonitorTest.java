@@ -26,14 +26,15 @@ package com.oracle.truffle.tools.profiler.test;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertTrue;
 
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.graalvm.polyglot.Source;
 import org.junit.Assert;
@@ -45,6 +46,7 @@ import com.oracle.truffle.api.nodes.LanguageInfo;
 import com.oracle.truffle.tools.profiler.HeapMonitor;
 import com.oracle.truffle.tools.profiler.HeapSummary;
 
+@SuppressWarnings("this-escape")
 public class HeapMonitorTest extends AbstractProfilerTest {
     private HeapMonitor monitor;
 
@@ -70,8 +72,11 @@ public class HeapMonitorTest extends AbstractProfilerTest {
         }
     }
 
-    final Source oneAllocationSource = makeSource("ROOT(" + "DEFINE(foo,ROOT(STATEMENT))," + "DEFINE(bar,ROOT(BLOCK(STATEMENT,LOOP(10, CALL(foo)))))," +
-                    "DEFINE(baz,ROOT(BLOCK(STATEMENT,LOOP(10, CALL(bar)))))," + "ALLOCATION,CALL(baz),CALL(bar)" + ")");
+    final Source oneAllocationSource = makeSource("ROOT(" + //
+                    "DEFINE(foo,ROOT(STATEMENT))," + //
+                    "DEFINE(bar,ROOT(BLOCK(STATEMENT,LOOP(10, CALL(foo)))))," + //
+                    "DEFINE(baz,ROOT(BLOCK(STATEMENT,LOOP(10, CALL(bar)))))," + //
+                    "ALLOCATION,CALL(baz),CALL(bar)" + ")");
 
     @Test
     public void testAllocations() {
@@ -110,11 +115,15 @@ public class HeapMonitorTest extends AbstractProfilerTest {
         ExecutorService executeInParallel = Executors.newFixedThreadPool(11);
         AtomicBoolean cancelled = new AtomicBoolean();
 
-        for (int i = 0; i < 10; i++) {
+        AtomicInteger allocations = new AtomicInteger();
+
+        int tasks = 10;
+        for (int i = 0; i < tasks; i++) {
             executeInParallel.submit(new Runnable() {
                 public void run() {
                     while (!cancelled.get()) {
                         eval(oneAllocationSource);
+                        allocations.incrementAndGet();
                         if (Thread.interrupted()) {
                             break;
                         }
@@ -124,9 +133,9 @@ public class HeapMonitorTest extends AbstractProfilerTest {
         }
 
         try {
-            Thread.sleep(50);
+            requireAllocations(allocations, 1000);
             monitor.setCollecting(true);
-            Thread.sleep(50);
+            requireAllocations(allocations, 1000);
             assertTrue(monitor.isCollecting());
             assertTrue(monitor.hasData());
             for (int i = 0; i < 10; i++) {
@@ -158,5 +167,12 @@ public class HeapMonitorTest extends AbstractProfilerTest {
         assertEquals(0, monitor.takeSummary().getAliveInstances());
         assertEquals(0, monitor.takeSummary().getAliveBytes());
 
+    }
+
+    private static void requireAllocations(AtomicInteger allocations, int number) throws InterruptedException {
+        allocations.set(0);
+        while (allocations.get() < number) {
+            Thread.sleep(5);
+        }
     }
 }

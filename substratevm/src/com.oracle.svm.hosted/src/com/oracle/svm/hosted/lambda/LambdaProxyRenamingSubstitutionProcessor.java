@@ -24,146 +24,96 @@
  */
 package com.oracle.svm.hosted.lambda;
 
-import java.util.Arrays;
 import java.util.HashSet;
-import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
-import java.util.stream.StreamSupport;
 
-import org.graalvm.compiler.debug.DebugContext;
-import org.graalvm.compiler.java.GraphBuilderPhase;
-import org.graalvm.compiler.nodes.Invoke;
-import org.graalvm.compiler.nodes.StructuredGraph;
-import org.graalvm.compiler.nodes.graphbuilderconf.GraphBuilderConfiguration;
-import org.graalvm.compiler.nodes.graphbuilderconf.GraphBuilderConfiguration.Plugins;
-import org.graalvm.compiler.nodes.graphbuilderconf.InvocationPlugins;
-import org.graalvm.compiler.options.OptionValues;
-import org.graalvm.compiler.phases.OptimisticOptimizations;
-import org.graalvm.compiler.phases.tiers.HighTierContext;
-import org.graalvm.compiler.printer.GraalDebugHandlersFactory;
-
-import com.oracle.graal.pointsto.BigBang;
 import com.oracle.graal.pointsto.infrastructure.SubstitutionProcessor;
-import com.oracle.svm.core.SubstrateUtil;
-import com.oracle.svm.core.util.VMError;
-import com.oracle.svm.hosted.c.GraalAccess;
-import com.oracle.svm.hosted.phases.NoClassInitializationPlugin;
+import com.oracle.graal.pointsto.meta.BaseLayerType;
 
-import jdk.vm.ci.meta.ResolvedJavaMethod;
+import jdk.graal.compiler.java.LambdaUtils;
 import jdk.vm.ci.meta.ResolvedJavaType;
 
 /**
  * This substitution replaces all lambda proxy types with types that have a stable names. The name
  * is formed from the signature of the target method that the lambda is calling.
- *
+ * <p>
  * NOTE: there is a particular case in which names are not stable. If multiple lambda proxies have a
  * same target in a same class they are indistinguishable in bytecode. Then their stable names get
  * appended with a unique number for that class. To make this corner case truly stable, analysis
  * must be run in the single-threaded mode.
  */
+
 public class LambdaProxyRenamingSubstitutionProcessor extends SubstitutionProcessor {
-
-    private static final Pattern LAMBDA_PATTERN = Pattern.compile("\\$\\$Lambda\\$\\d+/\\d+");
-    private static final GraphBuilderPhase LAMBDA_PARSER_PHASE = new GraphBuilderPhase(buildLambdaParserConfig());
-
-    private final BigBang bb;
 
     private final ConcurrentHashMap<ResolvedJavaType, LambdaSubstitutionType> typeSubstitutions;
     private final Set<String> uniqueLambdaProxyNames;
 
-    private static GraphBuilderConfiguration buildLambdaParserConfig() {
-        Plugins plugins = new Plugins(new InvocationPlugins());
-        plugins.setClassInitializationPlugin(new NoClassInitializationPlugin());
-        return GraphBuilderConfiguration.getDefault(plugins).withEagerResolving(true);
-    }
-
-    static boolean isLambdaType(ResolvedJavaType type) {
-        return type.isFinalFlagSet() &&
-                        type.getName().contains("/") && /* isVMAnonymousClass */
-                        lambdaMatcher(type.getName()).find();
-    }
-
-    LambdaProxyRenamingSubstitutionProcessor(BigBang bigBang) {
+    LambdaProxyRenamingSubstitutionProcessor() {
         this.typeSubstitutions = new ConcurrentHashMap<>();
         this.uniqueLambdaProxyNames = new HashSet<>();
-        this.bb = bigBang;
     }
 
     @Override
     public ResolvedJavaType lookup(ResolvedJavaType type) {
-        if (isLambdaType(type)) {
+        if (LambdaUtils.isLambdaType(type) && !type.getClass().equals(LambdaSubstitutionType.class) && !(type.getClass().equals(BaseLayerType.class))) {
             return getSubstitution(type);
         } else {
             return type;
         }
     }
 
-    @Override
-    public ResolvedJavaType resolve(ResolvedJavaType type) {
-        if (type instanceof LambdaSubstitutionType) {
-            return ((LambdaSubstitutionType) type).getOriginal();
-        } else {
-            return type;
-        }
-    }
-
-    private static String createStableLambdaName(ResolvedJavaType lambdaType, ResolvedJavaMethod targetMethod) {
-        assert lambdaMatcher(lambdaType.getName()).find() : "Stable name should be created only for lambda types.";
-        Matcher m = lambdaMatcher(lambdaType.getName());
-        String stableTargetMethod = SubstrateUtil.digest(targetMethod.format("%H.%n(%P)%R"));
-        return m.replaceFirst("\\$\\$Lambda\\$" + stableTargetMethod);
-    }
-
-    @SuppressWarnings("try")
     private LambdaSubstitutionType getSubstitution(ResolvedJavaType original) {
         return typeSubstitutions.computeIfAbsent(original, (key) -> {
-            OptionValues options = bb.getOptions();
-            DebugContext debug = DebugContext.create(options, new GraalDebugHandlersFactory(bb.getProviders().getSnippetReflection()));
-
-            ResolvedJavaMethod[] lambdaProxyMethods = Arrays.stream(key.getDeclaredMethods()).filter(m -> !m.isBridge() && m.isPublic()).toArray(ResolvedJavaMethod[]::new);
-            assert lambdaProxyMethods.length == 1 : "There must be only one method calling the target.";
-
-            StructuredGraph graph = new StructuredGraph.Builder(options, debug).method(lambdaProxyMethods[0]).build();
-            try (DebugContext.Scope ignored = debug.scope("Lambda target method analysis", graph, key, this)) {
-                HighTierContext context = new HighTierContext(GraalAccess.getOriginalProviders(), null, OptimisticOptimizations.NONE);
-                LAMBDA_PARSER_PHASE.apply(graph, context);
-            } catch (Throwable e) {
-                throw debug.handle(e);
-            }
-
-            Optional<Invoke> lambdaTargetInvokeOption = StreamSupport.stream(graph.getInvokes().spliterator(), false).findFirst();
-            if (!lambdaTargetInvokeOption.isPresent()) {
-                throw VMError.shouldNotReachHere("Lambda without a target invoke.");
-            }
-            String lambdaTargetName = createStableLambdaName(key, lambdaTargetInvokeOption.get().getTargetMethod());
+            String lambdaTargetName = LambdaUtils.findStableLambdaName(key);
             return new LambdaSubstitutionType(key, findUniqueLambdaProxyName(lambdaTargetName));
         });
     }
 
     /**
-     * Finds a unique name for a lambda proxies with a same target originating from the same class.
-     *
-     * NOTE: the name truly stable only in a single threaded build.
+     * Finds a unique name for lambda proxies with the same target originating from the same class.
+     * Method {@link LambdaUtils#findStableLambdaName(ResolvedJavaType)} hashes over a lambda type
+     * descriptor (invoked methods, constructor parameters, implemented interfaces) in an effort to
+     * find enough differences that can yield a unique name. However, this can still lead to
+     * conflicts. To create unique names when conflicts are found the naming scheme uses a counter:
+     * first a 0 is added to the end of the generated lambda name, and it is incremented until a
+     * unique name is found. This also means that the name is truly stable only in a single threaded
+     * build, i.e., when conflicts are discovered in the same order. Since the conflict counter
+     * doesn't have an upper limit the generated lambda name length can vary but the base hash is
+     * always 32 hex digits long.
      */
     private String findUniqueLambdaProxyName(String lambdaTargetName) {
         synchronized (uniqueLambdaProxyNames) {
-            String newStableName = lambdaTargetName;
-            CharSequence stableNameBase = lambdaTargetName.subSequence(0, lambdaTargetName.length() - 1);
+            String stableNameBase = lambdaTargetName.substring(0, lambdaTargetName.length() - 1);
+            String newStableName = stableNameBase + "0;";
+
             int i = 1;
             while (uniqueLambdaProxyNames.contains(newStableName)) {
-                newStableName = stableNameBase + "_" + i + ";";
+                newStableName = stableNameBase + i + ";";
                 i += 1;
             }
             uniqueLambdaProxyNames.add(newStableName);
+
             return newStableName;
         }
     }
 
-    private static Matcher lambdaMatcher(String value) {
-        return LAMBDA_PATTERN.matcher(value);
+    /**
+     * Find the base name generated by {@link LambdaUtils#findStableLambdaName(ResolvedJavaType)} by
+     * subtracting the counter injected by {@link #findUniqueLambdaProxyName(String)}. Note that the
+     * counter can be on multiple digits but the base hash is always 32 hex digits long.
+     */
+    private static String getBaseName(String lambdaTargetName) {
+        int startIndexOfHash = lambdaTargetName.indexOf(LambdaUtils.ADDRESS_PREFIX) + LambdaUtils.ADDRESS_PREFIX.length();
+        return lambdaTargetName.substring(0, startIndexOfHash + 32);
     }
 
+    /**
+     * Check if this lambda's name conflicted with any other entries, i.e., if the conflict counter
+     * ever got to 1.
+     */
+    public boolean isNameAlwaysStable(String lambdaTargetName) {
+        String baseName = getBaseName(lambdaTargetName);
+        return !uniqueLambdaProxyNames.contains(baseName + "1;");
+    }
 }

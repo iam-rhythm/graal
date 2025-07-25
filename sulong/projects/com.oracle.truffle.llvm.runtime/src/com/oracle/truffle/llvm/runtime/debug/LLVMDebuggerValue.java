@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, Oracle and/or its affiliates.
+ * Copyright (c) 2018, 2021, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -29,14 +29,22 @@
  */
 package com.oracle.truffle.llvm.runtime.debug;
 
-import com.oracle.truffle.api.interop.ForeignAccess;
+import com.oracle.truffle.api.CompilerDirectives;
+import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
+import com.oracle.truffle.api.TruffleLanguage;
+import com.oracle.truffle.api.dsl.Cached;
+import com.oracle.truffle.api.interop.InteropLibrary;
+import com.oracle.truffle.api.interop.InvalidArrayIndexException;
 import com.oracle.truffle.api.interop.TruffleObject;
+import com.oracle.truffle.api.interop.UnknownIdentifierException;
+import com.oracle.truffle.api.interop.UnsupportedMessageException;
+import com.oracle.truffle.api.library.ExportLibrary;
+import com.oracle.truffle.api.library.ExportMessage;
+import com.oracle.truffle.api.profiles.BranchProfile;
+import com.oracle.truffle.llvm.runtime.LLVMLanguage;
 
+@ExportLibrary(InteropLibrary.class)
 public abstract class LLVMDebuggerValue implements TruffleObject {
-
-    public static boolean isInstance(TruffleObject value) {
-        return value instanceof LLVMDebuggerValue;
-    }
 
     protected static final String[] NO_KEYS = new String[0];
 
@@ -46,12 +54,107 @@ public abstract class LLVMDebuggerValue implements TruffleObject {
 
     protected abstract Object getElementForDebugger(String key);
 
-    public Object getMetaObject() {
-        return null;
+    @SuppressWarnings("static-method")
+    @ExportMessage
+    public final boolean hasMembers() {
+        return true;
     }
 
-    @Override
-    public ForeignAccess getForeignAccess() {
-        return LLVMDebuggerValueMessageResolutionForeign.ACCESS;
+    @TruffleBoundary
+    public Object resolveMetaObject() {
+        InteropLibrary debuggerInterop = InteropLibrary.getFactory().getUncached(this);
+        try {
+            return debuggerInterop.hasMetaObject(this) ? debuggerInterop.getMetaObject(this) : null;
+        } catch (UnsupportedMessageException e) {
+            throw CompilerDirectives.shouldNotReachHere("Unexpected unsupported message.", e);
+        }
+    }
+
+    @ExportMessage
+    @TruffleBoundary
+    public final Object getMembers(@SuppressWarnings("unused") boolean includeInternal) {
+        if (getElementCountForDebugger() == 0) {
+            return SubElements.EMPTY;
+        }
+
+        String[] keys = getKeysForDebugger();
+        return new SubElements(keys);
+    }
+
+    @ExportMessage
+    @TruffleBoundary
+    public final boolean isMemberReadable(String key) {
+        Object element = getElementForDebugger(key);
+        return element != null;
+    }
+
+    @ExportMessage
+    @TruffleBoundary
+    public final Object readMember(String key,
+                    @Cached BranchProfile exception) throws UnknownIdentifierException {
+        Object element = getElementForDebugger(key);
+        if (element != null) {
+            return element;
+        } else {
+            exception.enter();
+            throw UnknownIdentifierException.create(key);
+        }
+    }
+
+    @ExportLibrary(InteropLibrary.class)
+    static final class SubElements implements TruffleObject {
+
+        private static final SubElements EMPTY = new SubElements(LLVMDebuggerValue.NO_KEYS);
+
+        private final String[] keys;
+
+        SubElements(String[] keys) {
+            this.keys = keys;
+        }
+
+        @SuppressWarnings("static-method")
+        @ExportMessage
+        boolean hasArrayElements() {
+            return true;
+        }
+
+        @ExportMessage
+        long getArraySize() {
+            return keys.length;
+        }
+
+        @ExportMessage
+        boolean isArrayElementReadable(long idx) {
+            return Long.compareUnsigned(idx, keys.length) < 0;
+        }
+
+        @ExportMessage
+        String readArrayElement(long idx,
+                        @Cached BranchProfile exception) throws InvalidArrayIndexException {
+            if (isArrayElementReadable(idx)) {
+                return keys[(int) idx];
+            } else {
+                exception.enter();
+                throw InvalidArrayIndexException.create(idx);
+            }
+        }
+    }
+
+    @ExportMessage
+    @SuppressWarnings("static-method")
+    public final boolean hasLanguage() {
+        return true;
+    }
+
+    @ExportMessage
+    @SuppressWarnings({"static-method"})
+    public final Class<? extends TruffleLanguage<?>> getLanguage() {
+        return LLVMLanguage.class;
+    }
+
+    @ExportMessage
+    @TruffleBoundary
+    public String toDisplayString(@SuppressWarnings("unused") boolean allowSideEffects) {
+        return toString();
     }
 }

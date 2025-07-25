@@ -24,54 +24,64 @@
  */
 package com.oracle.svm.core.posix.linux;
 
-import org.graalvm.nativeimage.Feature;
-import org.graalvm.nativeimage.ImageSingletons;
-import org.graalvm.nativeimage.Platform;
-import org.graalvm.nativeimage.Platforms;
+import jdk.graal.compiler.word.Word;
 import org.graalvm.nativeimage.StackValue;
 import org.graalvm.nativeimage.c.type.WordPointer;
 import org.graalvm.word.UnsignedWord;
 
-import com.oracle.svm.core.annotate.AutomaticFeature;
-import com.oracle.svm.core.annotate.Uninterruptible;
+import com.oracle.svm.core.Uninterruptible;
+import com.oracle.svm.core.feature.AutomaticallyRegisteredImageSingleton;
 import com.oracle.svm.core.posix.PosixUtils;
 import com.oracle.svm.core.posix.headers.Pthread;
 import com.oracle.svm.core.stack.StackOverflowCheck;
 
-@Platforms({Platform.LINUX_AND_JNI.class})
-class LinuxStackOverflowSupport implements StackOverflowCheck.OSSupport {
-
-    @Uninterruptible(reason = "Called while thread is being attached to the VM, i.e., when the thread state is not yet set up.")
+@AutomaticallyRegisteredImageSingleton(StackOverflowCheck.PlatformSupport.class)
+final class LinuxStackOverflowSupport implements StackOverflowCheck.PlatformSupport {
     @Override
-    public UnsignedWord lookupStackEnd() {
-        Pthread.pthread_attr_t attr = StackValue.get(Pthread.pthread_attr_t.class);
-        PosixUtils.checkStatusIs0(Pthread.pthread_getattr_np(Pthread.pthread_self(), attr), "LinuxStackOverflowSupport: pthread_getattr_np");
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public boolean lookupStack(WordPointer stackBasePtr, WordPointer stackEndPtr) {
+        boolean result = lookupStack0(stackBasePtr, stackEndPtr);
+        if (!result) {
+            stackBasePtr.write(Word.zero());
+            stackEndPtr.write(Word.zero());
+        }
+        return result;
+    }
 
-        WordPointer stackaddrPtr = StackValue.get(WordPointer.class);
-        WordPointer stacksizePtr = StackValue.get(WordPointer.class);
-        PosixUtils.checkStatusIs0(Pthread.pthread_attr_getstack(attr, stackaddrPtr, stacksizePtr), "LinuxStackOverflowSupport: pthread_attr_getstack");
-        UnsignedWord stackaddr = stackaddrPtr.read();
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    private static boolean lookupStack0(WordPointer stackBasePtr, WordPointer stackEndPtr) {
+        WordPointer guardSizePtr = StackValue.get(WordPointer.class);
+        Pthread.pthread_attr_t attr = StackValue.get(Pthread.pthread_attr_t.class);
+        if (Pthread.pthread_getattr_np(Pthread.pthread_self(), attr) != 0) {
+            /*
+             * pthread_getattr_np can fail for various reasons, e.g., because /proc/self/maps can't
+             * be opened
+             */
+            return false;
+        }
+
+        if (Pthread.pthread_attr_getstack(attr, stackBasePtr, stackEndPtr) != 0) {
+            return false;
+        }
 
         /*
          * The block of memory returned by pthread_attr_getstack() includes guard pages where
-         * present. We need to trim these off. Note that these guard pages are not the yellow and
-         * red zones of the stack that we designate.
+         * present. We need to retrieve the size of the guard pages in order to trim them off. Note
+         * that these guard pages are not the yellow and red zones of the stack that we designate.
          */
-        WordPointer guardsizePtr = StackValue.get(WordPointer.class);
-        PosixUtils.checkStatusIs0(Pthread.pthread_attr_getguardsize(attr, guardsizePtr), "LinuxStackOverflowSupport: pthread_attr_getguardsize");
-        UnsignedWord guardsize = guardsizePtr.read();
+        if (Pthread.pthread_attr_getguardsize(attr, guardSizePtr) != 0) {
+            return false;
+        }
+        UnsignedWord stackAddr = stackBasePtr.read();
+        UnsignedWord stackSize = stackEndPtr.read();
+        UnsignedWord guardSize = guardSizePtr.read();
+
+        UnsignedWord stackBase = stackAddr.add(stackSize);
+        UnsignedWord stackEnd = stackAddr.add(guardSize);
+        stackBasePtr.write(stackBase);
+        stackEndPtr.write(stackEnd);
 
         PosixUtils.checkStatusIs0(Pthread.pthread_attr_destroy(attr), "LinuxStackOverflowSupport: pthread_attr_destroy");
-
-        return stackaddr.add(guardsize);
-    }
-}
-
-@Platforms({Platform.LINUX_AND_JNI.class})
-@AutomaticFeature
-class LinuxStackOverflowSupportFeature implements Feature {
-    @Override
-    public void afterRegistration(AfterRegistrationAccess access) {
-        ImageSingletons.add(StackOverflowCheck.OSSupport.class, new LinuxStackOverflowSupport());
+        return true;
     }
 }

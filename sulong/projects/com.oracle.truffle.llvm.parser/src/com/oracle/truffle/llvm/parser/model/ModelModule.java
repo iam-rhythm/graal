@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2018, Oracle and/or its affiliates.
+ * Copyright (c) 2016, 2022, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -30,7 +30,6 @@
 package com.oracle.truffle.llvm.parser.model;
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -40,58 +39,43 @@ import com.oracle.truffle.llvm.parser.model.functions.FunctionDeclaration;
 import com.oracle.truffle.llvm.parser.model.functions.FunctionDefinition;
 import com.oracle.truffle.llvm.parser.model.functions.LazyFunctionParser;
 import com.oracle.truffle.llvm.parser.model.symbols.globals.GlobalAlias;
-import com.oracle.truffle.llvm.parser.model.symbols.globals.GlobalValueSymbol;
 import com.oracle.truffle.llvm.parser.model.symbols.globals.GlobalVariable;
-import com.oracle.truffle.llvm.parser.model.target.TargetDataLayout;
 import com.oracle.truffle.llvm.parser.model.target.TargetInformation;
-import com.oracle.truffle.llvm.parser.model.visitors.ModelVisitor;
-import com.oracle.truffle.llvm.runtime.debug.type.LLVMSourceStaticMemberType;
+import com.oracle.truffle.llvm.runtime.debug.scope.LLVMSourceFileReference;
 import com.oracle.truffle.llvm.runtime.debug.scope.LLVMSourceSymbol;
+import com.oracle.truffle.llvm.runtime.debug.type.LLVMSourceStaticMemberType;
 import com.oracle.truffle.llvm.runtime.types.Type;
 
 public final class ModelModule {
 
-    // when running with Polyglot it can be that there is no layout available - we fall back to this
-    // one.
-    private static final TargetDataLayout defaultLayout = TargetDataLayout.fromString("e-i64:64-f80:128-n8:16:32:64-S128");
+    // According to the LLVM documentation (https://llvm.org/docs/LangRef.html#data-layout), below
+    // is the default datalayout
+    public static final String defaultLayout = "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:32:64-f16:16:16-f32:32:32-f64:64:64-f128:128:128";
 
-    private final List<Type> types = new ArrayList<>();
-    private final List<GlobalVariable> globalVariables = new ArrayList<>();
-    private final List<GlobalAlias> aliases = new ArrayList<>();
-    private final List<FunctionDeclaration> declares = new ArrayList<>();
-    private final List<FunctionDefinition> defines = new ArrayList<>();
-    private final List<TargetInformation> targetInfo = new ArrayList<>();
-    private final List<String> libraries = new ArrayList<>();
-    private final List<String> paths = new ArrayList<>();
-    private final Map<LLVMSourceSymbol, SymbolImpl> sourceGlobals = new HashMap<>();
-    private final Map<LLVMSourceStaticMemberType, SymbolImpl> sourceStaticMembers = new HashMap<>();
-    private final Map<FunctionDefinition, LazyFunctionParser> lazyFunctionParsers = new HashMap<>();
-    private TargetDataLayout targetDataLayout = defaultLayout;
+    private final ArrayList<Type> types = new ArrayList<>();
+    private final ArrayList<GlobalVariable> globalVariables = new ArrayList<>();
+    private final ArrayList<GlobalAlias> aliases = new ArrayList<>();
+    private final ArrayList<FunctionDeclaration> declares = new ArrayList<>();
+    private final ArrayList<FunctionDefinition> defines = new ArrayList<>();
+    private final ArrayList<TargetInformation> targetInfo = new ArrayList<>();
+    private final ArrayList<String> sectionNames = new ArrayList<>();
+    private final HashMap<LLVMSourceSymbol, SymbolImpl> sourceGlobals = new HashMap<>();
+    private final HashMap<LLVMSourceStaticMemberType, SymbolImpl> sourceStaticMembers = new HashMap<>();
+    private final HashMap<FunctionDefinition, LazyFunctionParser> lazyFunctionParsers = new HashMap<>();
+    private String targetDataLayout = defaultLayout;
     private DebugInfoFunctionProcessor functionProcessor = null;
+    private final ArrayList<LLVMSourceFileReference> sourceFiles = new ArrayList<>();
+    private int totalSize;
 
     public ModelModule() {
     }
 
-    public void setTargetDataLayout(TargetDataLayout layout) {
+    public void setTargetDataLayout(String layout) {
         targetDataLayout = layout;
     }
 
-    public TargetDataLayout getTargetDataLayout() {
+    public String getTargetDataLayout() {
         return targetDataLayout;
-    }
-
-    public void accept(ModelVisitor visitor) {
-        visitor.visit(targetDataLayout);
-        targetInfo.forEach(visitor::visit);
-        types.forEach(visitor::visit);
-        for (GlobalValueSymbol variable : globalVariables) {
-            variable.accept(visitor);
-        }
-        for (GlobalValueSymbol alias : aliases) {
-            alias.accept(visitor);
-        }
-        defines.forEach(visitor::visit);
-        declares.forEach(visitor::visit);
     }
 
     public void addFunctionDeclaration(FunctionDeclaration declaration) {
@@ -134,6 +118,14 @@ public final class ModelModule {
         targetInfo.add(info);
     }
 
+    public void addSectionName(String sectionName) {
+        sectionNames.add(sectionName);
+    }
+
+    public List<String> getSectionNames() {
+        return sectionNames;
+    }
+
     public List<GlobalVariable> getGlobalVariables() {
         return globalVariables;
     }
@@ -163,19 +155,28 @@ public final class ModelModule {
         return String.format("Model (%d defines, %d declares, %d global variables, %d aliases, %d types)", defines.size(), declares.size(), globalVariables.size(), aliases.size(), types.size());
     }
 
-    public void addLibraries(List<String> l) {
-        this.libraries.addAll(l);
+    public void addSourceFileReference(LLVMSourceFileReference sourceFile) {
+        sourceFiles.add(sourceFile);
     }
 
-    public List<String> getLibraries() {
-        return Collections.unmodifiableList(libraries);
+    public ArrayList<LLVMSourceFileReference> getSourceFileReferences() {
+        return sourceFiles;
     }
 
-    public void addLibraryPaths(List<String> p) {
-        this.paths.addAll(p);
+    public <TI extends TargetInformation> TI getTargetInformation(Class<TI> targetInfoClazz) {
+        for (TargetInformation info : targetInfo) {
+            if (targetInfoClazz.isInstance(info)) {
+                return targetInfoClazz.cast(info);
+            }
+        }
+        return null;
     }
 
-    public List<String> getLibraryPaths() {
-        return Collections.unmodifiableList(paths);
+    public void setTotalSize(int index) {
+        totalSize = index;
+    }
+
+    public int getTotalSize() {
+        return totalSize;
     }
 }

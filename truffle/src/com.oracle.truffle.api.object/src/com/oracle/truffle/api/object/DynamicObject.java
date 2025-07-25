@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,38 +40,106 @@
  */
 package com.oracle.truffle.api.object;
 
+import java.lang.annotation.Annotation;
+import java.lang.annotation.ElementType;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.annotation.Target;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodHandles.Lookup;
 import java.lang.reflect.Field;
 
-import com.oracle.truffle.api.CompilerAsserts;
 import com.oracle.truffle.api.CompilerDirectives;
+import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
+import com.oracle.truffle.api.dsl.NeverDefault;
 import com.oracle.truffle.api.interop.TruffleObject;
 
 import sun.misc.Unsafe;
 
 /**
- * Represents an object members of which can be dynamically added and removed at run time.
+ * Represents a dynamic object, members of which can be dynamically added and removed at run time.
  *
+ * To use it, extend {@link DynamicObject} and use {@link DynamicObjectLibrary} for object accesses.
+ *
+ * When {@linkplain DynamicObject#DynamicObject(Shape) constructing} a {@link DynamicObject}, it has
+ * to be initialized with an empty initial shape. Initial shapes are created using
+ * {@link Shape#newBuilder()} and should ideally be shared per TruffleLanguage instance to allow
+ * shape caches to be shared across contexts.
+ *
+ * Subclasses can provide in-object dynamic field slots using the {@link DynamicField} annotation
+ * and {@link Shape.Builder#layout(Class, Lookup) Shape.Builder.layout}.
+ *
+ * <p>
+ * Example:
+ *
+ * <pre>
+ * <code>
+ * public class MyObject extends DynamicObject implements TruffleObject {
+ *     public MyObject(Shape shape) {
+ *         super(shape);
+ *     }
+ * }
+ *
+ * Shape initialShape = Shape.newBuilder().layout(MyObject.class).build();
+ *
+ * MyObject obj = new MyObject(initialShape);
+ * </code>
+ * </pre>
+ *
+ * @see DynamicObject#DynamicObject(Shape)
+ * @see DynamicObjectLibrary
  * @see Shape
+ * @see Shape#newBuilder()
  * @since 0.8 or earlier
  */
-@SuppressWarnings("deprecation")
 public abstract class DynamicObject implements TruffleObject {
 
-    private Shape shape;
+    private static final MethodHandles.Lookup LOOKUP = internalLookup();
 
     /**
-     * @since 0.8 or earlier
+     * Using this annotation, subclasses can define additional dynamic fields to be used by the
+     * object layout. Annotated field must be of type {@code Object} or {@code long}, must not be
+     * final, and must not have any direct usages.
+     *
+     * @see Shape.Builder#layout(Class, Lookup)
+     * @since 20.2.0
      */
-    @Deprecated
-    protected DynamicObject() {
-        CompilerAsserts.neverPartOfCompilation();
-        throw new UnsupportedOperationException();
+    @Retention(RetentionPolicy.RUNTIME)
+    @Target(ElementType.FIELD)
+    protected @interface DynamicField {
     }
 
+    /** The current shape of the object. */
+    private Shape shape;
+
+    /** Object extension array. */
+    @DynamicField private Object[] extRef;
+    /** Primitive extension array. */
+    @DynamicField private int[] extVal;
+
     /**
-     * Constructor for subclasses.
+     * Constructor for {@link DynamicObject} subclasses. Initializes the object with the provided
+     * shape. The shape must have been constructed with a
+     * {@linkplain Shape.Builder#layout(Class, Lookup) layout class} assignable from this class
+     * (i.e., the concrete subclass, a superclass thereof, including {@link DynamicObject}) and must
+     * not have any instance properties (but may have constant properties).
      *
-     * @since 1.0
+     * <p>
+     * Examples:
+     *
+     * <pre>
+     * Shape shape = {@link Shape#newBuilder()}.{@link Shape.Builder#build() build}();
+     * DynamicObject myObject = new MyObject(shape);
+     * </pre>
+     *
+     * <pre>
+     * Shape shape = {@link Shape#newBuilder()}.{@link Shape.Builder#layout(Class, Lookup) layout}(MyObject.class, MethodHandles.lookup()).{@link Shape.Builder#build() build}();
+     * DynamicObject myObject = new MyObject(shape);
+     * </pre>
+     *
+     * @param shape the initial shape of this object
+     * @throws IllegalArgumentException if called with an illegal (incompatible) shape
+     * @since 19.0
      */
     protected DynamicObject(Shape shape) {
         verifyShape(shape, this.getClass());
@@ -79,18 +147,41 @@ public abstract class DynamicObject implements TruffleObject {
     }
 
     private static void verifyShape(Shape shape, Class<? extends DynamicObject> subclass) {
-        Class<? extends DynamicObject> shapeType = shape.getLayout().getType();
-        if (!(shapeType == subclass || (shapeType.isAssignableFrom(subclass) && DynamicObject.class.isAssignableFrom(shapeType)))) {
+        Class<? extends DynamicObject> shapeType = shape.getLayoutClass();
+        assert DynamicObject.class.isAssignableFrom(shapeType) : shapeType;
+        if (!(shapeType == subclass || shapeType == DynamicObject.class || shapeType.isAssignableFrom(subclass)) ||
+                        shape.hasInstanceProperties()) {
             CompilerDirectives.transferToInterpreterAndInvalidate();
-            throw new IllegalArgumentException("Incompatible shape");
+            throw illegalShape(shape, subclass);
         }
+    }
+
+    private static IllegalArgumentException illegalShape(Shape shape, Class<? extends DynamicObject> subclass) {
+        Class<? extends DynamicObject> shapeType = shape.getLayoutClass();
+        if (!(shapeType == subclass || shapeType == DynamicObject.class || shapeType.isAssignableFrom(subclass))) {
+            throw illegalShapeType(shapeType, subclass);
+        }
+        assert shape.hasInstanceProperties() : shape;
+        throw illegalShapeProperties();
+    }
+
+    @TruffleBoundary(transferToInterpreterOnException = false)
+    private static IllegalArgumentException illegalShapeType(Class<? extends DynamicObject> shapeClass, Class<? extends DynamicObject> thisClass) {
+        throw new IllegalArgumentException(String.format("Incompatible shape: layout class (%s) not assignable from this class (%s)", shapeClass.getName(), thisClass.getName()));
+    }
+
+    @TruffleBoundary(transferToInterpreterOnException = false)
+    private static IllegalArgumentException illegalShapeProperties() {
+        throw new IllegalArgumentException("Shape must not have instance properties");
     }
 
     /**
      * Get the object's current shape.
      *
      * @since 0.8 or earlier
+     * @see Shape
      */
+    @NeverDefault
     public final Shape getShape() {
         return getShapeHelper(shape);
     }
@@ -106,8 +197,14 @@ public abstract class DynamicObject implements TruffleObject {
      * Set the object's shape.
      */
     final void setShape(Shape shape) {
-        assert shape.getLayout().getType().isInstance(this);
+        assert assertSetShape(shape);
         setShapeHelper(shape, SHAPE_OFFSET);
+    }
+
+    private boolean assertSetShape(Shape s) {
+        Class<? extends DynamicObject> layoutType = s.getLayoutClass();
+        assert layoutType.isInstance(this) : illegalShapeType(layoutType, this.getClass());
+        return true;
     }
 
     /**
@@ -120,143 +217,64 @@ public abstract class DynamicObject implements TruffleObject {
     }
 
     /**
-     * Get property value.
+     * The {@link #clone()} method is not supported by {@link DynamicObject} at this point in time,
+     * so it always throws {@link CloneNotSupportedException}, even if the {@link Cloneable}
+     * interface is implemented in a subclass.
      *
-     * @param key property identifier
-     * @return property value or {@code null} if object has no such property
-     * @since 0.8 or earlier
+     * Subclasses may however override this method and create a copy of this object by constructing
+     * a new object and copying any properties over manually.
+     *
+     * @since 20.2.0
+     * @throws CloneNotSupportedException
      */
-    public final Object get(Object key) {
-        return get(key, null);
+    @Override
+    protected Object clone() throws CloneNotSupportedException {
+        throw cloneNotSupported();
     }
 
-    /**
-     * Get property value.
-     *
-     * @param key property identifier
-     * @param defaultValue return value if property is not found
-     * @return property value or defaultValue if object has no such property
-     * @since 0.8 or earlier
-     */
-    public abstract Object get(Object key, Object defaultValue);
-
-    /**
-     * Set value of existing property.
-     *
-     * @param key property identifier
-     * @param value value to be set
-     * @return {@code true} if successful or {@code false} if property not found
-     * @since 0.8 or earlier
-     */
-    public abstract boolean set(Object key, Object value);
-
-    /**
-     * Returns {@code true} if this object contains a property with the given key.
-     *
-     * @since 0.8 or earlier
-     */
-    public final boolean containsKey(Object key) {
-        return getShape().getProperty(key) != null;
+    @TruffleBoundary
+    private static CloneNotSupportedException cloneNotSupported() throws CloneNotSupportedException {
+        throw new CloneNotSupportedException();
     }
 
-    /**
-     * Define new property or redefine existing property.
-     *
-     * @param key property identifier
-     * @param value value to be set
-     * @since 0.8 or earlier
-     */
-    public final void define(Object key, Object value) {
-        define(key, value, 0);
+    final Object[] getObjectStore() {
+        return extRef;
     }
 
-    /**
-     * Define new property or redefine existing property.
-     *
-     * @param key property identifier
-     * @param value value to be set
-     * @param flags flags to be set
-     * @since 0.8 or earlier
-     */
-    public abstract void define(Object key, Object value, int flags);
+    final void setObjectStore(Object[] newArray) {
+        extRef = newArray;
+    }
 
-    /**
-     * Define new property with a static location or change existing property.
-     *
-     * @param key property identifier
-     * @param value value to be set
-     * @param flags flags to be set
-     * @param locationFactory factory function that creates a location for a given shape and value
-     * @since 0.8 or earlier
-     */
-    public abstract void define(Object key, Object value, int flags, LocationFactory locationFactory);
+    final int[] getPrimitiveStore() {
+        return extVal;
+    }
 
-    /**
-     * Delete property.
-     *
-     * @param key property identifier
-     * @return {@code true} if successful or {@code false} if property not found
-     * @since 0.8 or earlier
-     */
-    public abstract boolean delete(Object key);
+    final void setPrimitiveStore(int[] newArray) {
+        extVal = newArray;
+    }
 
-    /**
-     * Returns the number of properties in this object.
-     *
-     * @since 0.8 or earlier
-     */
-    public abstract int size();
+    static Class<? extends Annotation> getDynamicFieldAnnotation() {
+        return DynamicField.class;
+    }
 
-    /**
-     * Returns {@code true} if this object contains no properties.
-     *
-     * @since 0.8 or earlier
-     */
-    public abstract boolean isEmpty();
-
-    /**
-     * Set object shape and grow storage if necessary.
-     *
-     * @param oldShape the object's current shape (must equal {@link #getShape()})
-     * @param newShape the new shape to be set
-     * @since 0.8 or earlier
-     */
-    public abstract void setShapeAndGrow(Shape oldShape, Shape newShape);
-
-    /**
-     * Set object shape and resize storage if necessary.
-     *
-     * @param oldShape the object's current shape (must equal {@link #getShape()})
-     * @param newShape the new shape to be set
-     * @since 0.8 or earlier
-     */
-    public abstract void setShapeAndResize(Shape oldShape, Shape newShape);
-
-    /**
-     * Ensure object shape is up-to-date.
-     *
-     * @return {@code true} if shape has changed
-     * @since 0.8 or earlier
-     */
-    public abstract boolean updateShape();
-
-    /**
-     * Create a shallow copy of this object.
-     *
-     * @param currentShape the object's current shape (must equal {@link #getShape()})
-     * @since 0.8 or earlier
-     */
-    public abstract DynamicObject copy(Shape currentShape);
+    static Lookup internalLookup() {
+        return LOOKUP;
+    }
 
     private static final Unsafe UNSAFE;
     private static final long SHAPE_OFFSET;
     static {
         UNSAFE = getUnsafe();
         try {
-            SHAPE_OFFSET = UNSAFE.objectFieldOffset(DynamicObject.class.getDeclaredField("shape"));
+            SHAPE_OFFSET = getObjectFieldOffset(DynamicObject.class.getDeclaredField("shape"));
         } catch (Exception e) {
             throw new IllegalStateException("Could not get 'shape' field offset", e);
         }
+    }
+
+    @SuppressWarnings("deprecation" /* JDK-8277863 */)
+    private static long getObjectFieldOffset(Field field) {
+        return UNSAFE.objectFieldOffset(field);
     }
 
     private static Unsafe getUnsafe() {

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -52,7 +52,9 @@ import com.oracle.truffle.api.nodes.RootNode;
 /**
  * <p>
  * A profile is a Truffle utility class that uses the {@link CompilerDirectives Truffle compiler
- * directives} to guard for and/or forward runtime information to the compiler.
+ * directives} to guard for and/or forward runtime information to the compiler. Whenever Truffle DSL
+ * can be used {@link InlinedProfile inlined profiles} subclasses should be used instead of regular
+ * {@link Profile profile} subclasses.
  * </p>
  *
  * <p>
@@ -105,10 +107,12 @@ import com.oracle.truffle.api.nodes.RootNode;
  * </ul>
  * </p>
  *
+ * @see InlinedProfile
  * @see Assumption
  * @since 0.10
  */
 public abstract class Profile extends NodeCloneable {
+
     static boolean isProfilingEnabled() {
         boolean enabled;
         try {
@@ -124,11 +128,36 @@ public abstract class Profile extends NodeCloneable {
         /* We don't to allow custom profiles. We want to evolve this API further first. Sorry. */
     }
 
-    String toStringDisabled(Class<?> profileClass) {
-        return String.format("%s(DISABLED)", profileClass.getSimpleName());
+    final String toStringDisabled() {
+        return String.format("%s(DISABLED)", getClass().getSimpleName());
     }
 
-    String toString(Class<?> profileClass, boolean uninitialized, boolean generic, String specialization) {
+    /**
+     * Disables this profile by setting it to its generic state. After disabling it is guaranteed to
+     * never {@link CompilerDirectives#transferToInterpreterAndInvalidate() deoptimize} on any
+     * invocation of a profile method.
+     * <p>
+     * This method must not be called on compiled code paths. Note that disabling the profile will
+     * not invalidate existing compiled code that uses this profile.
+     *
+     * @since 21.1
+     */
+    public void disable() {
+    }
+
+    /**
+     * Resets this profile to its uninitialized state. Has no effect if this profile is already in
+     * its uninitialized state or a disabled version of this profile is used.
+     * <p>
+     * This method must not be called on compiled code paths. Note that disabling the profile will
+     * not invalidate existing compiled code that uses this profile.
+     *
+     * @since 21.1
+     */
+    public void reset() {
+    }
+
+    final String toString(Class<?> profileClass, boolean uninitialized, boolean generic, String specialization) {
         String s;
         if (uninitialized) {
             s = "UNINITIALIZED";

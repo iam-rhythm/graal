@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -211,7 +211,7 @@ public final class StepConfig {
          *
          * @param element the element to set the suspend anchor for
          * @param anchors a list of suspend anchors
-         * @since 1.0
+         * @since 19.0
          */
         public Builder suspendAnchors(SourceElement element, SuspendAnchor... anchors) {
             if (anchors.length == 0) {

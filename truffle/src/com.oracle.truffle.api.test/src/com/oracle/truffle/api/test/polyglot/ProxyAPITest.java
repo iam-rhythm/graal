@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -40,18 +40,21 @@
  */
 package com.oracle.truffle.api.test.polyglot;
 
-import static com.oracle.truffle.api.test.polyglot.ValueAssert.assertFails;
-import static com.oracle.truffle.api.test.polyglot.ValueAssert.assertUnsupported;
-import static com.oracle.truffle.api.test.polyglot.ValueAssert.assertValue;
-import static com.oracle.truffle.api.test.polyglot.ValueAssert.Trait.BOOLEAN;
-import static com.oracle.truffle.api.test.polyglot.ValueAssert.Trait.NUMBER;
-import static com.oracle.truffle.api.test.polyglot.ValueAssert.Trait.PROXY_OBJECT;
-import static com.oracle.truffle.api.test.polyglot.ValueAssert.Trait.STRING;
+import static com.oracle.truffle.api.test.polyglot.AbstractPolyglotTest.assertFails;
+import static com.oracle.truffle.tck.tests.ValueAssert.assertUnsupported;
+import static com.oracle.truffle.tck.tests.ValueAssert.assertValue;
+import static com.oracle.truffle.tck.tests.ValueAssert.Trait.PROXY_OBJECT;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
+import java.time.Duration;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalTime;
+import java.time.ZoneId;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -61,20 +64,26 @@ import java.util.function.Function;
 import java.util.function.Supplier;
 
 import org.graalvm.polyglot.Context;
+import org.graalvm.polyglot.HostAccess;
 import org.graalvm.polyglot.PolyglotException;
 import org.graalvm.polyglot.PolyglotException.StackFrame;
 import org.graalvm.polyglot.Value;
 import org.graalvm.polyglot.proxy.Proxy;
 import org.graalvm.polyglot.proxy.ProxyArray;
+import org.graalvm.polyglot.proxy.ProxyDate;
+import org.graalvm.polyglot.proxy.ProxyDuration;
 import org.graalvm.polyglot.proxy.ProxyExecutable;
+import org.graalvm.polyglot.proxy.ProxyInstant;
 import org.graalvm.polyglot.proxy.ProxyInstantiable;
 import org.graalvm.polyglot.proxy.ProxyObject;
+import org.graalvm.polyglot.proxy.ProxyTime;
+import org.graalvm.polyglot.proxy.ProxyTimeZone;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 
-import com.oracle.truffle.api.test.polyglot.ValueAssert.Trait;
+import com.oracle.truffle.tck.tests.ValueAssert.Trait;
 
 /**
  * Testing the behavior of proxies API and proxy interfaces.
@@ -85,7 +94,7 @@ public class ProxyAPITest {
 
     @Before
     public void setUp() {
-        context = Context.create();
+        context = Context.newBuilder().allowHostAccess(HostAccess.ALL).build();
     }
 
     @After
@@ -101,69 +110,6 @@ public class ProxyAPITest {
         assertTrue(value.isProxyObject());
         assertSame(proxy, value.asProxyObject());
         assertUnsupported(value, PROXY_OBJECT);
-    }
-
-    @SuppressWarnings("deprecation")
-    static class ProxyPrimitiveTest implements org.graalvm.polyglot.proxy.ProxyPrimitive {
-
-        Object primitive;
-        int invocationCounter = 0;
-
-        public Object asPrimitive() {
-            invocationCounter++;
-            return primitive;
-        }
-    }
-
-    @SuppressWarnings("deprecation")
-    @Test
-    public void testProxyPrimitive() {
-        ProxyPrimitiveTest proxy = new ProxyPrimitiveTest();
-
-        Value value = context.asValue(proxy);
-
-        assertTrue(value.isProxyObject());
-        assertSame(proxy, value.asProxyObject());
-
-        // no need to invoke asPrimitive yet.
-        assertEquals(0, proxy.invocationCounter);
-
-        assertProxyPrimitive(proxy, value, false, Boolean.class, BOOLEAN, PROXY_OBJECT);
-        assertProxyPrimitive(proxy, value, "a", String.class, STRING, PROXY_OBJECT);
-        assertProxyPrimitive(proxy, value, 'a', Character.class, STRING, PROXY_OBJECT);
-        assertProxyPrimitive(proxy, value, (byte) 42, Byte.class, NUMBER, PROXY_OBJECT);
-        assertProxyPrimitive(proxy, value, (short) 42, Short.class, NUMBER, PROXY_OBJECT);
-        assertProxyPrimitive(proxy, value, 42, Integer.class, NUMBER, PROXY_OBJECT);
-        assertProxyPrimitive(proxy, value, 42L, Long.class, NUMBER, PROXY_OBJECT);
-        assertProxyPrimitive(proxy, value, 42.0f, Float.class, NUMBER, PROXY_OBJECT);
-        assertProxyPrimitive(proxy, value, 42.0d, Double.class, NUMBER, PROXY_OBJECT);
-
-        // test errors
-        proxy.primitive = null;
-
-        try {
-            // force to unbox the primitive
-            value.isNumber();
-        } catch (PolyglotException e) {
-            assertTrue(e.isHostException());
-            assertTrue(e.asHostException() instanceof IllegalStateException);
-        }
-
-        RuntimeException e = new RuntimeException();
-        try {
-            value = context.asValue(new org.graalvm.polyglot.proxy.ProxyPrimitive() {
-                public Object asPrimitive() {
-                    throw e;
-                }
-            });
-            // force to unbox the primitive
-            value.isNumber();
-        } catch (PolyglotException ex) {
-            assertTrue(ex.isHostException());
-            assertSame(e, ex.asHostException());
-            assertFalse(ex.isInternalError());
-        }
-
     }
 
     static class ProxyArrayTest implements ProxyArray {
@@ -209,10 +155,10 @@ public class ProxyAPITest {
         assertEquals(0, proxy.getSizeCounter);
 
         proxy.get = (index) -> 42;
+        proxy.getSize = () -> 43L;
         assertEquals(42, value.getArrayElement(42).asInt());
         assertEquals(1, proxy.getCounter);
         assertEquals(0, proxy.setCounter);
-        assertEquals(0, proxy.getSizeCounter);
         proxy.getCounter = 0;
         proxy.get = null;
 
@@ -224,7 +170,6 @@ public class ProxyAPITest {
         value.setArrayElement(42, setObject);
         assertEquals(0, proxy.getCounter);
         assertEquals(1, proxy.setCounter);
-        assertEquals(0, proxy.getSizeCounter);
         proxy.setCounter = 0;
         proxy.set = null;
 
@@ -232,11 +177,14 @@ public class ProxyAPITest {
         assertEquals(42L, value.getArraySize());
         assertEquals(0, proxy.getCounter);
         assertEquals(0, proxy.setCounter);
-        assertEquals(1, proxy.getSizeCounter);
         proxy.getSize = null;
         proxy.getCounter = 0;
 
         RuntimeException ex = new RuntimeException();
+
+        proxy.getSize = () -> {
+            return 0L;
+        };
         proxy.get = (index) -> {
             throw ex;
         };
@@ -268,17 +216,6 @@ public class ProxyAPITest {
             assertFalse(e.isInternalError());
         });
         proxy.getSize = null;
-    }
-
-    private static void assertProxyPrimitive(ProxyPrimitiveTest proxy, Value value, Object primitiveValue, Class<?> primitiveType, Trait... traits) {
-        proxy.primitive = primitiveValue;
-        proxy.invocationCounter = 0;
-        assertEquals(0, proxy.invocationCounter);
-        assertEquals(proxy.primitive, value.as(primitiveType));
-        assertEquals(proxy.primitive, value.as(Object.class));
-        assertEquals(2, proxy.invocationCounter);
-        proxy.invocationCounter = 0;
-        assertValue(value, traits);
     }
 
     static class ProxyExecutableTest implements ProxyExecutable {
@@ -440,6 +377,10 @@ public class ProxyAPITest {
         assertTrue(value.hasMembers());
         assertSame(proxy, value.asProxyObject());
 
+        proxy.hasMember = (key) -> {
+            assertEquals("foo", key);
+            return true;
+        };
         proxy.putMember = (key, v) -> {
             assertEquals("foo", key);
             assertEquals(42, v.asInt());
@@ -453,8 +394,9 @@ public class ProxyAPITest {
             assertEquals("foo", key);
             return true;
         };
+        proxy.hasMemberCounter = 0;
         assertTrue(value.hasMember("foo"));
-        assertEquals(1, proxy.hasMemberCounter);
+        assertTrue(proxy.hasMemberCounter > 0);
 
         proxy.getMember = (key) -> {
             assertEquals("foo", key);
@@ -464,7 +406,9 @@ public class ProxyAPITest {
         assertEquals(1, proxy.getMemberCounter);
 
         List<String> testKeys = Arrays.asList("a", "b", "c");
-
+        proxy.hasMember = (key) -> {
+            return testKeys.contains(key);
+        };
         proxy.getMemberKeys = () -> {
             return testKeys;
         };
@@ -500,13 +444,17 @@ public class ProxyAPITest {
         assertEquals(new HashSet<>(Arrays.asList("a", "c")), value.getMemberKeys());
         assertEquals(5, proxy.getMemberKeysCounter);
 
+        proxy.hasMember = (k) -> {
+            return true;
+        };
+
         proxy.getMemberKeys = () -> {
             return new Object[]{42};
         };
 
-        assertFails(() -> value.getMemberKeys().iterator().next(), PolyglotException.class, (e) -> {
+        assertFails(() -> value.getMemberKeys(), PolyglotException.class, (e) -> {
             assertTrue(e.isHostException());
-            assertTrue(e.asHostException() instanceof ClassCastException);
+            assertTrue(e.asHostException() instanceof IllegalStateException);
         });
         assertEquals(6, proxy.getMemberKeysCounter);
 
@@ -603,7 +551,80 @@ public class ProxyAPITest {
 
         assertSame(arg0[0], instantiable.newInstance((Object[]) arg0).asHostObject());
         assertSame(arg1[0], instantiable.newInstance((Object[]) arg1).asHostObject());
+    }
 
+    @Test
+    public void testInvalidReturnValue() {
+        Value date = context.asValue(new ProxyDate() {
+            public LocalDate asDate() {
+                return null;
+            }
+        });
+        assertFails(() -> date.asDate(), PolyglotException.class, (e) -> assertTrue(e.asHostException() instanceof AssertionError));
+
+        Value time = context.asValue(new ProxyTime() {
+            public LocalTime asTime() {
+                return null;
+            }
+        });
+        assertFails(() -> time.asTime(), PolyglotException.class, (e) -> assertTrue(e.asHostException() instanceof AssertionError));
+
+        Value timeZone = context.asValue(new ProxyTimeZone() {
+            public ZoneId asTimeZone() {
+                return null;
+            }
+        });
+        assertFails(() -> timeZone.asTimeZone(), PolyglotException.class, (e) -> assertTrue(e.asHostException() instanceof AssertionError));
+
+        Value instant = context.asValue(new ProxyInstant() {
+            public Instant asInstant() {
+                return null;
+            }
+        });
+        assertFails(() -> instant.asInstant(), PolyglotException.class, (e) -> assertTrue(e.asHostException() instanceof AssertionError));
+
+        Value duration = context.asValue(new ProxyDuration() {
+            public Duration asDuration() {
+                return null;
+            }
+        });
+        assertFails(() -> duration.asDuration(), PolyglotException.class, (e) -> assertTrue(e.asHostException() instanceof AssertionError));
+    }
+
+    static final class P0 implements Proxy {
+
+        @Override
+        public boolean equals(Object obj) {
+            return obj instanceof P0 || obj instanceof P1;
+        }
+
+        @Override
+        public int hashCode() {
+            return 0;
+        }
+
+    }
+
+    static final class P1 implements Proxy {
+        @Override
+        public boolean equals(Object obj) {
+            return obj instanceof P0 || obj instanceof P1;
+        }
+
+        @Override
+        public int hashCode() {
+            return 0;
+        }
+    }
+
+    @Test
+    public void testProxyEquality() {
+        Value p0 = context.asValue(new P0());
+        Value p1 = context.asValue(new P1());
+        assertEquals(p0, p0);
+        assertEquals(p1, p1);
+        assertNotEquals(p0, p1);
+        assertNotEquals(p1, p0);
     }
 
 }

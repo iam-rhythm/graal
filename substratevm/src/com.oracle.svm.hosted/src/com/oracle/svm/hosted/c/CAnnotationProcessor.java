@@ -28,19 +28,26 @@ import static com.oracle.svm.core.util.VMError.shouldNotReachHere;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
 
-import com.oracle.svm.core.OS;
+import org.graalvm.nativeimage.ImageSingletons;
+import org.graalvm.nativeimage.Platform;
+
+import com.oracle.svm.core.SubstrateOptions;
+import com.oracle.svm.core.SubstrateUtil;
 import com.oracle.svm.core.util.InterruptImageBuilding;
 import com.oracle.svm.core.util.UserError;
+import com.oracle.svm.core.util.VMError;
+import com.oracle.svm.hosted.DeadlockWatchdog;
 import com.oracle.svm.hosted.c.codegen.CCompilerInvoker;
 import com.oracle.svm.hosted.c.codegen.QueryCodeWriter;
 import com.oracle.svm.hosted.c.info.InfoTreeBuilder;
 import com.oracle.svm.hosted.c.info.NativeCodeInfo;
+import com.oracle.svm.hosted.c.libc.HostedLibCBase;
 import com.oracle.svm.hosted.c.query.QueryResultParser;
 import com.oracle.svm.hosted.c.query.RawStructureLayoutPlanner;
 import com.oracle.svm.hosted.c.query.SizeAndSignednessVerifier;
@@ -48,16 +55,33 @@ import com.oracle.svm.hosted.c.query.SizeAndSignednessVerifier;
 /**
  * Processes native library information for one C Library header file (one { NativeCodeContext }).
  */
-public class CAnnotationProcessor extends CCompilerInvoker {
+public class CAnnotationProcessor {
 
     private final NativeCodeContext codeCtx;
+    private final NativeLibraries nativeLibs;
+    private CCompilerInvoker compilerInvoker;
+    private Path tempDirectory;
+    private Path queryCodeDirectory;
 
     private NativeCodeInfo codeInfo;
     private QueryCodeWriter writer;
 
-    public CAnnotationProcessor(NativeLibraries nativeLibs, NativeCodeContext codeCtx, Path tempDirectory) {
-        super(nativeLibs, tempDirectory);
+    public CAnnotationProcessor(NativeLibraries nativeLibs, NativeCodeContext codeCtx) {
+        this.nativeLibs = nativeLibs;
         this.codeCtx = codeCtx;
+
+        if (ImageSingletons.contains(CCompilerInvoker.class)) {
+            this.compilerInvoker = ImageSingletons.lookup(CCompilerInvoker.class);
+            this.queryCodeDirectory = compilerInvoker.tempDirectory;
+            this.tempDirectory = compilerInvoker.tempDirectory;
+        } else {
+            assert CAnnotationProcessorCache.Options.UseCAPCache.getValue();
+        }
+
+        if (CAnnotationProcessorCache.Options.QueryCodeDir.hasBeenSet()) {
+            String queryCodeDir = CAnnotationProcessorCache.Options.QueryCodeDir.getValue();
+            this.queryCodeDirectory = FileSystems.getDefault().getPath(queryCodeDir).toAbsolutePath();
+        }
     }
 
     public NativeCodeInfo process(CAnnotationProcessorCache cache) {
@@ -66,22 +90,26 @@ public class CAnnotationProcessor extends CCompilerInvoker {
         if (nativeLibs.getErrors().size() > 0) {
             return codeInfo;
         }
-        if (CAnnotationProcessorCache.Options.UseCAPCache.getValue()) {
-            /* If using a CAP cache, short cut the whole building/compile/execute query. */
-            cache.get(nativeLibs, codeInfo);
-        } else {
+
+        boolean cached = CAnnotationProcessorCache.Options.UseCAPCache.getValue() && cache.get(nativeLibs, codeInfo);
+        if (!cached) {
             /*
              * Generate C source file (the "Query") that will produce the information needed (e.g.,
              * size of struct/union and offsets to their fields, value of enum/macros etc.).
              */
-            writer = new QueryCodeWriter(tempDirectory);
+            writer = new QueryCodeWriter(queryCodeDirectory);
             Path queryFile = writer.write(codeInfo);
             if (nativeLibs.getErrors().size() > 0) {
                 return codeInfo;
             }
             assert Files.exists(queryFile);
 
+            if (CAnnotationProcessorCache.Options.ExitAfterQueryCodeGeneration.getValue()) {
+                // Only output query code and exit
+                return codeInfo;
+            }
             Path binary = compileQueryCode(queryFile);
+            DeadlockWatchdog.singleton().recordActivity();
             if (nativeLibs.getErrors().size() > 0) {
                 return codeInfo;
             }
@@ -91,27 +119,29 @@ public class CAnnotationProcessor extends CCompilerInvoker {
                 return codeInfo;
             }
         }
-        RawStructureLayoutPlanner.plan(nativeLibs, codeInfo);
 
+        RawStructureLayoutPlanner.plan(nativeLibs, codeInfo);
         SizeAndSignednessVerifier.verify(nativeLibs, codeInfo);
         return codeInfo;
     }
 
     private void makeQuery(CAnnotationProcessorCache cache, String binaryName) {
-        List<String> command = new ArrayList<>();
-        command.add(binaryName);
         Process printingProcess = null;
         try {
-            printingProcess = startCommand(command);
-            InputStream is = printingProcess.getInputStream();
-            List<String> lines = QueryResultParser.parse(nativeLibs, codeInfo, is);
-            is.close();
-            if (CAnnotationProcessorCache.Options.NewCAPCache.getValue()) {
-                cache.put(codeInfo, lines);
+            ProcessBuilder pb = new ProcessBuilder().command(binaryName).directory(tempDirectory.toFile());
+            printingProcess = pb.start();
+            try (InputStream is = printingProcess.getInputStream()) {
+                List<String> lines = QueryResultParser.parse(nativeLibs, codeInfo, is);
+                if (CAnnotationProcessorCache.Options.NewCAPCache.getValue()) {
+                    cache.put(codeInfo, lines);
+                }
             }
             printingProcess.waitFor();
         } catch (IOException ex) {
-            throw shouldNotReachHere(ex);
+            throw shouldNotReachHere(
+                            "Unable to run '" + binaryName +
+                                            "' to compute offsets in C data structures. Is it possible that your antivirus software interferes and puts the resulting file into quarantine?",
+                            ex);
         } catch (InterruptedException e) {
             throw new InterruptImageBuilding();
         } finally {
@@ -122,20 +152,26 @@ public class CAnnotationProcessor extends CCompilerInvoker {
     }
 
     private Path compileQueryCode(Path queryFile) {
-        /* remove the '.c' or '.cpp' from the end to get the binary name */
-        String binaryName = queryFile.toString().substring(0, queryFile.toString().lastIndexOf("."));
-        if (OS.getCurrent() == OS.WINDOWS) {
-            binaryName = binaryName + ".exe";
+        /* replace the '.c' or '.cpp' from the end to get the binary name */
+        Path fileNamePath = queryFile.getFileName();
+        if (fileNamePath == null) {
+            throw VMError.shouldNotReachHere(queryFile + " invalid queryFile");
         }
-        Path binary = Paths.get(binaryName);
-        return compileAndParseError(codeCtx.getDirectives().getOptions(), queryFile.normalize(), binary.normalize());
+        String fileName = fileNamePath.toString();
+        Path binary = tempDirectory.resolve(compilerInvoker.asExecutableName(fileName.substring(0, fileName.lastIndexOf("."))));
+        ArrayList<String> options = new ArrayList<>();
+        options.addAll(codeCtx.getDirectives().getOptions());
+        if (Platform.includedIn(Platform.LINUX.class)) {
+            options.addAll(HostedLibCBase.singleton().getAdditionalQueryCodeCompilerOptions());
+        }
+        compilerInvoker.compileAndParseError(SubstrateOptions.StrictQueryCodeCompilation.getValue(), options, queryFile, binary, this::reportCompilerError);
+        return binary;
     }
 
-    @Override
-    protected void reportCompilerError(Path queryFile, String line) {
+    protected void reportCompilerError(ProcessBuilder current, Path queryFile, String line) {
         for (String header : codeCtx.getDirectives().getHeaderFiles()) {
             if (line.contains(header.substring(1, header.length() - 1) + ": No such file or directory")) {
-                UserError.abort("Basic header file missing (" + header + "). Make sure headers are available on your system.");
+                UserError.abort("Basic header file missing (%s). Make sure headers are available on your system.", header);
             }
         }
         List<Object> elements = new ArrayList<>();
@@ -160,6 +196,12 @@ public class CAnnotationProcessor extends CCompilerInvoker {
             }
         }
 
-        nativeLibs.getErrors().add(new CInterfaceError("Error compiling query code (in " + queryFile + "). Compiler command " + lastExecutedCommand() + " output included error: " + line, elements));
+        CInterfaceError error = new CInterfaceError(
+                        String.format("Error compiling query code (in %s). Compiler command '%s' output included error: %s",
+                                        queryFile,
+                                        SubstrateUtil.getShellCommandString(current.command(), false),
+                                        line),
+                        elements);
+        nativeLibs.getErrors().add(error);
     }
 }

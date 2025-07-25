@@ -24,24 +24,32 @@
  */
 package com.oracle.svm.core.heap;
 
-import java.lang.management.MemoryMXBean;
+import java.lang.ref.Reference;
+import java.lang.ref.ReferenceQueue;
 import java.util.List;
+import java.util.function.Consumer;
 
-import org.graalvm.compiler.api.replacements.Fold;
 import org.graalvm.nativeimage.ImageSingletons;
 import org.graalvm.nativeimage.IsolateThread;
 import org.graalvm.nativeimage.Platform;
 import org.graalvm.nativeimage.Platforms;
+import org.graalvm.word.Pointer;
+import org.graalvm.word.UnsignedWord;
 
-import com.oracle.svm.core.annotate.Uninterruptible;
+import com.oracle.svm.core.Uninterruptible;
+import com.oracle.svm.core.hub.DynamicHub;
+import com.oracle.svm.core.hub.PredefinedClassesSupport;
+import com.oracle.svm.core.identityhashcode.IdentityHashCodeSupport;
+import com.oracle.svm.core.log.Log;
+import com.oracle.svm.core.option.RuntimeOptionKey;
+import com.oracle.svm.core.snippets.KnownIntrinsics;
+
+import jdk.graal.compiler.api.replacements.Fold;
 
 public abstract class Heap {
+    protected long startOffset;
 
-    /**
-     * Retuns the singleton {@link Heap} implementation that is created during image generation.
-     */
     @Fold
-    // Lookup is @Fold, so inlining is safe.
     public static Heap getHeap() {
         return ImageSingletons.lookup(Heap.class);
     }
@@ -50,49 +58,211 @@ public abstract class Heap {
     protected Heap() {
     }
 
+    /** Verifies that the image heap was mapped correctly. */
+    @Uninterruptible(reason = "Called during startup.")
+    public abstract boolean verifyImageHeapMapping();
+
+    /**
+     * Notifies the heap that a new thread was attached to the VM. This allows to initialize
+     * heap-specific datastructures, e.g., the TLAB.
+     */
+    @Uninterruptible(reason = "Called during startup.")
+    public abstract void attachThread(IsolateThread isolateThread);
+
+    /**
+     * Notifies the heap that a thread will be detached from the VM. This allows to cleanup
+     * heap-specific resources, e.g., the TLAB. This method is called for every thread except the
+     * main thread (i.e., the one that maps the image heap).
+     */
+    @Uninterruptible(reason = "Thread is detaching and holds the THREAD_MUTEX.")
+    public abstract void detachThread(IsolateThread isolateThread);
+
     public abstract void suspendAllocation();
 
     public abstract void resumeAllocation();
 
-    public abstract void disableAllocation(IsolateThread vmThread);
-
-    /** Allocation is disallowed if ... */
     @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     public abstract boolean isAllocationDisallowed();
 
-    /** Create a PinnedAllocator. */
-    public abstract PinnedAllocator createPinnedAllocator();
-
-    /*
-     * Collection methods.
-     */
-
     public abstract GC getGC();
 
-    /*
-     * Other interface methods for the rest of the virtual machine.
-     */
+    public abstract RuntimeCodeInfoGCSupport getRuntimeCodeInfoGCSupport();
 
-    /** Walk all the Objects in the Heap, passing each to the visitor. */
+    /**
+     * Walk all the objects in the heap. Must only be executed as part of a VM operation that causes
+     * a safepoint.
+     */
     public abstract void walkObjects(ObjectVisitor visitor);
 
-    /** Return a list of all the classes in the heap. */
-    public abstract List<Class<?>> getClassList();
+    /**
+     * Walk all native image heap objects. Must only be executed as part of a VM operation that
+     * causes a safepoint.
+     */
+    public abstract void walkImageHeapObjects(ObjectVisitor visitor);
+
+    /**
+     * Walk all heap objects except the native image heap objects. Must only be executed as part of
+     * a VM operation that causes a safepoint.
+     */
+    public abstract void walkCollectedHeapObjects(ObjectVisitor visitor);
+
+    /** Returns the number of classes in the heap (initialized as well as uninitialized). */
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public abstract int getClassCount();
+
+    /** Visits all loaded classes in the heap (see {@link PredefinedClassesSupport}). */
+    public void visitLoadedClasses(Consumer<Class<?>> visitor) {
+        for (Class<?> clazz : getAllClasses()) {
+            if (DynamicHub.fromClass(clazz).isLoaded()) {
+                visitor.accept(clazz);
+            }
+        }
+    }
+
+    /**
+     * Get all known classes. Intentionally protected to prevent access to classes that have not
+     * been "loaded" yet, see {@link PredefinedClassesSupport}.
+     */
+    protected abstract List<Class<?>> getAllClasses();
 
     /**
      * Get the ObjectHeader implementation that this Heap uses.
-     *
-     * TODO: This is used during native image generation to put appropriate headers on Objects in
-     * the native image heap. Is there any reason to expose the whole ObjectHeader interface, since
-     * only setBootImageOnLong(0L) is used then, to get the native image object header bits?
-     *
-     * TODO: Would an "Unsigned getBootImageObjectHeaderBits()" method be sufficient?
      */
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     public abstract ObjectHeader getObjectHeader();
 
-    /** Get the MemoryMXBean for this heap. */
-    public abstract MemoryMXBean getMemoryMXBean();
+    /** Tear down the heap and free all allocated virtual memory chunks. */
+    @Uninterruptible(reason = "Tear-down in progress.")
+    public abstract boolean tearDown();
 
-    /** Tear down the heap, return all allocated virtual memory chunks to VirtualMemoryProvider. */
-    public abstract void tearDown();
+    /** Prepare the heap for a safepoint. */
+    public abstract void prepareForSafepoint();
+
+    /** Reset the heap to the normal execution state. */
+    public abstract void endSafepoint();
+
+    /** Returns a multiple to which the heap address space should be aligned to at runtime. */
+    @Fold
+    public abstract int getPreferredAddressSpaceAlignment();
+
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public Pointer getImageHeapStart() {
+        return KnownIntrinsics.heapBase().add(Heap.getHeap().getImageHeapOffsetInAddressSpace());
+    }
+
+    /**
+     * Returns an offset relative to the heap base, at which the image heap should be mapped into
+     * the address space.
+     */
+    @Fold
+    public abstract int getImageHeapOffsetInAddressSpace();
+
+    /**
+     * Returns true if the given object is located in the image heap.
+     */
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public abstract boolean isInImageHeap(Object object);
+
+    /**
+     * Returns true if the object at the given address is located in the image heap. Depending on
+     * the used GC, this method may only work reliably for pointers that point to the start of an
+     * object.
+     */
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public abstract boolean isInImageHeap(Pointer objectPtr);
+
+    /** Whether the object is in the primary image heap, as opposed to an auxiliary image heap. */
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public abstract boolean isInPrimaryImageHeap(Object object);
+
+    /** Whether the object is in the primary image heap, as opposed to an auxiliary image heap. */
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public abstract boolean isInPrimaryImageHeap(Pointer objectPtr);
+
+    /**
+     * If the automatic reference handling is disabled (see
+     * {@link com.oracle.svm.core.SubstrateOptions.ConcealedOptions#AutomaticReferenceHandling}),
+     * then this method can be called to do the reference handling manually. On execution, the
+     * current thread will enqueue pending {@link Reference}s into their corresponding
+     * {@link ReferenceQueue}s and it will execute pending cleaners.
+     *
+     * This method must not be called from within a VM operation as this could result in deadlocks.
+     * Furthermore, it is up to the caller to ensure that this method is only called in places where
+     * neither the reference handling nor the cleaner execution can cause any unexpected side
+     * effects on the application behavior.
+     *
+     * If the automatic reference handling is enabled, then this method is a no-op.
+     */
+    public abstract void doReferenceHandling();
+
+    /**
+     * Determines if the heap currently has {@link Reference} objects that are pending to be
+     * {@linkplain ReferenceQueue enqueued}.
+     */
+    public abstract boolean hasReferencePendingList();
+
+    /** Blocks until the heap has pending {@linkplain Reference references}. */
+    public abstract void waitForReferencePendingList() throws InterruptedException;
+
+    /** Unblocks any threads in {@link #waitForReferencePendingList()}. */
+    public abstract void wakeUpReferencePendingListWaiters();
+
+    /**
+     * Atomically get the list of pending {@linkplain Reference references} and clears (resets) it.
+     * May return {@code null}.
+     */
+    public abstract Reference<?> getAndClearReferencePendingList();
+
+    /**
+     * If the passed value is within the Java heap, this method prints some information about that
+     * value and returns true. Otherwise, the method returns false.
+     */
+    public abstract boolean printLocationInfo(Log log, UnsignedWord value, boolean allowJavaHeapAccess, boolean allowUnsafeOperations);
+
+    /**
+     * Notify the GC that the value of a GC-relevant option changed.
+     */
+    public abstract void optionValueChanged(RuntimeOptionKey<?> key);
+
+    /**
+     * Returns the number of bytes that were allocated by the given thread. The caller of this
+     * method must ensure that the given {@link IsolateThread} remains alive during the execution of
+     * this method.
+     */
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public abstract long getThreadAllocatedMemory(IsolateThread thread);
+
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public abstract UnsignedWord getUsedMemoryAfterLastGC();
+
+    public abstract UnsignedWord getImageHeapReservedBytes();
+
+    public abstract UnsignedWord getImageHeapCommittedBytes();
+
+    /** Consider all references in the given object as needing remembered set entries. */
+    @Uninterruptible(reason = "Ensure that no GC can occur between modification of the object and this call.", callerMustBe = true)
+    public abstract void dirtyAllReferencesOf(Object obj);
+
+    /**
+     * Returns the longest time (in ms) that has elapsed since the last time that the whole heap has
+     * been examined by a garbage collection.
+     */
+    public abstract long getMillisSinceLastWholeHeapExamined();
+
+    /**
+     * Retrieves a salt value for computing the {@linkplain System#identityHashCode identity hash
+     * code} of the passed object (and potentially other objects) from its address. The same salt
+     * value will be returned for this object at least until the next garbage collection.
+     *
+     * Implementations must use {@link IdentityHashCodeSupport#IDENTITY_HASHCODE_SALT_LOCATION}.
+     */
+    @Uninterruptible(reason = "Ensure that no GC can occur between this call and usage of the salt.", callerMustBe = true)
+    public abstract long getIdentityHashSalt(Object obj);
+
+    /**
+     * Sets the start offset of the heap.
+     */
+    public void setStartOffset(long startOffset) {
+        this.startOffset = startOffset;
+    }
 }

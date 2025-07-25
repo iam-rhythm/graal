@@ -19,6 +19,13 @@ If you want to run a JMH benchmark in an [**external jar**](#external-jar), try:
 mx benchmark jmh-jar:* -- --jmh-jar=path/to/benchmarks.jar --jvm-config=graal-core
 ```
 
+If you want to run a Truffle JMH benchmark, try:
+
+```
+cd compiler
+mx benchmark truffle:JMH_1_21 -- -Djdk.graal.CompileGraalWithC1Only=false -- BenchmarkName
+```
+
 If you do not know or want to learn more, continue reading.
 
 ---
@@ -43,7 +50,7 @@ The optional `--jvm-name` option to set a benchmark suite name suffix in the `re
 ```
 mx benchmark jmh-jar:* --results-file=results.json -- --jmh-name=acme-benchmarks --jmh-jar=path/to/benchmarks.jar --jvm-config=graal-core
 ```
-See [mx documentation][mx external-jar] for further in sights.
+See [mx documentation][mx external-jar] for further insights.
 
 ## *Normal* JMH Benchmarks in the Graal Repository (Blackbox) <a name="dist"></a>
 
@@ -51,7 +58,7 @@ The next category are *normal* JMH benchmarks that are located in the Graal repo
 *Normal* in the sense that they do not depend on Graal internals.
 The `ArrayListBenchmark`, for example, benchmarks the performance of array lists.
 Although it targets a specific optimization in Graal, it does not know about Graal internals.
-I is possible to run it on any JVM.
+It is possible to run it on any JVM.
 It could also be in an external jar file, but for convenience it is located next to the Graal code.
 
 Creating such an in-repo benchmark is a two-step procedure.
@@ -97,7 +104,7 @@ mx benchmark jmh-dist:* --results-file=results.json -- --jvm-config=graal-core
 ```
 
 The command above will run all [JMH] benchmarks that are not *whitebox benchmarks* (see [below](#whitebox)).
-Note that the `bench.suite` dimension in the `results.json` file will be the name
+Note that the `bench-suite` dimension in the `results.json` file will be the name
 of distribution, prefixed with `jmh-`.
 So organizing the benchmarks in multiple distributions might be worth to consider.
 
@@ -108,7 +115,7 @@ For more infos please refer to the [mx documentation][mx in-repo].
 Although the setup of Graal *whitebox* benchmarks is similar to the *blackbox* benchmarks,
 their purpose is a very different.
 
-Similar to *whitbox testing*, the goal of a *whitebox benchmark* is to stress an
+Similar to *whitebox testing*, the goal of a *whitebox benchmark* is to stress an
 internal part of the compiler, e.g., a specific *phase*.
 To do so, these *benchmark projects* depend on compiler projects.
 In order to make those projects visible in the [JMH] forks we need to execute the JVM with the `-XX:-UseJVMCIClassLoader` flag.
@@ -126,7 +133,7 @@ mx benchmark jmh-whitebox:* --results-file=results.json -- --jvm-config=graal-co
 
 The command above runs all *whitebox* benchmarks.
 That are all benchmark distributions that have either a dependency on a `GRAAL*` distribution,
-or include projects starting with `org.graalvm.compiler` in their distribution jar.
+or include projects starting with `jdk.graal.compiler` in their distribution jar.
 
 
 Refer to the [mx documentation][mx in-repo] for further information.

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2014, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -42,10 +42,15 @@ package com.oracle.truffle.api.profiles;
 
 import com.oracle.truffle.api.CompilerDirectives;
 import com.oracle.truffle.api.CompilerDirectives.CompilationFinal;
+import com.oracle.truffle.api.dsl.InlineSupport.InlineTarget;
+import com.oracle.truffle.api.dsl.NeverDefault;
 
 /**
  * <p>
- * ConditionProfiles are useful to profile the outcome of conditions.
+ * ConditionProfiles are useful to profile the outcome of conditions. A regular condition profile
+ * keeps track of a binary state, for each branch whether a branch was hit or not and communicates
+ * this to the compiler. If frequency information for each branch should be collected use
+ * {@link CountingConditionProfile} instead.
  * </p>
  *
  * <p>
@@ -54,7 +59,7 @@ import com.oracle.truffle.api.CompilerDirectives.CompilationFinal;
  * <pre>
  * class AbsoluteNode extends Node {
  *
- *     final ConditionProfile greaterZeroProfile = ConditionProfile.create{Binary,Counting}Profile();
+ *     final ConditionProfile greaterZeroProfile = ConditionProfile.create();
  *
  *     void execute(int value) {
  *         if (greaterZeroProfile.profile(value >= 0)) {
@@ -66,38 +71,114 @@ import com.oracle.truffle.api.CompilerDirectives.CompilationFinal;
  * }
  * </pre>
  *
- * {@inheritDoc}
- *
- * @see #createBinaryProfile()
- * @see #createCountingProfile()
+ * @see #create()
  * @see LoopConditionProfile
+ * @see CountingConditionProfile
  * @since 0.10
  */
-public abstract class ConditionProfile extends Profile {
+public class ConditionProfile extends Profile {
+
+    private static final ConditionProfile DISABLED;
+    static {
+        ConditionProfile profile = new ConditionProfile();
+        profile.disable();
+        DISABLED = profile;
+    }
 
     ConditionProfile() {
     }
 
+    @CompilationFinal private boolean wasTrue;
+    @CompilationFinal private boolean wasFalse;
+
     /** @since 0.10 */
-    public abstract boolean profile(boolean value);
+    public boolean profile(boolean value) {
+        if (value) {
+            if (!wasTrue) {
+                CompilerDirectives.transferToInterpreterAndInvalidate();
+                wasTrue = true;
+            }
+            return true;
+        } else {
+            if (!wasFalse) {
+                CompilerDirectives.transferToInterpreterAndInvalidate();
+                wasFalse = true;
+            }
+            return false;
+        }
+    }
 
     /**
-     * Returns a {@link ConditionProfile} that speculates on conditions to be never
-     * <code>true</code> or to be never <code>false</code>. Additionally to a binary profile this
-     * method returns a condition profile that also counts the number of times the condition was
-     * true and false. This information is reported to the underlying optimization system using
-     * {@link CompilerDirectives#injectBranchProbability(double, boolean)}. Condition profiles are
-     * intended to be used as part of if conditions.
+     * {@inheritDoc}
      *
-     * @see ConditionProfile
-     * @see #createBinaryProfile()
-     * @since 0.10
+     * @since 23.0
      */
+    @Override
+    public void disable() {
+        this.wasFalse = true;
+        this.wasTrue = true;
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * @since 23.0
+     */
+    @Override
+    public void reset() {
+        if (this == DISABLED) {
+            return;
+        }
+        this.wasFalse = false;
+        this.wasTrue = false;
+    }
+
+    boolean wasTrue() {
+        return wasTrue;
+    }
+
+    boolean wasFalse() {
+        return wasFalse;
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * @since 23.0
+     */
+    @Override
+    public String toString() {
+        if (this == DISABLED) {
+            return toStringDisabled();
+        } else {
+            return String.format("%s(wasTrue=%s, wasFalse=%s)@%x", getClass().getSimpleName(), wasTrue, wasFalse, hashCode());
+        }
+    }
+
+    /**
+     * @since 0.10
+     * @deprecated use {@link CountingConditionProfile} instead
+     */
+    @Deprecated
     public static ConditionProfile createCountingProfile() {
-        if (Profile.isProfilingEnabled()) {
-            return Counting.create();
+        if (isProfilingEnabled()) {
+            return Counting.createLazyLoadClass();
         } else {
             return Disabled.INSTANCE;
+        }
+    }
+
+    /**
+     * @since 0.10
+     * @deprecated use {@link ConditionProfile#create()} instead.
+     */
+    @Deprecated
+    @NeverDefault
+    public static ConditionProfile createBinaryProfile() {
+        if (isProfilingEnabled()) {
+            return new ConditionProfile();
+        } else {
+            return DISABLED;
         }
     }
 
@@ -106,16 +187,30 @@ public abstract class ConditionProfile extends Profile {
      * <code>true</code> or to be never <code>false</code>. Condition profiles are intended to be
      * used as part of if conditions.
      *
-     * @see ConditionProfile
-     * @see ConditionProfile#createCountingProfile()
-     * @since 0.10
+     * @since 20.2
      */
-    public static ConditionProfile createBinaryProfile() {
-        if (Profile.isProfilingEnabled()) {
-            return Binary.create();
-        } else {
-            return Disabled.INSTANCE;
-        }
+    @NeverDefault
+    public static ConditionProfile create() {
+        return createBinaryProfile();
+    }
+
+    /**
+     * Returns the uncached version of the profile. The uncached version of a profile does nothing.
+     *
+     * @since 19.0
+     */
+    public static ConditionProfile getUncached() {
+        return DISABLED;
+    }
+
+    /**
+     * Returns an inlined version of the profile. This version is automatically used by Truffle DSL
+     * node inlining.
+     *
+     * @since 23.0
+     */
+    public static InlinedConditionProfile inline(InlineTarget target) {
+        return InlinedConditionProfile.inline(target);
     }
 
     static final class Disabled extends ConditionProfile {
@@ -134,11 +229,14 @@ public abstract class ConditionProfile extends Profile {
 
         @Override
         public String toString() {
-            return toStringDisabled(ConditionProfile.class);
+            return toStringDisabled();
         }
 
     }
 
+    /*
+     * Code to be removed with deprecated API. New code lives in CountingConditionProfile.
+     */
     static final class Counting extends ConditionProfile {
 
         @CompilationFinal private int trueCount;
@@ -159,9 +257,14 @@ public abstract class ConditionProfile extends Profile {
             // locals required to guarantee no overflow in multi-threaded environments
             int t = trueCount;
             int f = falseCount;
-            if (value) {
+            boolean val = value;
+            if (val) {
                 if (t == 0) {
                     CompilerDirectives.transferToInterpreterAndInvalidate();
+                }
+                if (f == 0) {
+                    // Make this branch fold during PE
+                    val = true;
                 }
                 if (CompilerDirectives.inInterpreter()) {
                     if (t < MAX_VALUE) {
@@ -172,6 +275,10 @@ public abstract class ConditionProfile extends Profile {
                 if (f == 0) {
                     CompilerDirectives.transferToInterpreterAndInvalidate();
                 }
+                if (t == 0) {
+                    // Make this branch fold during PE
+                    val = false;
+                }
                 if (CompilerDirectives.inInterpreter()) {
                     if (f < MAX_VALUE) {
                         falseCount = f + 1;
@@ -180,11 +287,27 @@ public abstract class ConditionProfile extends Profile {
             }
             if (CompilerDirectives.inInterpreter()) {
                 // no branch probability calculation in the interpreter
-                return value;
+                return val;
             } else {
                 int sum = t + f;
-                return CompilerDirectives.injectBranchProbability((double) t / (double) sum, value);
+                return CompilerDirectives.injectBranchProbability((double) t / (double) sum, val);
             }
+        }
+
+        @Override
+        public void disable() {
+            if (this.trueCount == 0) {
+                this.trueCount = 1;
+            }
+            if (this.falseCount == 0) {
+                this.falseCount = 1;
+            }
+        }
+
+        @Override
+        public void reset() {
+            this.trueCount = 0;
+            this.falseCount = 0;
         }
 
         int getTrueCount() {
@@ -205,58 +328,8 @@ public abstract class ConditionProfile extends Profile {
         }
 
         /* Needed for lazy class loading. */
-        static ConditionProfile create() {
+        static ConditionProfile createLazyLoadClass() {
             return new Counting();
-        }
-    }
-
-    /**
-     * Utility class to speculate on conditions to be never true or to be never false. Condition
-     * profiles are intended to be used as part of if conditions.
-     *
-     * @see ConditionProfile#createBinaryProfile()
-     */
-    static final class Binary extends ConditionProfile {
-
-        @CompilationFinal private boolean wasTrue;
-        @CompilationFinal private boolean wasFalse;
-
-        Binary() {
-        }
-
-        @Override
-        public boolean profile(boolean value) {
-            if (value) {
-                if (!wasTrue) {
-                    CompilerDirectives.transferToInterpreterAndInvalidate();
-                    wasTrue = true;
-                }
-                return true;
-            } else {
-                if (!wasFalse) {
-                    CompilerDirectives.transferToInterpreterAndInvalidate();
-                    wasFalse = true;
-                }
-                return false;
-            }
-        }
-
-        boolean wasTrue() {
-            return wasTrue;
-        }
-
-        boolean wasFalse() {
-            return wasFalse;
-        }
-
-        @Override
-        public String toString() {
-            return String.format("%s(wasTrue=%s, wasFalse=%s)@%x", getClass().getSimpleName(), wasTrue, wasFalse, hashCode());
-        }
-
-        /* Needed for lazy class loading. */
-        static ConditionProfile create() {
-            return new Binary();
         }
     }
 

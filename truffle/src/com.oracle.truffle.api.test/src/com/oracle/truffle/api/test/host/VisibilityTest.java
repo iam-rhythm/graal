@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -41,13 +41,14 @@
 package com.oracle.truffle.api.test.host;
 
 import org.junit.Assert;
+import org.junit.BeforeClass;
 import org.junit.Test;
 
-import com.oracle.truffle.api.interop.ForeignAccess;
 import com.oracle.truffle.api.interop.InteropException;
-import com.oracle.truffle.api.interop.Message;
+import com.oracle.truffle.api.interop.InteropLibrary;
 import com.oracle.truffle.api.interop.TruffleObject;
 import com.oracle.truffle.api.interop.UnknownIdentifierException;
+import com.oracle.truffle.tck.tests.TruffleTestAssumptions;
 
 public class VisibilityTest extends ProxyLanguageEnvTest {
     private static Class<?> run;
@@ -230,6 +231,11 @@ public class VisibilityTest extends ProxyLanguageEnvTest {
         // may or may not have public bridge method
     }
 
+    @BeforeClass
+    public static void runWithWeakEncapsulationOnly() {
+        TruffleTestAssumptions.assumeWeakEncapsulation();
+    }
+
     @Test
     public void testNonPublicClassPublicSuper() throws InteropException {
         invokeRun(new NP1(), NP1.class);
@@ -267,10 +273,12 @@ public class VisibilityTest extends ProxyLanguageEnvTest {
         invokeRun(new C3(), A8.class, 42);
     }
 
+    private static final InteropLibrary INTEROP = InteropLibrary.getFactory().getUncached();
+
     private Object invokeRun(Object obj, Class<?> methodClass, Object... args) throws InteropException {
         TruffleObject receiver = asTruffleObject(obj);
         try {
-            Object result = ForeignAccess.sendInvoke(Message.INVOKE.createNode(), receiver, "run", args);
+            Object result = INTEROP.invokeMember(receiver, "run", args);
             Assert.assertSame(methodClass, run);
             return result;
         } catch (UnknownIdentifierException uie) {
@@ -332,7 +340,7 @@ public class VisibilityTest extends ProxyLanguageEnvTest {
     private Object read(Object obj, String name) throws InteropException {
         TruffleObject receiver = obj instanceof Class<?> ? asTruffleHostSymbol((Class<?>) obj) : asTruffleObject(obj);
         try {
-            return ForeignAccess.sendRead(Message.READ.createNode(), receiver, name);
+            return INTEROP.readMember(receiver, name);
         } catch (UnknownIdentifierException uie) {
             return null;
         }

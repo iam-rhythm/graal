@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -45,11 +45,13 @@ import static com.oracle.truffle.api.dsl.test.TestHelper.assertRuns;
 
 import org.junit.Test;
 
+import com.oracle.truffle.api.dsl.GenerateInline;
 import com.oracle.truffle.api.dsl.ImportStatic;
 import com.oracle.truffle.api.dsl.NodeChild;
 import com.oracle.truffle.api.dsl.Specialization;
 import com.oracle.truffle.api.dsl.test.ImportGuardsTestFactory.ImportGuards6Factory;
 import com.oracle.truffle.api.dsl.test.TypeSystemTest.ValueNode;
+import com.oracle.truffle.api.nodes.Node;
 
 public class ImportGuardsTest {
 
@@ -61,6 +63,17 @@ public class ImportGuardsTest {
         int f0(int a) {
             return a;
         }
+
+        @Specialization(guards = "protectedGuard(a)")
+        int f2(int a) {
+            return a;
+        }
+
+        @Specialization(guards = "packageGuard(a)")
+        int f3(int a) {
+            return a;
+        }
+
     }
 
     @NodeChild("a")
@@ -70,18 +83,6 @@ public class ImportGuardsTest {
         @ExpectError("Error parsing expression 'nonStaticGuard(a)': The method nonStaticGuard is undefined for the enclosing scope.")
         @Specialization(guards = "nonStaticGuard(a)")
         int f1(int a) {
-            return a;
-        }
-
-        @ExpectError("Error parsing expression 'protectedGuard(a)': The method protectedGuard is undefined for the enclosing scope.")
-        @Specialization(guards = "protectedGuard(a)")
-        int f2(int a) {
-            return a;
-        }
-
-        @ExpectError("Error parsing expression 'packageGuard(a)': The method packageGuard is undefined for the enclosing scope.")
-        @Specialization(guards = "packageGuard(a)")
-        int f3(int a) {
             return a;
         }
 
@@ -116,7 +117,6 @@ public class ImportGuardsTest {
 
     }
 
-    @ExpectError("The specified import guard class 'com.oracle.truffle.api.dsl.test.ImportGuardsTest.Imports1' must be public.")
     @NodeChild("a")
     @ImportStatic(Imports1.class)
     static class ImportGuards2 extends ValueNode {
@@ -130,7 +130,6 @@ public class ImportGuardsTest {
 
     }
 
-    @ExpectError("The specified import guard class 'com.oracle.truffle.api.dsl.test.ImportGuardsTest.Imports2' must be public.")
     @NodeChild("a")
     @ImportStatic(Imports2.class)
     static class ImportGuards3 extends ValueNode {
@@ -140,7 +139,6 @@ public class ImportGuardsTest {
         }
     }
 
-    @ExpectError("The specified import guard class 'boolean' is not a declared type.")
     @NodeChild("a")
     @ImportStatic(boolean.class)
     static class ImportGuards4 extends ValueNode {
@@ -150,11 +148,10 @@ public class ImportGuardsTest {
         }
     }
 
-    private static class Imports2 {
+    private static final class Imports2 {
 
     }
 
-    @ExpectError("At least import guard classes must be specified.")
     @NodeChild("a")
     @ImportStatic({})
     static class ImportGuards5 extends ValueNode {
@@ -183,6 +180,43 @@ public class ImportGuardsTest {
         @Specialization(guards = "staticGuard(a)")
         int f0(int a) {
             return a;
+        }
+    }
+
+    @GenerateInline(false)
+    @SuppressWarnings("unused")
+    abstract static class ImportSpecializations1Node extends Node {
+
+        public abstract int execute(Object target);
+
+        @Specialization
+        int doString(String target) {
+            return 1;
+        }
+
+        @Specialization(replaces = "doString") // Line 57
+        static int doGeneric(Object target) {
+            return 2;
+        }
+    }
+
+    // this should not pick, up specializations from the other node
+    @ImportStatic(ImportSpecializations1Node.class)
+    @GenerateInline(false)
+    @SuppressWarnings("unused")
+    abstract static class ImportSpecializations2Node extends Node {
+
+        public abstract boolean execute(Object target);
+
+        // this guard should pick up doGeneric method still from ImportSpecializations1Node
+        @Specialization(guards = "doGeneric(target)")
+        boolean doString(String target) {
+            return false;
+        }
+
+        @Specialization(replaces = "doString")
+        static boolean doGeneric(Object target) {
+            return false;
         }
     }
 

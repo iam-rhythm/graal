@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2019, Oracle and/or its affiliates.
+ * Copyright (c) 2016, 2023, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -33,13 +33,15 @@ import java.nio.ByteBuffer;
 
 import com.oracle.truffle.llvm.parser.model.SymbolImpl;
 import com.oracle.truffle.llvm.parser.model.symbols.constants.AbstractConstant;
+import com.oracle.truffle.llvm.parser.scanner.RecordBuffer;
 import com.oracle.truffle.llvm.runtime.except.LLVMParserException;
 import com.oracle.truffle.llvm.runtime.types.PrimitiveType;
 import com.oracle.truffle.llvm.runtime.types.Type;
 
 public abstract class FloatingPointConstant extends AbstractConstant {
 
-    private static final int X86_FP80_BYTES = PrimitiveType.X86_FP80.getBitSize() / Byte.SIZE;
+    private static final int X86_FP80_BYTES = Math.toIntExact(PrimitiveType.X86_FP80.getBitSize() / Byte.SIZE);
+    private static final int FP128_BYTES = Math.toIntExact(PrimitiveType.F128.getBitSize() / Byte.SIZE);
 
     FloatingPointConstant(Type type) {
         super(type);
@@ -47,16 +49,23 @@ public abstract class FloatingPointConstant extends AbstractConstant {
 
     public abstract String getStringValue();
 
-    public static FloatingPointConstant create(Type type, long[] bits) {
+    public static FloatingPointConstant create(Type type, RecordBuffer buffer) {
         switch (((PrimitiveType) type).getPrimitiveKind()) {
             case FLOAT:
-                return new FloatConstant(Float.intBitsToFloat((int) bits[0]));
+                return new FloatConstant(Float.intBitsToFloat(buffer.readInt()));
 
             case DOUBLE:
-                return new DoubleConstant(Double.longBitsToDouble(bits[0]));
+                return new DoubleConstant(Double.longBitsToDouble(buffer.read()));
 
             case X86_FP80:
-                return new X86FP80Constant(ByteBuffer.allocate(X86_FP80_BYTES).putLong(bits[0]).putShort((short) bits[1]).array());
+                long fraction = buffer.read();
+                short signExp = (short) buffer.read();
+                return new X86FP80Constant(ByteBuffer.allocate(X86_FP80_BYTES).putLong(fraction).putShort(signExp).array());
+
+            case F128:
+                fraction = buffer.read();
+                long signExpFraction = buffer.read();
+                return new FP128Constant(ByteBuffer.allocate(FP128_BYTES).putLong(fraction).putLong(signExpFraction).array());
 
             default:
                 throw new LLVMParserException("Unsupported Floating Point Type: " + type);

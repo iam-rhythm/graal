@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, Oracle and/or its affiliates.
+ * Copyright (c) 2018, 2021, Oracle and/or its affiliates.
  *
  * All rights reserved.
  *
@@ -34,34 +34,46 @@ import java.util.Objects;
 import com.oracle.truffle.api.CompilerAsserts;
 import com.oracle.truffle.api.CompilerDirectives;
 import com.oracle.truffle.api.CompilerDirectives.ValueType;
-import com.oracle.truffle.api.interop.ForeignAccess;
-import com.oracle.truffle.api.interop.InteropException;
-import com.oracle.truffle.api.interop.TruffleObject;
+import com.oracle.truffle.api.dsl.Cached;
+import com.oracle.truffle.api.library.DynamicDispatchLibrary;
+import com.oracle.truffle.api.library.ExportLibrary;
+import com.oracle.truffle.api.library.ExportMessage;
+import com.oracle.truffle.api.profiles.ConditionProfile;
 import com.oracle.truffle.llvm.runtime.interop.access.LLVMInteropType;
-import com.oracle.truffle.llvm.runtime.interop.export.LLVMPointerMessageResolutionForeign;
-import com.oracle.truffle.llvm.runtime.nodes.api.LLVMObjectNativeLibrary;
 
 @ValueType
-class LLVMPointerImpl implements LLVMManagedPointer, LLVMNativePointer, LLVMObjectNativeLibrary.Provider {
+@ExportLibrary(value = DynamicDispatchLibrary.class, useForAOT = true)
+final class LLVMPointerImpl implements LLVMManagedPointer, LLVMNativePointer {
 
-    private final TruffleObject object;
+    static final LLVMPointerImpl NULL = new LLVMPointerImpl(null, 0, null);
+
+    final Object object;
     private final long offset;
 
     private final LLVMInteropType exportType;
 
-    LLVMPointerImpl(TruffleObject object, long offset, LLVMInteropType exportType) {
+    LLVMPointerImpl(Object object, long offset, LLVMInteropType exportType) {
         this.object = object;
         this.offset = offset;
         this.exportType = exportType;
     }
 
     @Override
+    @Deprecated
+    @SuppressWarnings("deprecation")
     public boolean equals(Object obj) {
+        CompilerAsserts.neverPartOfCompilation();
         if (!(obj instanceof LLVMPointerImpl)) {
             return false;
         }
         LLVMPointerImpl other = (LLVMPointerImpl) obj;
         return Objects.equals(this.object, other.object) && this.offset == other.offset;
+    }
+
+    @Override
+    public boolean isSame(LLVMPointer o) {
+        LLVMPointerImpl other = (LLVMPointerImpl) o; // cannot fail, there is only one subclass
+        return this.object == other.object && this.offset == other.offset;
     }
 
     @Override
@@ -87,7 +99,7 @@ class LLVMPointerImpl implements LLVMManagedPointer, LLVMNativePointer, LLVMObje
     }
 
     @Override
-    public TruffleObject getObject() {
+    public Object getObject() {
         assert isManaged();
         return object;
     }
@@ -138,102 +150,13 @@ class LLVMPointerImpl implements LLVMManagedPointer, LLVMNativePointer, LLVMObje
         }
     }
 
-    @Override
-    public ForeignAccess getForeignAccess() {
-        return LLVMPointerMessageResolutionForeign.ACCESS;
-    }
-
-    @Override
-    public LLVMObjectNativeLibrary createLLVMObjectNativeLibrary() {
-        if (isManaged()) {
-            return new LLVMManagedPointerNativeLibrary(LLVMObjectNativeLibrary.createCached(getObject()));
+    @ExportMessage
+    Class<?> dispatch(@Cached ConditionProfile isNativeProfile) {
+        if (isNativeProfile.profile(isNative())) {
+            return NativePointerLibraries.class;
         } else {
-            return new LLVMNativePointerNativeLibrary();
-        }
-    }
-
-    private static final class LLVMManagedPointerNativeLibrary extends LLVMObjectNativeLibrary {
-
-        @Child private LLVMObjectNativeLibrary lib;
-
-        private LLVMManagedPointerNativeLibrary(LLVMObjectNativeLibrary lib) {
-            this.lib = lib;
-        }
-
-        @Override
-        public boolean guard(Object obj) {
-            if (LLVMManagedPointer.isInstance(obj)) {
-                LLVMManagedPointer pointer = LLVMManagedPointer.cast(obj);
-                return lib.guard(pointer.getObject());
-            }
-            return false;
-        }
-
-        @Override
-        public boolean isPointer(Object obj) {
-            LLVMManagedPointer pointer = LLVMManagedPointer.cast(obj);
-            if (lib.isPointer(pointer.getObject())) {
-                return true;
-            } else {
-                return lib.isNull(pointer.getObject());
-            }
-        }
-
-        @Override
-        public boolean isNull(Object obj) {
-            LLVMManagedPointer pointer = LLVMManagedPointer.cast(obj);
-            return lib.isNull(pointer.getObject());
-        }
-
-        @Override
-        public long asPointer(Object obj) throws InteropException {
-            LLVMManagedPointer pointer = LLVMManagedPointer.cast(obj);
-            if (lib.isNull(pointer.getObject())) {
-                return pointer.getOffset();
-            } else {
-                long base = lib.asPointer(pointer.getObject());
-                return base + pointer.getOffset();
-            }
-        }
-
-        @Override
-        public Object toNative(Object obj) throws InteropException {
-            LLVMManagedPointer pointer = LLVMManagedPointer.cast(obj);
-            Object nativeBase = lib.toNative(pointer.getObject());
-            // keep exportType, this is still logically pointing to the same thing
-            return new LLVMPointerImpl((TruffleObject) nativeBase, pointer.getOffset(), pointer.getExportType());
-        }
-    }
-
-    private static final class LLVMNativePointerNativeLibrary extends LLVMObjectNativeLibrary {
-
-        private LLVMNativePointerNativeLibrary() {
-        }
-
-        @Override
-        public boolean guard(Object obj) {
-            return LLVMNativePointer.isInstance(obj);
-        }
-
-        @Override
-        public boolean isPointer(Object obj) {
-            return true;
-        }
-
-        @Override
-        public boolean isNull(Object obj) {
-            return LLVMPointer.cast(obj).isNull();
-        }
-
-        @Override
-        public long asPointer(Object obj) throws InteropException {
-            LLVMNativePointer pointer = LLVMNativePointer.cast(obj);
-            return pointer.asNative();
-        }
-
-        @Override
-        public Object toNative(Object obj) throws InteropException {
-            return obj;
+            assert isManaged();
+            return ManagedPointerLibraries.class;
         }
     }
 }

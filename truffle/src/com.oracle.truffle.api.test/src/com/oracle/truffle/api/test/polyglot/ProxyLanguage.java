@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * The Universal Permissive License (UPL), Version 1.0
@@ -45,23 +45,22 @@ import java.util.function.Consumer;
 import org.graalvm.options.OptionDescriptors;
 
 import com.oracle.truffle.api.CallTarget;
-import com.oracle.truffle.api.Scope;
 import com.oracle.truffle.api.TruffleLanguage;
-import com.oracle.truffle.api.frame.Frame;
 import com.oracle.truffle.api.instrumentation.ProvidedTags;
+import com.oracle.truffle.api.instrumentation.StandardTags.CallTag;
 import com.oracle.truffle.api.instrumentation.StandardTags.ExpressionTag;
+import com.oracle.truffle.api.instrumentation.StandardTags.RootBodyTag;
 import com.oracle.truffle.api.instrumentation.StandardTags.RootTag;
 import com.oracle.truffle.api.instrumentation.StandardTags.StatementTag;
 import com.oracle.truffle.api.nodes.ExecutableNode;
 import com.oracle.truffle.api.nodes.Node;
-import com.oracle.truffle.api.source.SourceSection;
 import com.oracle.truffle.api.test.polyglot.ProxyLanguage.LanguageContext;
 
 /**
- * Reusable language for testing that allows wrap all methods.
+ * Reusable language for testing which allows to wrap all methods.
  */
-@TruffleLanguage.Registration(id = ProxyLanguage.ID, name = ProxyLanguage.ID, version = "1.0", contextPolicy = TruffleLanguage.ContextPolicy.SHARED)
-@ProvidedTags({ExpressionTag.class, StatementTag.class, RootTag.class})
+@TruffleLanguage.Registration(id = ProxyLanguage.ID, name = ProxyLanguage.ID, version = "1.0", contextPolicy = TruffleLanguage.ContextPolicy.SHARED, characterMimeTypes = "application/x-proxy-language")
+@ProvidedTags({CallTag.class, ExpressionTag.class, StatementTag.class, RootBodyTag.class, RootTag.class})
 public class ProxyLanguage extends TruffleLanguage<LanguageContext> {
 
     public static final String ID = "proxyLanguage";
@@ -75,6 +74,12 @@ public class ProxyLanguage extends TruffleLanguage<LanguageContext> {
 
         public Env getEnv() {
             return env;
+        }
+
+        private static final ContextReference<LanguageContext> REFERENCE = ContextReference.create(ProxyLanguage.class);
+
+        public static LanguageContext get(Node node) {
+            return REFERENCE.get(node);
         }
     }
 
@@ -93,31 +98,29 @@ public class ProxyLanguage extends TruffleLanguage<LanguageContext> {
         return delegate;
     }
 
+    public static ProxyLanguage getDelegate() {
+        return delegate;
+    }
+
     public void setOnCreate(Consumer<LanguageContext> onCreate) {
         this.onCreate = onCreate;
     }
 
-    public static LanguageContext getCurrentContext() {
-        return getCurrentContext(ProxyLanguage.class);
-    }
+    private static final LanguageReference<ProxyLanguage> REFERENCE = LanguageReference.create(ProxyLanguage.class);
 
-    public static LanguageContext getCurrentLanguageContext(Class<? extends ProxyLanguage> languageClass) {
-        return getCurrentContext(languageClass);
-    }
-
-    public static ProxyLanguage getCurrentLanguage() {
-        return getCurrentLanguage(ProxyLanguage.class);
-    }
-
-    public static ContextReference<LanguageContext> getCurrentContextReference() {
-        return getCurrentLanguage(ProxyLanguage.class).getContextReference();
+    public static ProxyLanguage get(Node node) {
+        return REFERENCE.get(node);
     }
 
     @Override
     protected LanguageContext createContext(com.oracle.truffle.api.TruffleLanguage.Env env) {
         if (wrapper) {
             delegate.languageInstance = this;
-            return delegate.createContext(env);
+            LanguageContext c = delegate.createContext(env);
+            if (delegate.onCreate != null) {
+                delegate.onCreate.accept(c);
+            }
+            return c;
         } else {
             LanguageContext c = new LanguageContext(env);
             if (onCreate != null) {
@@ -127,24 +130,13 @@ public class ProxyLanguage extends TruffleLanguage<LanguageContext> {
         }
     }
 
-    @SuppressWarnings("deprecation")
     @Override
-    protected Object getLanguageGlobal(LanguageContext context) {
+    protected Object getLanguageView(LanguageContext context, Object value) {
         if (wrapper) {
             delegate.languageInstance = this;
-            return delegate.getLanguageGlobal(context);
+            return delegate.getLanguageView(context, value);
         } else {
-            return null;
-        }
-    }
-
-    @Override
-    protected boolean isObjectOfLanguage(Object object) {
-        if (wrapper) {
-            delegate.languageInstance = this;
-            return delegate.isObjectOfLanguage(object);
-        } else {
-            return false;
+            return super.getLanguageView(context, value);
         }
     }
 
@@ -154,6 +146,15 @@ public class ProxyLanguage extends TruffleLanguage<LanguageContext> {
             delegate.finalizeContext(context);
         } else {
             super.finalizeContext(context);
+        }
+    }
+
+    @Override
+    protected void exitContext(LanguageContext context, ExitMode exitMode, int exitCode) {
+        if (wrapper) {
+            delegate.exitContext(context, exitMode, exitCode);
+        } else {
+            super.exitContext(context, exitMode, exitCode);
         }
     }
 
@@ -179,26 +180,6 @@ public class ProxyLanguage extends TruffleLanguage<LanguageContext> {
     }
 
     @Override
-    protected Object findMetaObject(LanguageContext context, Object value) {
-        if (wrapper) {
-            delegate.languageInstance = this;
-            return delegate.findMetaObject(context, value);
-        } else {
-            return value.toString();
-        }
-    }
-
-    @Override
-    protected SourceSection findSourceLocation(LanguageContext context, Object value) {
-        if (wrapper) {
-            delegate.languageInstance = this;
-            return delegate.findSourceLocation(context, value);
-        } else {
-            return super.findSourceLocation(context, value);
-        }
-    }
-
-    @Override
     protected void initializeContext(LanguageContext context) throws Exception {
         if (wrapper) {
             delegate.languageInstance = this;
@@ -207,17 +188,6 @@ public class ProxyLanguage extends TruffleLanguage<LanguageContext> {
             super.initializeContext(context);
         }
 
-    }
-
-    @SuppressWarnings("deprecation")
-    @Override
-    protected boolean initializeMultiContext() {
-        if (wrapper) {
-            delegate.languageInstance = this;
-            return delegate.initializeMultiContext();
-        } else {
-            return super.initializeMultiContext();
-        }
     }
 
     @Override
@@ -281,16 +251,6 @@ public class ProxyLanguage extends TruffleLanguage<LanguageContext> {
     }
 
     @Override
-    protected String toString(LanguageContext context, Object value) {
-        if (wrapper) {
-            delegate.languageInstance = this;
-            return delegate.toString(context, value);
-        } else {
-            return value.toString();
-        }
-    }
-
-    @Override
     protected CallTarget parse(com.oracle.truffle.api.TruffleLanguage.ParsingRequest request) throws Exception {
         if (wrapper) {
             delegate.languageInstance = this;
@@ -301,22 +261,12 @@ public class ProxyLanguage extends TruffleLanguage<LanguageContext> {
     }
 
     @Override
-    protected Iterable<Scope> findTopScopes(LanguageContext context) {
+    protected Object getScope(LanguageContext context) {
         if (wrapper) {
             delegate.languageInstance = this;
-            return delegate.findTopScopes(context);
+            return delegate.getScope(context);
         } else {
-            return super.findTopScopes(context);
-        }
-    }
-
-    @Override
-    protected Iterable<Scope> findLocalScopes(LanguageContext context, Node node, Frame frame) {
-        if (wrapper) {
-            delegate.languageInstance = this;
-            return delegate.findLocalScopes(context, node, frame);
-        } else {
-            return super.findLocalScopes(context, node, frame);
+            return super.getScope(context);
         }
     }
 
